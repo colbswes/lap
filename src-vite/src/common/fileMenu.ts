@@ -376,6 +376,13 @@ export const useFileMenuItems = (
         action: createAction('find-person')
       },
       {
+        label: localeMsg.value.menu.file.scan_faces,
+        icon: markRaw(IconRefresh),
+        hidden: !config.settings.face.enabled,
+        disabled: !isImage,
+        action: createAction('scan-faces')
+      },
+      {
         label: translate('menu.file.not_person', { name: personViewContext.value?.name || '' }),
         icon: markRaw(IconPersonSearch),
         hidden: !config.settings.face.enabled || !personViewContext.value,

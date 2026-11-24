@@ -142,6 +142,12 @@ pub const AI_TOKENIZER: &str = "tokenizer.json";
 // models
 pub const DETECTION_MODEL: &str = "det_500m.onnx"; // RetinaFace
 pub const EMBEDDING_MODEL: &str = "w600k_mbf.onnx"; // MobileFaceNet
+/// DINOv2-base (224px) identity embedding for pet crops; optional (pets are skipped without it).
+/// Rebuild with scripts/export_pet_model.py.
+pub const PET_EMBEDDING_MODEL: &str = "pet_dinov2_base.onnx";
+/// Pet boxes shorter than this (decoded pixels) or less certain than this are low quality.
+pub const PET_LOW_QUALITY_MIN_PX: f32 = 64.0;
+pub const PET_LOW_QUALITY_MIN_CONFIDENCE: f32 = 0.5;
 /// Longest side of the decode used for face indexing (detection runs at 640; embeddings crop from this).
 pub const FACE_DECODE_SIZE: u32 = 1600;
 
@@ -158,10 +164,15 @@ pub const LOW_QUALITY_MAX_YAW: f32 = 0.45; // nose offset from eye midpoint / ey
 pub const LOW_QUALITY_MIN_CONFIDENCE: f32 = 0.75;
 pub const LOW_QUALITY_MATCH_FACTOR: f32 = 0.85; // attach only within 85% of the cluster threshold
 pub const LOW_QUALITY_MATCH_MARGIN: f32 = 0.05; // and clearly closer than the next-best group
+// Naming a face immediately pulls in unconfirmed faces at least this similar (cosine)
+// to the named face(s); the full re-cluster on the next index run propagates further.
+pub const EXPAND_MIN_SIMILARITY: f32 = 0.5;
 pub const LOW_QUALITY_MIN_BLUR: f32 = 100.0; // softer than this (at <=112px) is flagged low quality
 // Faces below this are dropped. Was 200, which discarded clear but soft faces (old phone
 // photos scored ~125); only truly unusable smears are dropped now.
 pub const MIN_BLUR_SCORE: f32 = 25.0;
+/// Cosine-distance threshold for linking pet detections (tuned on Apple-labeled pets).
+pub const PET_CLUSTER_THRESHOLD: f32 = 0.35;
 
 // Clustering Constants
 pub const K_NEIGHBORS: usize = 80; // Prune edges to Top-K (K-NN)

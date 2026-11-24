@@ -203,10 +203,10 @@
               </div>
             </template>
 
-            <!-- People: one chip per detected face; edit to confirm, rename, or reject -->
-            <template v-if="config.settings.face.enabled && fileFaces.length">
+            <!-- People: one chip per detected/manual face; edit to confirm, rename, dismiss, or add manually -->
+            <template v-if="config.settings.face.enabled && [1, 3].includes(Number(fileInfo?.file_type))">
               <div class="flex items-center text-[11px] text-base-content/30 min-h-6 py-1.5">{{ $t('sidebar.people') }}</div>
-              <div class="flex items-center min-h-6 gap-x-3 gap-y-1 flex-wrap">
+              <div class="flex items-center min-h-6 gap-x-2.5 gap-y-1.5 flex-wrap">
                 <span
                   v-for="face in fileFaces"
                   :key="face.id"
@@ -228,7 +228,7 @@
                       />
                       <IconPerson v-else class="w-3.5 h-3.5 text-base-content/30" />
                     </span>
-                    {{ face.person_id ? (face.person_name || face.person_id) : $t('menu.person.unknown_face') }}
+                    {{ face.person_id ? (face.person_name || face.person_id) : $t(face.kind === 'pet' ? 'menu.person.unknown_pet' : 'menu.person.unknown_face') }}
                   </button>
                   <button
                     type="button"
@@ -239,6 +239,26 @@
                     <IconEdit class="w-3 h-3" />
                   </button>
                 </span>
+                <button
+                  type="button"
+                  class="badge badge-sm badge-outline max-w-full min-w-0 border-base-content/10 bg-base-content/5 font-medium text-base-content/65 hover:text-base-content cursor-pointer gap-1"
+                  :title="$t('menu.person.add_person_or_pet')"
+                  @click.stop="openAddManualFace"
+                >
+                  <IconAdd class="size-3 shrink-0" />
+                  <span class="min-w-0 truncate">{{ $t('menu.person.add_short') }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="badge badge-sm badge-outline max-w-full min-w-0 border-base-content/10 bg-base-content/5 font-medium text-base-content/65 hover:text-base-content cursor-pointer gap-1 disabled:opacity-50"
+                  :disabled="isScanningFaces"
+                  :title="$t('menu.person.scan_photo_tooltip')"
+                  @click.stop="handleScanFileFaces"
+                >
+                  <span v-if="isScanningFaces" class="loading loading-spinner loading-xs size-3!"></span>
+                  <IconRefresh v-else class="size-3 shrink-0" />
+                  <span class="min-w-0 truncate">{{ isScanningFaces ? $t('menu.person.scan_photo_scanning') : $t('menu.person.scan_photo') }}</span>
+                </button>
               </div>
             </template>
 
@@ -556,21 +576,22 @@
 <script setup lang="ts">
 import AssignTagsPanel from './AssignTagsPanel.vue';
 import FileInfoFieldsDialog from '@/components/FileInfoFieldsDialog.vue';
-import AssignFaceDialog from '@/components/AssignFaceDialog.vue';
+import AssignFaceDialog, { type AssignFaceTarget } from '@/components/AssignFaceDialog.vue';
+import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
 import { getShortcutLabel } from '@/common/shortcuts';
 import { editableMetadataFields, normalizeFileInfoFields } from '@/common/fileInfoFields';
 import ImageNavigator from '@/components/ImageNavigator.vue';
 import { invoke } from '@tauri-apps/api/core';
 import { navigatorLayout } from '@/common/imageNavigator';
 import { h, ref, nextTick, computed, watch, onBeforeUnmount, onMounted } from 'vue';
-import { listen } from '@tauri-apps/api/event';
+import { listen, emit as tauriEmit } from '@tauri-apps/api/event';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
 import { isWebViewVideoPlaybackDisabled, getGStreamerAvailability } from '@/common/video';
 import { isOriginalUnavailable } from '@/common/availability';
-import { getTagsForFile, editFileMetadata, renameFile, editImage, getAlbum, getFileCollections, getFileInfo, getMotionPhotoVideoPath, revealPath, getFacesForFile, getFaceThumbnail, isCloudOnlyFile } from '@/common/api';
+import { getTagsForFile, editFileMetadata, renameFile, editImage, getAlbum, getFileCollections, getFileInfo, getMotionPhotoVideoPath, revealPath, getFacesForFile, getFaceThumbnail, getPersonThumbnail, scanFileFaces, isCloudOnlyFile } from '@/common/api';
 import { 
   copyFilePaths,
   extractFileName, 
@@ -1555,13 +1576,18 @@ function navigateLocation() {
 // Faces detected in this file, each with its own crop so wrong matches are easy to spot.
 interface FileFace {
   id: number;
+  file_id: number;
   person_id: number | null;
   person_name: string | null;
   confirmed: boolean;
   thumbnail: string;
+  kind: string;
+  manual: boolean;
 }
 const fileFaces = ref<FileFace[]>([]);
+const isScanningFaces = ref(false);
 let filePersonsRequestSeq = 0;
+let unlistenFileInfoPersonsChanged: (() => void) | null = null;
 
 async function loadFilePersons(fileId: number) {
   const seq = ++filePersonsRequestSeq;
@@ -1572,23 +1598,90 @@ async function loadFilePersons(fileId: number) {
   const faces = await getFacesForFile(fileId);
   if (seq !== filePersonsRequestSeq) return;
   const loaded = await Promise.all(
-    (faces || []).map(async (face: any) => ({
-      id: Number(face.id),
-      person_id: Number(face.person_id || 0) || null,
-      person_name: face.person_name || null,
-      confirmed: Boolean(face.confirmed),
-      thumbnail: (await getFaceThumbnail(Number(face.id))) || '',
-    })),
+    (faces || []).map(async (face: any) => {
+      let parsedBbox: any = null;
+      try {
+        parsedBbox = face.bbox ? JSON.parse(face.bbox) : null;
+      } catch {
+        parsedBbox = null;
+      }
+      const hasBox = Boolean(parsedBbox && Number(parsedBbox.width) > 0 && Number(parsedBbox.height) > 0);
+      const personId = Number(face.person_id || 0) || null;
+      let thumbnail = hasBox ? ((await getFaceThumbnail(Number(face.id))) || '') : '';
+      if (!thumbnail && personId) {
+        thumbnail = (await getPersonThumbnail(personId)) || '';
+      }
+      return {
+        id: Number(face.id),
+        file_id: fileId,
+        person_id: personId,
+        person_name: face.person_name || null,
+        confirmed: Boolean(face.confirmed),
+        kind: face.kind || 'face',
+        manual: Boolean(parsedBbox?.manual || !hasBox),
+        thumbnail,
+      };
+    }),
   );
   if (seq !== filePersonsRequestSeq) return;
   // Named people first, unknown faces last.
   fileFaces.value = loaded.sort((a, b) => Number(!a.person_id) - Number(!b.person_id));
 }
 
-const assignFace = ref<FileFace | null>(null);
+const assignFace = ref<AssignFaceTarget | null>(null);
 
 function openAssignFace(face: FileFace) {
-  assignFace.value = face;
+  assignFace.value = {
+    id: face.id,
+    file_id: face.file_id,
+    person_id: face.person_id,
+    person_name: face.person_name,
+    thumbnail: face.thumbnail,
+    kind: face.kind,
+    manual: face.manual,
+  };
+}
+
+function openAddManualFace() {
+  const fileId = Number(props.fileInfo?.id || 0);
+  if (!fileId) return;
+  assignFace.value = {
+    id: null,
+    file_id: fileId,
+    person_id: null,
+    person_name: null,
+    thumbnail: '',
+    kind: 'person',
+    manual: true,
+    norm_bbox: null,
+  };
+}
+
+async function handleScanFileFaces() {
+  const fileId = Number(props.fileInfo?.id || 0);
+  if (!fileId || isScanningFaces.value) return;
+  isScanningFaces.value = true;
+  try {
+    const res: any = await scanFileFaces(fileId);
+    const added = Number(res?.added || 0);
+    const matched = Number(res?.matched || 0);
+    if (added > 0) {
+      void tauriEmit(PERSONS_CHANGED_EVENT, { fileId });
+      await loadFilePersons(fileId);
+      toast.success(
+        matched > 0
+          ? t('menu.person.scan_photo_found_matched', { count: added, matched })
+          : t('menu.person.scan_photo_found', { count: added }),
+      );
+    } else {
+      toast.info(t('menu.person.scan_photo_none'));
+    }
+  } catch (error) {
+    console.error('Failed to scan photo for faces:', error);
+    toast.error(t('menu.person.scan_photo_failed'));
+  } finally {
+    isScanningFaces.value = false;
+  }
 }
 
 function onFaceChanged(payload: { personId: number | null; message: string }) {
@@ -1596,6 +1689,21 @@ function onFaceChanged(payload: { personId: number | null; message: string }) {
   toast.success(payload.message);
   void loadFilePersons(Number(props.fileInfo?.id || 0));
 }
+
+onMounted(async () => {
+  try {
+    unlistenFileInfoPersonsChanged = await listen(PERSONS_CHANGED_EVENT, () => {
+      void loadFilePersons(Number(props.fileInfo?.id || 0));
+    });
+  } catch {
+    // ignore in non-Tauri environments
+  }
+});
+
+onBeforeUnmount(() => {
+  unlistenFileInfoPersonsChanged?.();
+  unlistenFileInfoPersonsChanged = null;
+});
 
 watch(() => props.fileInfo?.id, (id) => {
   void loadFilePersons(Number(id || 0));

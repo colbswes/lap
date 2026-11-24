@@ -93,6 +93,18 @@ struct Anchor {
 pub struct FaceEngine {
     detection_model: Option<Session>, // RetinaFace
     embedding_model: Option<Session>, // MobileFaceNet
+    pet_model: Option<Session>,       // DINOv2 (optional)
+}
+
+/// A face or pet found in an image, ready to store.
+#[derive(Debug, Clone)]
+pub struct Detection {
+    pub bbox: FaceBox,
+    pub embedding: Vec<f32>,
+    pub low_quality: bool,
+    /// "face" or "pet" (`faces.kind`).
+    pub kind: &'static str,
+    pub species: Option<&'static str>,
 }
 
 impl FaceEngine {
@@ -100,6 +112,7 @@ impl FaceEngine {
         Self {
             detection_model: None,
             embedding_model: None,
+            pet_model: None,
         }
     }
 
@@ -155,6 +168,19 @@ impl FaceEngine {
 
         self.embedding_model = Some(embedding_model);
 
+        // Pet model is optional: without it, indexing finds faces only.
+        let pet_model_path = resource_dir.join(t_common::PET_EMBEDDING_MODEL);
+        if pet_model_path.exists() {
+            match Session::builder()
+                .and_then(|b| b.with_optimization_level(GraphOptimizationLevel::Level3))
+                .and_then(|b| b.with_intra_threads(4))
+                .and_then(|b| b.commit_from_file(&pet_model_path))
+            {
+                Ok(session) => self.pet_model = Some(session),
+                Err(e) => eprintln!("Failed to load pet model: {}", e),
+            }
+        }
+
         Ok(())
     }
 
@@ -164,6 +190,14 @@ impl FaceEngine {
 
     /// Detect faces implementation (from DynamicImage)
     fn detect_faces(&mut self, img: &DynamicImage) -> Result<Vec<FaceBox>, String> {
+        self.detect_faces_with_threshold(img, t_common::MIN_CONFIDENCE)
+    }
+
+    fn detect_faces_with_threshold(
+        &mut self,
+        img: &DynamicImage,
+        confidence_threshold: f32,
+    ) -> Result<Vec<FaceBox>, String> {
         let original_width = img.width() as f32;
         let original_height = img.height() as f32;
 
@@ -259,8 +293,6 @@ impl FaceEngine {
                 (1, 4, 7), // Stride 16
                 (2, 5, 8), // Stride 32
             ];
-
-            let confidence_threshold = t_common::MIN_CONFIDENCE;
 
             for (i, &stride) in strides.iter().enumerate() {
                 let (score_idx, box_idx, kps_idx) = indices[i];
@@ -471,6 +503,186 @@ impl FaceEngine {
 
     /// Process image: detect all faces and get embeddings
     /// Filters out low-quality faces (low confidence, small size, blurry)
+    /// Faces and pets in an encoded image, with boxes in decoded-image pixels.
+    pub fn detect_all_from_bytes(
+        &mut self,
+        image_bytes: &[u8],
+    ) -> Result<(Vec<Detection>, (u32, u32)), String> {
+        let img = image::load_from_memory(image_bytes)
+            .map_err(|e| format!("Failed to load image from memory: {}", e))?;
+        let (faces, dims) = self.process_dynamic_image(&img)?;
+        let pets = self.detect_pets(image_bytes, &img);
+        let mut detections: Vec<Detection> = faces
+            .into_iter()
+            .filter(|f| !is_human_false_positive_in_pet(&f.bbox, &pets))
+            .map(|f| Detection { bbox: f.bbox, embedding: f.embedding, low_quality: f.low_quality, kind: "face", species: None })
+            .collect();
+        detections.extend(pets);
+        Ok((detections, dims))
+    }
+
+    /// Detect only pets in an encoded image, with boxes in decoded-image pixels.
+    pub fn detect_pets_from_bytes(
+        &mut self,
+        image_bytes: &[u8],
+    ) -> Result<(Vec<Detection>, (u32, u32)), String> {
+        let img = image::load_from_memory(image_bytes)
+            .map_err(|e| format!("Failed to load image from memory: {}", e))?;
+        let dims = (img.width(), img.height());
+        let pets = self.detect_pets(image_bytes, &img);
+        Ok((pets, dims))
+    }
+
+    /// Embed a normalized (top-left origin) crop `(x, y, width, height)` using the pet model.
+    pub fn embed_pet_box_from_bytes(
+        &mut self,
+        image_bytes: &[u8],
+        norm_bbox: (f32, f32, f32, f32),
+    ) -> Result<Vec<f32>, String> {
+        if self.pet_model.is_none() {
+            return Err("Pet model not loaded".to_string());
+        }
+        let img = image::load_from_memory(image_bytes)
+            .map_err(|e| format!("Failed to load image from memory: {}", e))?;
+        let (w, h) = (img.width() as f32, img.height() as f32);
+        let pixel_box = (
+            norm_bbox.0 * w,
+            norm_bbox.1 * h,
+            norm_bbox.2 * w,
+            norm_bbox.3 * h,
+        );
+        let crop = crate::t_pet::square_crop(&img, pixel_box, 224);
+        self.run_pet_model(&crop)
+    }
+
+    /// Try to produce an aligned human-face embedding for a manually drawn box
+    /// (normalized top-left `(x, y, width, height)`). Runs RetinaFace on a padded crop
+    /// at a gentler threshold to locate 5-point landmarks; returns `Ok(None)` if no
+    /// landmarked face matches the box, so unaligned crops never pollute clustering.
+    pub fn embed_face_box_from_bytes(
+        &mut self,
+        image_bytes: &[u8],
+        norm_bbox: (f32, f32, f32, f32),
+    ) -> Result<Option<Vec<f32>>, String> {
+        if self.detection_model.is_none() || self.embedding_model.is_none() {
+            return Ok(None);
+        }
+        let img = image::load_from_memory(image_bytes)
+            .map_err(|e| format!("Failed to load image from memory: {}", e))?;
+        let (img_w, img_h) = (img.width() as f32, img.height() as f32);
+        let bx = (norm_bbox.0 * img_w).clamp(0.0, img_w);
+        let by = (norm_bbox.1 * img_h).clamp(0.0, img_h);
+        let bw = (norm_bbox.2 * img_w).clamp(1.0, img_w - bx);
+        let bh = (norm_bbox.3 * img_h).clamp(1.0, img_h - by);
+
+        let pad_x = bw * 0.5;
+        let pad_y = bh * 0.5;
+        let cx0 = (bx - pad_x).max(0.0).floor() as u32;
+        let cy0 = (by - pad_y).max(0.0).floor() as u32;
+        let cx1 = (bx + bw + pad_x).min(img_w).ceil() as u32;
+        let cy1 = (by + bh + pad_y).min(img_h).ceil() as u32;
+        if cx1 <= cx0 + 4 || cy1 <= cy0 + 4 {
+            return Ok(None);
+        }
+
+        let crop = img.crop_imm(cx0, cy0, cx1 - cx0, cy1 - cy0);
+        let detected = self.detect_faces_with_threshold(&crop, 0.25)?;
+        let target = (bx, by, bw, bh);
+        let best = detected
+            .into_iter()
+            .filter(|f| f.landmarks.as_ref().is_some_and(|lm| lm.len() == 5))
+            .map(|mut f| {
+                f.x += cx0 as f32;
+                f.y += cy0 as f32;
+                if let Some(ref mut lm) = f.landmarks {
+                    for pt in lm.iter_mut() {
+                        pt.0 += cx0 as f32;
+                        pt.1 += cy0 as f32;
+                    }
+                }
+                let iou = box_iou((f.x, f.y, f.width, f.height), target);
+                (iou, f)
+            })
+            .filter(|(iou, _)| *iou >= 0.25)
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+
+        let Some((_, matched)) = best else {
+            return Ok(None);
+        };
+        Ok(self.get_face_embedding(&img, &matched).ok())
+    }
+
+    /// Cats and dogs via Apple Vision, embedded with the pet model.
+    fn detect_pets(&mut self, image_bytes: &[u8], img: &DynamicImage) -> Vec<Detection> {
+        if self.pet_model.is_none() {
+            return Vec::new();
+        }
+        let animals = match crate::t_pet::detect_animals(image_bytes) {
+            Ok(animals) => animals,
+            Err(e) => {
+                eprintln!("Animal detection failed: {}", e);
+                return Vec::new();
+            }
+        };
+        let (w, h) = (img.width() as f32, img.height() as f32);
+        let mut out = Vec::new();
+        for animal in animals {
+            let bbox = FaceBox {
+                x: animal.x * w,
+                y: animal.y * h,
+                width: animal.width * w,
+                height: animal.height * h,
+                confidence: animal.confidence,
+                landmarks: None,
+            };
+            let crop = crate::t_pet::square_crop(img, (bbox.x, bbox.y, bbox.width, bbox.height), 224);
+            match self.run_pet_model(&crop) {
+                Ok(embedding) => out.push(Detection {
+                    low_quality: bbox.width.min(bbox.height) < t_common::PET_LOW_QUALITY_MIN_PX
+                        || animal.confidence < t_common::PET_LOW_QUALITY_MIN_CONFIDENCE,
+                    bbox,
+                    embedding,
+                    kind: "pet",
+                    species: Some(animal.kind.as_str()),
+                }),
+                Err(e) => eprintln!("Pet embedding failed: {}", e),
+            }
+        }
+        out
+    }
+
+    /// DINOv2 embedding of a 224x224 crop and its mirror image (averaged, unit length).
+    fn run_pet_model(&mut self, crop: &image::RgbImage) -> Result<Vec<f32>, String> {
+        let flipped = image::imageops::flip_horizontal(crop);
+        let mut batch = Array::zeros((2, 3, 224, 224));
+        for (b, img) in [crop, &flipped].into_iter().enumerate() {
+            for (x, y, pixel) in img.enumerate_pixels() {
+                for c in 0..3 {
+                    batch[[b, c, y as usize, x as usize]] =
+                        (pixel[c] as f32 / 255.0 - crate::t_pet::IMAGENET_MEAN[c]) / crate::t_pet::IMAGENET_STD[c];
+                }
+            }
+        }
+        let input = Value::from_array(batch).map_err(|e| e.to_string())?;
+        let outputs = self
+            .pet_model
+            .as_mut()
+            .ok_or("Pet model not loaded")?
+            .run(inputs!["pixel_values" => input])
+            .map_err(|e| format!("Pet embedding inference error: {}", e))?;
+        let (_, data) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| format!("Failed to extract pet embedding: {}", e))?;
+        let dim = data.len() / 2;
+        let summed: Vec<f32> = (0..dim).map(|i| data[i] + data[dim + i]).collect();
+        let norm = summed.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= f32::EPSILON {
+            return Err("Invalid pet embedding norm".to_string());
+        }
+        Ok(summed.iter().map(|v| v / norm).collect())
+    }
+
+    #[cfg(test)]
     pub fn process_image_from_bytes(
         &mut self,
         image_bytes: &[u8],
@@ -507,9 +719,14 @@ impl FaceEngine {
             //     continue;
             // }
 
-            // Filter 4: Skip blurry faces
+            // Filter 4: Skip blurry low-confidence detections. High-confidence faces
+            // (>= LOW_QUALITY_MIN_CONFIDENCE) are kept even if soft/dim so obvious
+            // faces aren't missed; if soft they are flagged `low_quality` so they
+            // never bridge clusters.
             let blur_score = self.calculate_blur_score(img, &face);
-            if blur_score < t_common::MIN_BLUR_SCORE {
+            if blur_score < t_common::MIN_BLUR_SCORE
+                && face.confidence < t_common::LOW_QUALITY_MIN_CONFIDENCE
+            {
                 continue;
             }
 
@@ -526,8 +743,11 @@ impl FaceEngine {
         Ok((results, (img.width(), img.height())))
     }
 
-    /// Calculate blur score using Variance of Laplacian
-    /// Optimized: Uses Welford's online algorithm to avoid allocating a large vector
+    /// Calculate blur score using contrast-compensated Variance of Laplacian.
+    /// Raw Laplacian variance scales quadratically with image brightness/contrast, which
+    /// unfairly penalizes sharp faces in dim lighting. We gently normalize low-contrast
+    /// crops (up to 4x gain, with a noise floor) so dark scenes keep real faces.
+    /// Optimized: Uses Welford's online algorithm to avoid allocating a large vector.
     fn calculate_blur_score(&self, img: &DynamicImage, bbox: &FaceBox) -> f32 {
         let x = bbox.x.max(0.0) as u32;
         let y = bbox.y.max(0.0) as u32;
@@ -553,10 +773,12 @@ impl FaceEngine {
         let crop = crop.to_luma8();
         let (width, height) = crop.dimensions();
 
-        // Online variance calculation (Welford's algorithm)
+        // Online variance calculation (Welford's algorithm) for Laplacian and luma
         let mut count = 0usize;
-        let mut m2 = 0.0;
-        let mut mean = 0.0;
+        let mut lap_m2 = 0.0f32;
+        let mut lap_mean = 0.0f32;
+        let mut luma_m2 = 0.0f32;
+        let mut luma_mean = 0.0f32;
 
         for y in 1..height - 1 {
             for x in 1..width - 1 {
@@ -568,12 +790,19 @@ impl FaceEngine {
 
                 let sum = top + bottom + left + right - 4 * p;
                 let val = sum as f32;
+                let luma = p as f32;
 
                 count += 1;
-                let delta = val - mean;
-                mean += delta / count as f32;
-                let delta2 = val - mean;
-                m2 += delta * delta2;
+                let c = count as f32;
+                let delta = val - lap_mean;
+                lap_mean += delta / c;
+                let delta2 = val - lap_mean;
+                lap_m2 += delta * delta2;
+
+                let l_delta = luma - luma_mean;
+                luma_mean += l_delta / c;
+                let l_delta2 = luma - luma_mean;
+                luma_m2 += l_delta * l_delta2;
             }
         }
 
@@ -581,8 +810,17 @@ impl FaceEngine {
             return 0.0;
         }
 
-        // Variance
-        m2 / (count as f32)
+        let lap_var = lap_m2 / (count as f32);
+        let luma_std = (luma_m2 / (count as f32)).sqrt();
+        // Gently boost dim/low-contrast crops (std < 45) up to 4x, while tapering the
+        // boost back to 1x on nearly flat patches (std < 6) so sensor noise isn't amplified.
+        const TARGET_LUMA_STD: f32 = 45.0;
+        const FLAT_LUMA_STD: f32 = 6.0;
+        const MAX_CONTRAST_BOOST: f32 = 4.0;
+        let raw_boost = (TARGET_LUMA_STD / luma_std.max(FLAT_LUMA_STD)).clamp(1.0, MAX_CONTRAST_BOOST);
+        let ramp = (luma_std / FLAT_LUMA_STD).clamp(0.0, 1.0);
+        let boost = 1.0 + (raw_boost - 1.0) * ramp;
+        lap_var * boost * boost
     }
 
     /// Non-maximum suppression
@@ -635,10 +873,14 @@ impl FaceEngine {
 pub struct FaceState(pub std::sync::Arc<Mutex<FaceEngine>>);
 
 /// A rescan detection overlapping a stored face this much is the same face.
-const RESCAN_SAME_FACE_IOU: f32 = 0.3;
+pub(crate) const RESCAN_SAME_FACE_IOU: f32 = 0.3;
+
+/// Maximum confidence for a RetinaFace detection inside a pet box to be treated
+/// as an animal-face false positive rather than a real person.
+pub(crate) const PET_FACE_FALSE_POSITIVE_MAX_CONFIDENCE: f32 = 0.75;
 
 /// Intersection over union of two (x, y, width, height) boxes.
-fn box_iou(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
+pub(crate) fn box_iou(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
     let ix = (a.0 + a.2).min(b.0 + b.2) - a.0.max(b.0);
     let iy = (a.1 + a.3).min(b.1 + b.3) - a.1.max(b.1);
     if ix <= 0.0 || iy <= 0.0 {
@@ -647,6 +889,51 @@ fn box_iou(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
     let inter = ix * iy;
     let union = a.2 * a.3 + b.2 * b.3 - inter;
     if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+/// Fraction of box `inner`'s area that lies inside `outer`.
+pub(crate) fn box_containment(inner: (f32, f32, f32, f32), outer: (f32, f32, f32, f32)) -> f32 {
+    let inner_area = inner.2 * inner.3;
+    if inner_area <= 0.0 {
+        return 0.0;
+    }
+    let ix = (inner.0 + inner.2).min(outer.0 + outer.2) - inner.0.max(outer.0);
+    let iy = (inner.1 + inner.3).min(outer.1 + outer.3) - inner.1.max(outer.1);
+    if ix <= 0.0 || iy <= 0.0 {
+        return 0.0;
+    }
+    (ix * iy) / inner_area
+}
+
+/// RetinaFace occasionally fires with low-to-medium confidence on front-facing dogs/cats.
+/// Drop such detections when they sit almost entirely inside a detected pet box.
+fn is_human_false_positive_in_pet(face: &FaceBox, pets: &[Detection]) -> bool {
+    if face.confidence >= PET_FACE_FALSE_POSITIVE_MAX_CONFIDENCE {
+        return false;
+    }
+    let fbox = (face.x, face.y, face.width, face.height);
+    pets.iter().any(|pet| {
+        let pbox = (pet.bbox.x, pet.bbox.y, pet.bbox.width, pet.bbox.height);
+        box_containment(fbox, pbox) >= 0.80
+    })
+}
+
+/// Decode an upright image for face/pet detection, preferring the local original
+/// and falling back to the stored thumbnail.
+pub(crate) fn decode_image_for_faces(file_id: i64, file_path: &str) -> Option<Vec<u8>> {
+    let original_local = !crate::t_utils::is_cloud_only_path(file_path)
+        && crate::t_utils::content_readable(file_path);
+    let decoded = if original_local {
+        crate::t_image::decode_upright_for_faces(file_path, t_common::FACE_DECODE_SIZE)
+    } else {
+        None
+    };
+    decoded.or_else(|| {
+        t_sqlite::AThumb::fetch(file_id)
+            .ok()
+            .flatten()
+            .and_then(|thumb| thumb.thumb_data)
+    })
 }
 
 /// Canonical ArcFace landmark positions in a 112x112 crop
@@ -929,7 +1216,7 @@ pub fn run_face_indexing(
                 continue;
             };
             let mut engine = face_state.0.lock().unwrap();
-            let process_result = engine.process_image_from_bytes(&image_bytes);
+            let process_result = engine.detect_all_from_bytes(&image_bytes);
             drop(engine);
 
             match process_result {
@@ -947,19 +1234,24 @@ pub fn run_face_indexing(
                         }
                     }
 
-                    // Rescan: keep stored faces (and their names); add only detections
-                    // that don't overlap a stored face.
+                    // Rescan: keep stored faces and pets (and their names); add only
+                    // detections that don't overlap a stored or dismissed one of the same kind.
                     let mut already_had_faces = false;
                     if rescan {
                         let existing = t_sqlite::Face::bboxes_for_file_with_conn(&db_conn, file_id)
                             .unwrap_or_default();
+                        let dismissed =
+                            t_sqlite::Face::dismissed_bboxes_for_file_with_conn(&db_conn, file_id)
+                                .unwrap_or_default();
                         already_had_faces = !existing.is_empty();
                         faces.retain(|face| {
                             let b = &face.bbox;
-                            !existing.iter().any(|&(x, y, w, h)| {
-                                box_iou((b.x, b.y, b.width, b.height), (x, y, w, h))
-                                    >= RESCAN_SAME_FACE_IOU
-                            })
+                            let overlaps = |(kind, (x, y, w, h)): &(String, (f32, f32, f32, f32))| {
+                                kind == face.kind
+                                    && box_iou((b.x, b.y, b.width, b.height), (*x, *y, *w, *h))
+                                        >= RESCAN_SAME_FACE_IOU
+                            };
+                            !existing.iter().any(overlaps) && !dismissed.iter().any(overlaps)
                         });
                     }
 
@@ -989,8 +1281,20 @@ pub fn run_face_indexing(
                                 &bbox_json,
                                 &face_data.embedding,
                                 face_data.low_quality,
+                                face_data.kind,
+                                face_data.species,
                             ) {
-                                Ok(_) => total_faces += 1,
+                                Ok(_) => {
+                                    total_faces += 1;
+                                    if face_data.kind == "pet" {
+                                        let b = &face_data.bbox;
+                                        let _ = t_sqlite::Face::delete_overlapping_unassigned_face_false_positives_with_conn(
+                                            &db_conn,
+                                            file_id,
+                                            (b.x, b.y, b.width, b.height),
+                                        );
+                                    }
+                                }
                                 Err(e) => eprintln!("Failed to store face: {}", e),
                             }
                         }
@@ -1059,30 +1363,35 @@ pub fn run_face_indexing(
             }),
         );
 
-        let cancel_token_cluster = cancel_token.clone();
-        let total_persons = match t_cluster::cluster_faces(
-            epsilon,
-            |progress| {
-                let _ = app_handle.emit(
-                    "cluster_progress",
-                    serde_json::json!({
-                        "phase": progress.phase,
-                        "current": progress.current,
-                        "total": progress.total,
-                    }),
-                );
-            },
-            || {
-                // Check if user has cancelled
-                *cancel_token_cluster.lock().unwrap()
-            },
-        ) {
-            Ok(count) => count,
-            Err(e) => {
-                eprintln!("Clustering failed: {}", e);
-                0
+        // People and pets cluster separately (different embeddings and thresholds).
+        let mut total_persons = 0;
+        for (kind, threshold) in [
+            (t_sqlite::PersonKind::Person, epsilon),
+            (t_sqlite::PersonKind::Pet, t_common::PET_CLUSTER_THRESHOLD),
+        ] {
+            let cancel_token_cluster = cancel_token.clone();
+            match t_cluster::cluster_faces(
+                threshold,
+                kind,
+                |progress| {
+                    let _ = app_handle.emit(
+                        "cluster_progress",
+                        serde_json::json!({
+                            "phase": progress.phase,
+                            "current": progress.current,
+                            "total": progress.total,
+                        }),
+                    );
+                },
+                || {
+                    // Check if user has cancelled
+                    *cancel_token_cluster.lock().unwrap()
+                },
+            ) {
+                Ok(count) => total_persons += count,
+                Err(e) => eprintln!("Clustering {} failed: {}", kind.as_str(), e),
             }
-        };
+        }
         let cancelled_during_cluster = *cancel_token.lock().unwrap();
 
         // 5. Finished
@@ -1127,10 +1436,67 @@ mod tests {
     }
 
     #[test]
+    fn blur_score_preserves_dim_sharp_faces_and_rejects_flat_dark_patches() {
+        let engine = FaceEngine::new();
+        let bbox = FaceBox {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+            confidence: 0.85,
+            landmarks: None,
+        };
+
+        // Dim sharp checkerboard-like face texture (luma 10 vs 26, std ~ 8)
+        let mut dim_sharp = image::RgbImage::new(64, 64);
+        for (x, y, p) in dim_sharp.enumerate_pixels_mut() {
+            let v = if ((x / 4) + (y / 4)) % 2 == 0 { 10 } else { 26 };
+            *p = image::Rgb([v, v, v]);
+        }
+        let dim_score = engine.calculate_blur_score(&DynamicImage::ImageRgb8(dim_sharp), &bbox);
+        assert!(
+            dim_score >= t_common::MIN_BLUR_SCORE,
+            "dim sharp crop should exceed MIN_BLUR_SCORE, got {dim_score}"
+        );
+
+        // Flat dark noisy patch (luma 10..11) should still stay below MIN_BLUR_SCORE
+        let mut flat_dark = image::RgbImage::new(64, 64);
+        for (x, y, p) in flat_dark.enumerate_pixels_mut() {
+            let v = if (x + y) % 7 == 0 { 11 } else { 10 };
+            *p = image::Rgb([v, v, v]);
+        }
+        let flat_score = engine.calculate_blur_score(&DynamicImage::ImageRgb8(flat_dark), &bbox);
+        assert!(
+            flat_score < t_common::MIN_BLUR_SCORE,
+            "flat dark patch should stay below MIN_BLUR_SCORE, got {flat_score}"
+        );
+    }
+
+    #[test]
     fn box_iou_detects_the_same_face() {
         assert!((box_iou((0.0, 0.0, 10.0, 10.0), (0.0, 0.0, 10.0, 10.0)) - 1.0).abs() < 1e-6);
         assert!(box_iou((0.0, 0.0, 10.0, 10.0), (1.0, 1.0, 10.0, 10.0)) >= RESCAN_SAME_FACE_IOU);
         assert_eq!(box_iou((0.0, 0.0, 10.0, 10.0), (20.0, 0.0, 10.0, 10.0)), 0.0);
+    }
+
+    #[test]
+    fn human_false_positive_inside_pet_is_suppressed_only_when_low_confidence() {
+        let pet = Detection {
+            bbox: FaceBox { x: 0.0, y: 100.0, width: 300.0, height: 200.0, confidence: 0.7, landmarks: None },
+            embedding: vec![],
+            low_quality: false,
+            kind: "pet",
+            species: Some("dog"),
+        };
+        // Low-confidence RetinaFace false positive inside dog box -> suppressed
+        let dog_face_fp = FaceBox { x: 100.0, y: 120.0, width: 100.0, height: 100.0, confidence: 0.55, landmarks: None };
+        assert!(is_human_false_positive_in_pet(&dog_face_fp, &[pet.clone()]));
+        // High-confidence human face -> kept
+        let strong_human = FaceBox { x: 100.0, y: 120.0, width: 100.0, height: 100.0, confidence: 0.85, landmarks: None };
+        assert!(!is_human_false_positive_in_pet(&strong_human, &[pet.clone()]));
+        // Human face above the dog -> kept
+        let human_above = FaceBox { x: 100.0, y: 0.0, width: 80.0, height: 80.0, confidence: 0.60, landmarks: None };
+        assert!(!is_human_false_positive_in_pet(&human_above, &[pet]));
     }
 
     #[test]
@@ -1186,6 +1552,7 @@ mod tests {
         let mut engine = FaceEngine {
             detection_model: Some(load(t_common::DETECTION_MODEL)),
             embedding_model: Some(load(t_common::EMBEDDING_MODEL)),
+            pet_model: None,
         };
         let out_dir = std::path::PathBuf::from(std::env::var("FACE_ALIGN_OUT").unwrap());
         let demo = std::env::var("FACE_ALIGN_IN").map(std::path::PathBuf::from).unwrap_or_else(|_| {
@@ -1241,6 +1608,7 @@ mod tests {
         let mut engine = FaceEngine {
             detection_model: Some(load(t_common::DETECTION_MODEL)),
             embedding_model: Some(load(t_common::EMBEDDING_MODEL)),
+            pet_model: None,
         };
         // Same decode as indexing; stored dimensions are upright (swapped for orientation 6).
         let bytes = crate::t_image::get_image_thumbnail_with_encoding(&path, 6, t_common::FACE_DECODE_SIZE, true)
@@ -1275,5 +1643,52 @@ mod tests {
             let crop = t_sqlite::Person::generate_face_thumbnail(&conn, i as i64 + 1).unwrap().unwrap();
             std::fs::write(out_dir.join(format!("avatar_{}.jpg", i)), crop).unwrap();
         }
+    }
+
+    /// Embeds Apple-labeled pets (dataset.json from the pet evaluation) with the
+    /// app's pipeline and reports same-pet vs different-pet similarity.
+    /// `PET_DATASET=.../dataset.json cargo test --bin Lap pet_pipeline -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn pet_pipeline_separates_labeled_pets() {
+        let records: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(std::env::var("PET_DATASET").unwrap()).unwrap()).unwrap();
+        let models = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/models");
+        let load = |name: &str| Session::builder().unwrap().commit_from_file(models.join(name)).unwrap();
+        let mut engine = FaceEngine {
+            detection_model: Some(load(t_common::DETECTION_MODEL)),
+            embedding_model: Some(load(t_common::EMBEDDING_MODEL)),
+            pet_model: Some(load(t_common::PET_EMBEDDING_MODEL)),
+        };
+        let mut embedded: Vec<(String, Vec<f32>)> = Vec::new();
+        let mut per_name: std::collections::HashMap<String, usize> = Default::default();
+        for r in &records {
+            let name = r["name"].as_str().unwrap_or("").to_string();
+            if name.is_empty() || per_name.get(&name).copied().unwrap_or(0) >= 8 {
+                continue;
+            }
+            let path = r["path"].as_str().unwrap();
+            let Some(bytes) = crate::t_image::decode_upright_for_faces(path, t_common::FACE_DECODE_SIZE) else { continue };
+            let (dets, (w, h)) = engine.detect_all_from_bytes(&bytes).unwrap();
+            // The detection containing Apple's face center is the labeled pet.
+            let (cx, cy) = (r["face_center"][0].as_f64().unwrap() as f32 * w as f32, r["face_center"][1].as_f64().unwrap() as f32 * h as f32);
+            if let Some(d) = dets.iter().find(|d| d.kind == "pet"
+                && cx >= d.bbox.x && cx <= d.bbox.x + d.bbox.width && cy >= d.bbox.y && cy <= d.bbox.y + d.bbox.height)
+            {
+                *per_name.entry(name.clone()).or_default() += 1;
+                embedded.push((name, d.embedding.clone()));
+            }
+        }
+        let (mut same, mut diff) = (Vec::new(), Vec::new());
+        for i in 0..embedded.len() {
+            for j in i + 1..embedded.len() {
+                let sim: f32 = embedded[i].1.iter().zip(&embedded[j].1).map(|(a, b)| a * b).sum();
+                if embedded[i].0 == embedded[j].0 { same.push(sim) } else { diff.push(sim) }
+            }
+        }
+        let mean = |v: &Vec<f32>| v.iter().sum::<f32>() / v.len() as f32;
+        println!("pets {:?}", per_name);
+        println!("mean similarity: same pet {:.3}, different pets {:.3}", mean(&same), mean(&diff));
+        assert!(mean(&same) - mean(&diff) > 0.3);
     }
 }

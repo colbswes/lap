@@ -80,6 +80,8 @@ export interface BBox {
     y: number;
     width: number;
     height: number;
+    confidence?: number;
+    manual?: boolean;
 }
 
 /**
@@ -91,6 +93,8 @@ export interface RawFace {
     person_id: number;
     person_name?: string;
     bbox: string; // JSON string
+    kind?: string;
+    confirmed?: boolean;
     created_at?: number;
     modified_at?: number;
 }

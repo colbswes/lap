@@ -1,6 +1,6 @@
 <template>
   <ModalDialog
-    :title="$t('menu.person.assign_dialog_title')"
+    :title="isNewManual ? $t('menu.person.add_dialog_title') : $t('menu.person.assign_dialog_title')"
     :width="440"
     @cancel="handleCancel"
   >
@@ -9,15 +9,31 @@
         <div class="w-14 h-14 rounded-box overflow-hidden bg-base-300 ring-1 ring-base-content/10 shrink-0 flex items-center justify-center">
           <img
             v-if="face.thumbnail"
-            :src="'data:image/jpeg;base64,' + face.thumbnail"
+            :src="thumbnailSrc"
             class="w-full h-full object-cover"
             draggable="false"
           />
           <IconPerson v-else class="w-6 h-6 text-base-content/30" />
         </div>
         <p class="text-xs text-base-content/60 leading-relaxed">
-          {{ $t('menu.person.assign_dialog_hint') }}
+          {{ isNewManual ? $t(face.norm_bbox ? 'menu.person.add_box_dialog_hint' : 'menu.person.add_dialog_hint') : $t('menu.person.assign_dialog_hint') }}
         </p>
+      </div>
+
+      <!-- People / Pets toggle (allows reclassifying a misdetected face or pet) -->
+      <div class="grid grid-cols-2 p-0.5 rounded-box bg-base-100/40 border border-base-content/10 text-xs">
+        <button
+          v-for="option in KIND_OPTIONS"
+          :key="option.kind"
+          type="button"
+          :class="[
+            'h-6 rounded-box transition-colors cursor-pointer',
+            targetKind === option.kind ? 'bg-base-300 text-base-content font-medium' : 'text-base-content/55 hover:text-base-content',
+          ]"
+          @click="setTargetKind(option.kind)"
+        >
+          {{ $t(option.label) }}
+        </button>
       </div>
 
       <!-- Search / new name -->
@@ -33,7 +49,7 @@
           v-model="searchQuery"
           type="text"
           maxlength="255"
-          :placeholder="$t('menu.person.search')"
+          :placeholder="$t(targetKind === 'pet' ? 'menu.person.search_pets' : 'menu.person.search')"
           class="w-full min-w-0 bg-transparent border-none focus:ring-0 px-2 text-sm placeholder-base-content/35 focus:outline-none"
           @focus="isSearchFocused = true"
           @blur="isSearchFocused = false"
@@ -100,19 +116,45 @@
         </div>
       </div>
 
+      <label v-if="isAutoGroup" class="flex items-center gap-2 text-xs text-base-content/70 cursor-pointer select-none">
+        <input v-model="applyToGroup" type="checkbox" class="checkbox checkbox-xs checkbox-primary" />
+        {{ $t('menu.person.assign_whole_group', { name: currentName }) }}
+      </label>
+
       <p v-if="errorMessage" class="text-xs text-error">{{ errorMessage }}</p>
 
       <!-- Footer -->
-      <div class="flex items-center gap-3 pt-1">
+      <div class="flex items-center gap-2 pt-1">
         <button
-          v-if="face.person_id"
+          v-if="!isNewManual && (face.manual || !face.person_id)"
           type="button"
           class="t-button-default"
           :disabled="isSaving"
-          @click="handleReject"
+          :title="face.manual ? $t('menu.person.remove_face') : $t('menu.person.dismiss_box_tooltip')"
+          @click="handleDelete"
         >
-          {{ $t('menu.person.assign_not_person', { name: currentName }) }}
+          {{ face.manual ? $t('menu.person.remove_face') : $t('menu.person.dismiss_box') }}
         </button>
+        <template v-else-if="!isNewManual && face.person_id">
+          <button
+            type="button"
+            class="t-button-default"
+            :disabled="isSaving"
+            @click="handleReject"
+          >
+            {{ $t('menu.person.assign_not_person', { name: currentName }) }}
+          </button>
+          <button
+            type="button"
+            class="t-button-default px-2!"
+            :disabled="isSaving"
+            :title="$t('menu.person.dismiss_box_tooltip')"
+            :aria-label="$t('menu.person.dismiss_box')"
+            @click="handleDelete"
+          >
+            <IconTrash class="w-4 h-4" />
+          </button>
+        </template>
         <div class="flex-1"></div>
         <button type="button" class="t-button-default" :disabled="isSaving" @click="handleCancel">
           {{ $t('msgbox.cancel') }}
@@ -136,18 +178,26 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { emit as tauriEmit } from '@tauri-apps/api/event';
 import { config } from '@/common/config';
-import { getPersonsPage, assignFaceToPerson, removeFaceFromPerson } from '@/common/api';
+import { getPersonsPage, assignFaceToPerson, addManualFace, deleteFace, removeFaceFromPerson } from '@/common/api';
 import { PERSON_PAGE_SIZE } from '@/common/constants';
 import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
 import { useUIStore } from '@/stores/uiStore';
-import { IconPerson, IconSearch, IconOk, IconAdd } from '@/common/icons';
+import { IconPerson, IconSearch, IconOk, IconAdd, IconTrash } from '@/common/icons';
 import ModalDialog from '@/components/ModalDialog.vue';
 
 export interface AssignFaceTarget {
-  id: number;
+  /** Existing face id, or null when adding a new manual person/pet tag. */
+  id: number | null;
+  file_id?: number;
   person_id?: number | null;
   person_name?: string | null;
   thumbnail?: string | null;
+  /** "face" or "pet": pets are named as pets, faces as people (can be toggled). */
+  kind?: string | null;
+  /** True for manually added tags/boxes. */
+  manual?: boolean;
+  /** Normalized 0..1 box when creating a new manual tag by dragging on the photo. */
+  norm_bbox?: { x: number; y: number; width: number; height: number } | null;
 }
 
 interface PersonSummary {
@@ -184,7 +234,39 @@ let loadRequest = 0;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let mounted = true;
 
+const KIND_OPTIONS = [
+  { kind: 'person', label: 'menu.person.kind_people' },
+  { kind: 'pet', label: 'menu.person.kind_pets' },
+] as const;
+
+const isNewManual = computed(() => props.face.id === null);
+const thumbnailSrc = computed(() => {
+  const thumb = props.face.thumbnail || '';
+  if (!thumb) return '';
+  return thumb.startsWith('data:') ? thumb : `data:image/jpeg;base64,${thumb}`;
+});
+
+const initialKind: 'person' | 'pet' = props.face.kind === 'pet' ? 'pet' : 'person';
+const targetKind = ref<'person' | 'pet'>(initialKind);
+
+function setTargetKind(kind: 'person' | 'pet') {
+  if (targetKind.value === kind) return;
+  targetKind.value = kind;
+  selected.value = null;
+  void loadPersons(true);
+}
+
 const currentName = computed(() => props.face.person_name?.trim() || t('menu.person.unnamed'));
+
+// Faces in an automatic group ("Person 54", or unnamed) are named as a group by default:
+// "Person 54" is a placeholder, so naming one of its faces names all of them.
+// Never apply to a whole group when switching between person and pet, or when adding manually.
+const isAutoGroup = computed(() => {
+  if (isNewManual.value || targetKind.value !== initialKind) return false;
+  const name = props.face.person_name?.trim() || '';
+  return Boolean(props.face.person_id) && (!name || /^(Person|Pet) \d+$/.test(name));
+});
+const applyToGroup = ref(true);
 
 function displayName(person: PersonSummary) {
   return person.name?.trim() || t('menu.person.unnamed');
@@ -212,6 +294,7 @@ async function loadPersons(reset = true) {
   }
   try {
     const page = await getPersonsPage({
+      kind: targetKind.value,
       sort: config.settings.personSort,
       offset: offset.value,
       limit: PERSON_PAGE_SIZE,
@@ -255,9 +338,26 @@ async function handleConfirm() {
   try {
     const target = selected.value;
     const name = target ? displayName(target) : createName.value;
-    const personId = await assignFaceToPerson(props.face.id, (target ? { personId: target.id } : { name }) as any);
-    void tauriEmit(PERSONS_CHANGED_EVENT, { personId });
-    emit('changed', { personId, message: t('menu.person.assign_success', { name }) });
+    let result: any;
+    if (isNewManual.value) {
+      result = await addManualFace(Number(props.face.file_id), {
+        bbox: props.face.norm_bbox || null,
+        ...(target ? { personId: target.id } : { name }),
+        kind: targetKind.value,
+      });
+    } else {
+      result = await assignFaceToPerson(props.face.id as number, {
+        ...(target ? { personId: target.id } : { name }),
+        wholeGroup: isAutoGroup.value && applyToGroup.value,
+        kind: targetKind.value,
+      } as any);
+    }
+    const personId = Number(result?.person_id);
+    const added = Number(result?.added || 0);
+    void tauriEmit(PERSONS_CHANGED_EVENT, { personId, fileId: props.face.file_id ?? null });
+    const message = t('menu.person.assign_success', { name })
+      + (added > 0 ? ` · ${t('menu.person.assign_added', { count: added })}` : '');
+    emit('changed', { personId, message });
   } catch (error) {
     errorMessage.value = String(error);
   } finally {
@@ -266,13 +366,28 @@ async function handleConfirm() {
 }
 
 async function handleReject() {
-  if (isSaving.value) return;
+  if (isSaving.value || props.face.id === null) return;
   isSaving.value = true;
   errorMessage.value = '';
   try {
     const personId = await removeFaceFromPerson(props.face.id);
-    void tauriEmit(PERSONS_CHANGED_EVENT, { personId });
+    void tauriEmit(PERSONS_CHANGED_EVENT, { personId, fileId: props.face.file_id ?? null });
     emit('changed', { personId: null, message: t('menu.person.removed_from_person', { count: 1, name: currentName.value }) });
+  } catch (error) {
+    errorMessage.value = String(error);
+  } finally {
+    isSaving.value = false;
+  }
+}
+
+async function handleDelete() {
+  if (isSaving.value || props.face.id === null) return;
+  isSaving.value = true;
+  errorMessage.value = '';
+  try {
+    const personId = await deleteFace(props.face.id);
+    void tauriEmit(PERSONS_CHANGED_EVENT, { personId, fileId: props.face.file_id ?? null });
+    emit('changed', { personId: null, message: t('menu.person.removed_face') });
   } catch (error) {
     errorMessage.value = String(error);
   } finally {

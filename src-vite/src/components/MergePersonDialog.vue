@@ -1,12 +1,12 @@
 <template>
   <ModalDialog
-    :title="$t('menu.person.merge_dialog_title')"
+    :title="$t(isPet ? 'menu.person.merge_dialog_title_pet' : 'menu.person.merge_dialog_title')"
     :width="480"
     @cancel="handleCancel"
   >
     <div class="flex flex-col gap-3">
       <p class="text-xs text-base-content/60 leading-relaxed">
-        {{ $t('menu.person.merge_dialog_hint') }}
+        {{ $t(isPet ? 'menu.person.merge_dialog_hint_pet' : 'menu.person.merge_dialog_hint') }}
       </p>
 
       <!-- Visual Source -> Target Merge Preview -->
@@ -57,7 +57,7 @@
                 selectedTarget ? 'font-medium text-base-content' : 'text-base-content/40 italic',
               ]"
             >
-              {{ selectedTarget ? getDisplayName(selectedTarget) : $t('menu.person.merge_select_target') }}
+              {{ selectedTarget ? getDisplayName(selectedTarget) : $t(isPet ? 'menu.person.merge_select_target_pet' : 'menu.person.merge_select_target') }}
             </div>
             <div v-if="selectedTarget?.count != null" class="text-[11px] tabular-nums text-base-content/45">
               {{ Number(selectedTarget.count).toLocaleString() }}
@@ -78,7 +78,7 @@
           ref="searchInputRef"
           v-model="searchQuery"
           type="text"
-          :placeholder="$t('menu.person.search')"
+          :placeholder="$t(isPet ? 'menu.person.search_pets' : 'menu.person.search')"
           class="w-full min-w-0 bg-transparent border-none focus:ring-0 px-2 text-sm placeholder-base-content/35 focus:outline-none"
           @focus="isSearchFocused = true"
           @blur="isSearchFocused = false"
@@ -107,7 +107,7 @@
           class="h-40 px-6 flex flex-col items-center justify-center text-center gap-1.5 text-xs text-base-content/50"
         >
           <IconPerson class="w-6 h-6 opacity-35" />
-          <span>{{ $t('menu.person.merge_no_candidates') }}</span>
+          <span>{{ $t(isPet ? 'menu.person.merge_no_candidates_pet' : 'menu.person.merge_no_candidates') }}</span>
         </div>
 
         <button
@@ -160,7 +160,7 @@
           type="text"
           maxlength="255"
           :disabled="!selectedTarget || isMerging"
-          :placeholder="$t('menu.person.merge_name_placeholder')"
+          :placeholder="$t(isPet ? 'menu.person.merge_name_placeholder_pet' : 'menu.person.merge_name_placeholder')"
           class="input input-sm w-full bg-base-100/60 border-base-content/15 focus:border-primary text-sm"
           @input="hasEditedName = true"
           @keydown.enter.prevent="handleConfirm"
@@ -211,13 +211,20 @@ export interface MergePersonSummary {
   name?: string | null;
   count?: number | null;
   thumbnail?: string | null;
+  kind?: 'person' | 'pet' | null;
 }
 
 const props = defineProps<{
   sourcePerson: MergePersonSummary;
+  kind?: 'person' | 'pet';
   isMerging?: boolean;
   errorMessage?: string;
 }>();
+
+const effectiveKind = computed<'person' | 'pet'>(() =>
+  (props.kind ?? props.sourcePerson.kind) === 'pet' ? 'pet' : 'person',
+);
+const isPet = computed(() => effectiveKind.value === 'pet');
 
 const emit = defineEmits<{
   (e: 'cancel'): void;
@@ -278,6 +285,7 @@ async function loadCandidates(reset = true) {
 
   try {
     const page = await getPersonsPage({
+      kind: effectiveKind.value,
       sort: config.settings.personSort,
       offset: offset.value,
       limit: PERSON_PAGE_SIZE,

@@ -215,9 +215,14 @@ fn write_build_info() {
 }
 
 fn current_git_commit_hash() -> Option<String> {
-    println!("cargo:rerun-if-changed=../.git/HEAD");
-    println!("cargo:rerun-if-changed=../.git/refs/heads");
-    println!("cargo:rerun-if-changed=../.git/packed-refs");
+    // Only release-based profiles track git refs. In dev builds, watching
+    // them reruns this script (and recompiles LibRaw) on every commit or
+    // branch switch, so the embedded hash may be stale there.
+    if env::var("PROFILE").as_deref() == Ok("release") {
+        println!("cargo:rerun-if-changed=../.git/HEAD");
+        println!("cargo:rerun-if-changed=../.git/refs/heads");
+        println!("cargo:rerun-if-changed=../.git/packed-refs");
+    }
 
     let output = Command::new("git")
         .args(["rev-parse", "--short=7", "HEAD"])
@@ -385,6 +390,13 @@ fn build_libraw() {
             .compile("lap_photos_kit");
         println!("cargo:rustc-link-lib=framework=Photos");
         println!("cargo:rustc-link-lib=framework=Foundation");
+
+        println!("cargo:rerun-if-changed=src/vision_animals.mm");
+        cc::Build::new()
+            .file("src/vision_animals.mm")
+            .flag("-fobjc-arc")
+            .compile("lap_vision_animals");
+        println!("cargo:rustc-link-lib=framework=Vision");
     } else if target_os == "linux" {
         println!("cargo:rerun-if-changed=src/clipboard_linux.c");
         let gtk = pkg_config::Config::new()

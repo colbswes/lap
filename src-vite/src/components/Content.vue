@@ -843,7 +843,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          moveFile, moveFileOutsideLibrary, copyFile, withFileTransferBatch, batchDeleteFiles, getFileThumb, getFileThumbById, getFileThumbs, getFileInfo,
          setFileRotate, setFileFavorite, setFileRating, setFileCullingFlag, batchUpdateFileMetadata, getTagsForFile, searchSimilarImages, generateEmbedding,
          getTagName, indexAlbum, listenIndexProgress, listenIndexFinished, setAlbumCover, setDesktopWallpaper,
-         updateFileInfo, refreshFileInfo, changeVideoThumbnail, getSupportedFormatExtensions, importFiles, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, isCloudOnlyFile, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, removePersonFromFiles, listenFaceIndexProgress,
+         updateFileInfo, refreshFileInfo, changeVideoThumbnail, getSupportedFormatExtensions, importFiles, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, isCloudOnlyFile, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, scanFileFaces, removePersonFromFiles, listenFaceIndexProgress,
          openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, setLastSelectedItemIndex,
          dedupDelete, getQueryFilePosition, getFolderSearchExcluded,
          listCollections, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile, saveXmpMetadata } from '@/common/api';
@@ -4986,6 +4986,29 @@ function handleItemAction(payload: { action: string, index: number }) {
     'find-person': () => {
       if (!config.settings.face.enabled) return;
       enterPersonSearchMode(fileList.value[selectedItemIndex.value]);
+    },
+    'scan-faces': async () => {
+      if (!config.settings.face.enabled) return;
+      const file = fileList.value[selectedItemIndex.value];
+      if (!file?.id) return;
+      try {
+        const res: any = await scanFileFaces(Number(file.id));
+        const added = Number(res?.added || 0);
+        const matched = Number(res?.matched || 0);
+        if (added > 0) {
+          void tauriEmit(PERSONS_CHANGED_EVENT, { fileId: Number(file.id) });
+          toast.success(
+            matched > 0
+              ? t('menu.person.scan_photo_found_matched', { count: added, matched })
+              : t('menu.person.scan_photo_found', { count: added }),
+          );
+        } else {
+          toast.info(t('menu.person.scan_photo_none'));
+        }
+      } catch (error) {
+        console.error('Failed to scan photo for faces:', error);
+        toast.error(t('menu.person.scan_photo_failed'));
+      }
     },
     'remove-from-person': () => {
       const file = fileList.value[selectedItemIndex.value];

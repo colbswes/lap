@@ -5041,8 +5041,10 @@ pub fn merge_persons(
 pub fn find_person_by_name(
     name: String,
     exclude_person_id: Option<i64>,
+    kind: Option<String>,
 ) -> Result<Option<Person>, String> {
-    Person::find_by_name(&name, exclude_person_id)
+    let parsed_kind = kind.as_deref().map(|k| t_sqlite::PersonKind::parse(Some(k)));
+    Person::find_by_name(&name, exclude_person_id, parsed_kind)
         .map_err(|e| format!("Error while finding person by name: {}", e))
 }
 
@@ -5074,27 +5076,134 @@ fn refresh_person_thumbnails(person_ids: &[Option<i64>]) {
     }
 }
 
-/// Confirm a face as a person: an existing `person_id`, or the person called `name`
-/// (created if missing). Returns the person id.
+/// Confirm a face as a person or pet: an existing `person_id`, or the person/pet
+/// called `name` (created if missing). Allows reclassifying a misdetected face
+/// between person and pet, re-embedding with the pet model when switching to pet.
 #[tauri::command]
 pub async fn assign_face_to_person(
+    app_handle: tauri::AppHandle,
+    face_state: State<'_, t_face::FaceState>,
     face_id: i64,
     person_id: Option<i64>,
     name: Option<String>,
-) -> Result<i64, String> {
-    let target_id = match (person_id, name.as_deref().map(str::trim).filter(|n| !n.is_empty())) {
-        (Some(id), _) => id,
-        (None, Some(name)) => match Person::find_by_name(name, None)? {
-            Some(person) => person.id,
-            None => Person::create(Some(name))?,
-        },
+    whole_group: Option<bool>,
+    kind: Option<String>,
+) -> Result<AssignFaceResult, String> {
+    let current_kind = t_sqlite::Face::person_kind_of(face_id)?;
+    let target_kind = match (person_id, kind.as_deref()) {
+        (Some(id), _) => Person::kind_of(id)?,
+        (None, Some(k)) => t_sqlite::PersonKind::parse(Some(k)),
+        (None, None) => current_kind,
+    };
+    let name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    // Existing target (picked, or an existing person/pet with the typed name), if any.
+    let existing_target = match (person_id, name) {
+        (Some(id), _) => Some(id),
+        (None, Some(name)) => Person::find_by_name(name, None, Some(target_kind))?.map(|p| p.id),
         (None, None) => return Err("A person id or name is required".to_string()),
     };
+
     let mut conn = t_sqlite::open_conn()?;
-    let old_person = t_sqlite::Face::assign_confirmed_with_conn(&mut conn, face_id, target_id)
-        .map_err(|e| format!("Error while assigning face: {}", e))?;
-    refresh_person_thumbnails(&[Some(target_id), old_person]);
-    Ok(target_id)
+    let (group_id, group_name): (Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT f.person_id, p.name FROM faces f LEFT JOIN persons p ON p.id = f.person_id WHERE f.id = ?1",
+            rusqlite::params![face_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let switching_kind = target_kind != current_kind;
+    if switching_kind {
+        let new_embedding = if target_kind == t_sqlite::PersonKind::Pet {
+            if let Some((file_id, file_path, width, height, (bx, by, bw, bh))) =
+                t_sqlite::Face::file_and_bbox_with_conn(&conn, face_id)?
+            {
+                let norm_box = (bx / width, by / height, bw / width, bh / height);
+                if let Some(image_bytes) = t_face::decode_image_for_faces(file_id, &file_path) {
+                    let mut engine = face_state.0.lock().map_err(|_| "Face engine lock poisoned".to_string())?;
+                    if !engine.is_loaded() {
+                        let _ = engine.load_models(&app_handle);
+                    }
+                    engine.embed_pet_box_from_bytes(&image_bytes, norm_box).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        t_sqlite::Face::reclassify_with_conn(&conn, face_id, target_kind, new_embedding.as_deref())?;
+    }
+
+    // "Person 54" is a placeholder: naming one of its faces names the whole group
+    // (only when staying within the same kind).
+    let auto_group = if switching_kind {
+        None
+    } else {
+        group_id.filter(|_| {
+            whole_group.unwrap_or(false) && group_name.as_deref().map_or(true, is_auto_person_name)
+        })
+    };
+
+    let (target_id, seeds) = match (auto_group, existing_target) {
+        (Some(group), Some(target)) if group != target => {
+            let seeds = t_sqlite::Face::ids_of_person(&conn, group)?;
+            Person::merge_with_conn(&mut conn, &[group], target, None)
+                .map_err(|e| format!("Error while merging into person: {}", e))?;
+            (target, seeds)
+        }
+        (Some(group), None) => {
+            Person::rename_with_conn(&conn, group, name.unwrap_or_default())?;
+            (group, t_sqlite::Face::ids_of_person(&conn, group)?)
+        }
+        _ => {
+            let target = match existing_target {
+                Some(id) => id,
+                None => Person::create_of_kind(name, target_kind)?,
+            };
+            t_sqlite::Face::assign_confirmed_with_conn(&mut conn, face_id, target)
+                .map_err(|e| format!("Error while assigning face: {}", e))?;
+            (target, vec![face_id])
+        }
+    };
+
+    // Teach right away: similar unconfirmed faces join the person now.
+    let added = t_sqlite::Face::expand_from_seeds(&conn, target_id, &seeds)?;
+    refresh_person_thumbnails(&[Some(target_id), group_id]);
+    Ok(AssignFaceResult { person_id: target_id, added })
+}
+
+/// Result of naming a face: the person it now belongs to and how many other faces joined.
+#[derive(serde::Serialize)]
+pub struct AssignFaceResult {
+    pub person_id: i64,
+    pub added: usize,
+}
+
+/// Auto-generated names ("Person 54", "Pet 3") are placeholders, not user names.
+fn is_auto_person_name(name: &str) -> bool {
+    let name = name.trim();
+    name.is_empty()
+        || ["Person ", "Pet "].iter().any(|prefix| {
+            name.strip_prefix(prefix)
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        })
+}
+
+/// Confirm Lap pets with the pet names given in Apple Photos.
+#[tauri::command]
+pub async fn import_apple_pets(
+    app_handle: tauri::AppHandle,
+    state: State<'_, t_face::FaceState>,
+) -> Result<crate::t_apple_photos::AppleIdentityImport, String> {
+    let face_state = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::t_apple_photos::import_apple_identities(&app_handle, &face_state)
+    })
+    .await
+    .map_err(|e| format!("Apple Photos pet import task failed: {e}"))?
 }
 
 /// Mark a face as not being its current person. Returns that person's id.
@@ -5118,6 +5227,256 @@ pub async fn remove_person_from_files(person_id: i64, file_ids: Vec<i64>) -> Res
     }
     refresh_person_thumbnails(&[Some(person_id)]);
     Ok(face_ids.len())
+}
+
+/// Normalized bounding box (top-left origin, 0..1) for a manually drawn person/pet tag.
+#[derive(serde::Deserialize)]
+pub struct ManualFaceBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Result of manually scanning a single photo for faces and pets.
+#[derive(serde::Serialize)]
+pub struct ScanFileFacesResult {
+    pub added: usize,
+    pub matched: usize,
+    pub total: usize,
+}
+
+/// Manually add a person or pet tag to a photo, with an optional drawn bounding box
+/// (normalized 0..1 coordinates). Confirmed immediately; embeds pets (DINOv2) and
+/// landmarked human faces (MobileFaceNet) so manual tags also teach recognition.
+#[tauri::command]
+pub async fn add_manual_face(
+    app_handle: tauri::AppHandle,
+    face_state: State<'_, t_face::FaceState>,
+    file_id: i64,
+    bbox: Option<ManualFaceBox>,
+    person_id: Option<i64>,
+    name: Option<String>,
+    kind: Option<String>,
+) -> Result<AssignFaceResult, String> {
+    let face_state = (*face_state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = t_sqlite::open_conn()?;
+        let (file_path, width, height, file_type) =
+            t_sqlite::Face::file_info_for_scan_with_conn(&conn, file_id)?
+                .ok_or_else(|| format!("File {} not found", file_id))?;
+        if file_type != 1 && file_type != 3 {
+            return Err("Manual face/pet tags are only supported for image files".to_string());
+        }
+
+        let target_kind = match (person_id, kind.as_deref()) {
+            (Some(id), _) => Person::kind_of(id)?,
+            (None, k) => t_sqlite::PersonKind::parse(k),
+        };
+        let trimmed_name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let existing_target = match (person_id, trimmed_name) {
+            (Some(id), _) => Some(id),
+            (None, Some(n)) => Person::find_by_name(n, None, Some(target_kind))?.map(|p| p.id),
+            (None, None) => return Err("A person id or name is required".to_string()),
+        };
+
+        let (bbox_json, embedding) = if let Some(b) = bbox {
+            let nx = b.x.clamp(0.0, 1.0);
+            let ny = b.y.clamp(0.0, 1.0);
+            let nw = b.width.clamp(0.0, 1.0 - nx);
+            let nh = b.height.clamp(0.0, 1.0 - ny);
+            if nw <= 0.0 || nh <= 0.0 {
+                return Err("Bounding box must have positive size".to_string());
+            }
+            if width <= 0 || height <= 0 {
+                return Err("Image dimensions unavailable".to_string());
+            }
+            let json = serde_json::json!({
+                "x": nx * width as f32,
+                "y": ny * height as f32,
+                "width": nw * width as f32,
+                "height": nh * height as f32,
+                "confidence": 1.0,
+                "manual": true,
+            })
+            .to_string();
+
+            let emb = if let Some(image_bytes) = t_face::decode_image_for_faces(file_id, &file_path)
+            {
+                let mut engine = face_state
+                    .0
+                    .lock()
+                    .map_err(|_| "Face engine lock poisoned".to_string())?;
+                if !engine.is_loaded() {
+                    let _ = engine.load_models(&app_handle);
+                }
+                let norm = (nx, ny, nw, nh);
+                match target_kind {
+                    t_sqlite::PersonKind::Pet => engine.embed_pet_box_from_bytes(&image_bytes, norm).ok(),
+                    t_sqlite::PersonKind::Person => engine
+                        .embed_face_box_from_bytes(&image_bytes, norm)
+                        .ok()
+                        .flatten(),
+                }
+            } else {
+                None
+            };
+            (json, emb)
+        } else {
+            ("{}".to_string(), None)
+        };
+
+        let target_id = match existing_target {
+            Some(id) => id,
+            None => Person::create_of_kind(trimmed_name, target_kind)?,
+        };
+
+        let face_id = t_sqlite::Face::add_manual_with_conn(
+            &mut conn,
+            file_id,
+            &bbox_json,
+            embedding.as_deref(),
+            target_kind.face_kind(),
+            target_id,
+        )?;
+
+        let added = if embedding.is_some() {
+            t_sqlite::Face::expand_from_seeds(&conn, target_id, &[face_id])?
+        } else {
+            0
+        };
+        refresh_person_thumbnails(&[Some(target_id)]);
+        Ok(AssignFaceResult {
+            person_id: target_id,
+            added,
+        })
+    })
+    .await
+    .map_err(|e| format!("Manual face task failed: {e}"))?
+}
+
+/// Delete a face/pet detection or manual tag. Returns its previous person id if any.
+#[tauri::command]
+pub async fn delete_face(face_id: i64) -> Result<Option<i64>, String> {
+    let mut conn = t_sqlite::open_conn()?;
+    let old_person = t_sqlite::Face::delete_face_with_conn(&mut conn, face_id)
+        .map_err(|e| format!("Error while deleting face: {}", e))?;
+    refresh_person_thumbnails(&[old_person]);
+    Ok(old_person)
+}
+
+/// Run face and pet detection on a single photo on demand, preserving existing tags and
+/// matching newly found detections against known people and pets right away.
+#[tauri::command]
+pub async fn scan_file_faces(
+    app_handle: tauri::AppHandle,
+    face_state: State<'_, t_face::FaceState>,
+    file_id: i64,
+) -> Result<ScanFileFacesResult, String> {
+    let face_state = (*face_state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = t_sqlite::open_conn()?;
+        let (file_path, width, height, file_type) =
+            t_sqlite::Face::file_info_for_scan_with_conn(&conn, file_id)?
+                .ok_or_else(|| format!("File {} not found", file_id))?;
+        if file_type != 1 && file_type != 3 {
+            return Err("Face and pet scanning is only supported for image files".to_string());
+        }
+
+        let image_bytes = t_face::decode_image_for_faces(file_id, &file_path)
+            .ok_or_else(|| "Unable to decode photo for scanning".to_string())?;
+
+        let (mut detections, (proc_w, proc_h)) = {
+            let mut engine = face_state
+                .0
+                .lock()
+                .map_err(|_| "Face engine lock poisoned".to_string())?;
+            if !engine.is_loaded() {
+                engine.load_models(&app_handle)?;
+            }
+            engine.detect_all_from_bytes(&image_bytes)?
+        };
+
+        let target_w = if width > 0 { width as f32 } else { proc_w as f32 };
+        let target_h = if height > 0 { height as f32 } else { proc_h as f32 };
+        let scale_x = target_w / proc_w as f32;
+        let scale_y = target_h / proc_h as f32;
+        for det in &mut detections {
+            det.bbox.x *= scale_x;
+            det.bbox.y *= scale_y;
+            det.bbox.width *= scale_x;
+            det.bbox.height *= scale_y;
+        }
+
+        let existing = t_sqlite::Face::bboxes_for_file_with_conn(&conn, file_id)?;
+        let dismissed = t_sqlite::Face::dismissed_bboxes_for_file_with_conn(&conn, file_id)?;
+        let already_had_faces = !existing.is_empty();
+        detections.retain(|det| {
+            let b = &det.bbox;
+            let overlaps = |(kind, (x, y, w, h)): &(String, (f32, f32, f32, f32))| {
+                kind == det.kind
+                    && t_face::box_iou((b.x, b.y, b.width, b.height), (*x, *y, *w, *h))
+                        >= t_face::RESCAN_SAME_FACE_IOU
+            };
+            !existing.iter().any(overlaps) && !dismissed.iter().any(overlaps)
+        });
+
+        let mut added = 0usize;
+        let mut matched = 0usize;
+        let mut touched_persons: Vec<Option<i64>> = Vec::new();
+        for det in &detections {
+            let bbox_json = serde_json::json!({
+                "x": det.bbox.x,
+                "y": det.bbox.y,
+                "width": det.bbox.width,
+                "height": det.bbox.height,
+                "confidence": det.bbox.confidence,
+            })
+            .to_string();
+            let face_id = t_sqlite::Face::add_with_conn(
+                &conn,
+                file_id,
+                &bbox_json,
+                &det.embedding,
+                det.low_quality,
+                det.kind,
+                det.species,
+            )?;
+            added += 1;
+            if det.kind == "pet" {
+                let b = &det.bbox;
+                let _ = t_sqlite::Face::delete_overlapping_unassigned_face_false_positives_with_conn(
+                    &conn,
+                    file_id,
+                    (b.x, b.y, b.width, b.height),
+                );
+            }
+            let threshold = if det.kind == "pet" {
+                t_common::PET_CLUSTER_THRESHOLD
+            } else {
+                0.42
+            };
+            if let Some(pid) =
+                t_sqlite::Face::match_face_to_existing_person_with_conn(&conn, face_id, threshold)?
+            {
+                matched += 1;
+                touched_persons.push(Some(pid));
+            }
+        }
+
+        let status = if added > 0 || already_had_faces { 1 } else { 2 };
+        let _ = t_sqlite::Face::mark_scanned_with_conn(&conn, file_id, status);
+        refresh_person_thumbnails(&touched_persons);
+
+        let total = t_sqlite::Face::get_for_file(file_id)?.len();
+        Ok(ScanFileFacesResult {
+            added,
+            matched,
+            total,
+        })
+    })
+    .await
+    .map_err(|e| format!("Photo scan task failed: {e}"))?
 }
 
 // ----------------------------------------------------------------------------

@@ -1,27 +1,37 @@
 <template>
   <div class="sidebar-panel relative overflow-hidden">
-    <!-- Face Indexing Progress Overlay -->
-    <div v-if="isIndexing" 
+    <!-- Face Indexing / Apple Pet Import Progress Overlay -->
+    <div v-if="isIndexing || isImportingApplePets" 
       class="absolute inset-0 z-50 bg-base-200/80 backdrop-blur-md"
     >
-      <div class="mt-8 px-2 flex flex-col items-center text-base-content/30">
+      <div class="mt-8 px-2 flex flex-col items-center text-base-content/50">
         <IconUpdate class="w-8 h-8 mb-2 animate-spin" />
-        <span class="text-sm text-center">
-          {{ indexProgress.phase === 'clustering' 
-            ? $t('face_index.clustering') 
-            : $t('face_index.indexing', { current: indexProgress.current.toLocaleString(), total: indexProgress.total.toLocaleString() }) 
-          }}
-        </span>
-        <span v-if="indexProgress.phase === 'clustering' && clusterProgressText" class="text-xs text-center mt-1">
-          {{ clusterProgressText }}
-        </span>
-        <span v-else-if="indexProgress.faces_found > 0" class="text-xs text-center mt-1">
-          {{ $t('face_index.faces_found', { count: indexProgress.faces_found.toLocaleString() }) }}
-        </span>
-        <button class="btn btn-primary btn-sm mt-4" @click="clickCancelIndex">
-          <IconClose class="w-4 h-4" />
-          {{ $t('face_index.cancel') }}
-        </button>
+        <template v-if="isImportingApplePets && !isIndexing">
+          <span class="text-sm text-center">
+            {{ appleImportProgress.total > 0
+              ? $t('menu.person.apple_pets_importing_progress', { current: appleImportProgress.current.toLocaleString(), total: appleImportProgress.total.toLocaleString() })
+              : $t('menu.person.apple_pets_importing')
+            }}
+          </span>
+        </template>
+        <template v-else>
+          <span class="text-sm text-center">
+            {{ indexProgress.phase === 'clustering' 
+              ? $t('face_index.clustering') 
+              : $t('face_index.indexing', { current: indexProgress.current.toLocaleString(), total: indexProgress.total.toLocaleString() }) 
+            }}
+          </span>
+          <span v-if="indexProgress.phase === 'clustering' && clusterProgressText" class="text-xs text-center mt-1">
+            {{ clusterProgressText }}
+          </span>
+          <span v-else-if="indexProgress.faces_found > 0" class="text-xs text-center mt-1">
+            {{ $t('face_index.faces_found', { count: indexProgress.faces_found.toLocaleString() }) }}
+          </span>
+          <button class="btn btn-primary btn-sm mt-4" @click="clickCancelIndex">
+            <IconClose class="w-4 h-4" />
+            {{ $t('face_index.cancel') }}
+          </button>
+        </template>
       </div>
     </div>
 
@@ -32,7 +42,7 @@
           <span class="text-xs flex-1">
             {{ $t('face_index.incomplete', { count: incompleteCount.toLocaleString() }) }}
           </span>
-          <button class="btn btn-xs btn-primary" @click="clickIndexFaces">
+          <button class="btn btn-xs btn-primary" @click="clickIndexFaces()">
             {{ $t('face_index.resume') }}
           </button>
         </div>
@@ -48,6 +58,24 @@
 
       <SortMenuButton v-model="config.settings.personSort" kind="category" />
       <ContextMenu :menuItems="personPanelMenuItems" :iconMenu="IconMore" :smallIcon="true" />
+    </div>
+
+    <!-- People / Pets -->
+    <div class="mx-1 mb-2 px-1 shrink-0">
+      <div class="grid grid-cols-2 p-0.5 rounded-box bg-base-100/40 border border-base-content/10 text-xs">
+        <button
+          v-for="option in PERSON_KINDS"
+          :key="option.kind"
+          type="button"
+          :class="[
+            'h-6 rounded-box transition-colors cursor-pointer',
+            personKind === option.kind ? 'bg-base-300 text-base-content font-medium' : 'text-base-content/55 hover:text-base-content',
+          ]"
+          @click="personKind = option.kind"
+        >
+          {{ $t(option.label) }}
+        </button>
+      </div>
     </div>
 
     <div class="mx-1 mb-2 px-1 shrink-0">
@@ -168,7 +196,7 @@
     <!-- No Persons Found Message -->
     <div v-else-if="!isIndexing && incompleteCount > 0" class="mt-2 px-2 flex flex-col items-center justify-center text-base-content/30">
       <span class="text-sm text-center">{{ $t('face_index.incomplete', { count: incompleteCount.toLocaleString() }) }}</span>
-      <button class="btn btn-primary btn-sm mt-4 rounded-box" @click="clickIndexFaces">
+      <button class="btn btn-primary btn-sm mt-4 rounded-box" @click="clickIndexFaces()">
         <IconUpdate class="w-4 h-4" />
         {{ $t('face_index.resume') }}
       </button>
@@ -196,6 +224,7 @@
   <MergePersonDialog
     v-if="mergeDialogSource"
     :source-person="mergeDialogSource"
+    :kind="personKind"
     :is-merging="isMergingPersons"
     :error-message="mergeDialogError"
     @cancel="closeMergeDialog"
@@ -266,7 +295,7 @@
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { config, libConfig } from '@/common/config';
-import { getPersonsPage, renamePerson, deletePerson, mergePersons, findPersonByName, indexFaces, cancelFaceIndex, isFaceIndexing, listenFaceIndexProgress, listenFaceIndexFinished, listenClusterProgress, resetFaces, getFaceStats } from '@/common/api';
+import { getPersonsPage, renamePerson, deletePerson, mergePersons, findPersonByName, indexFaces, cancelFaceIndex, isFaceIndexing, listenFaceIndexProgress, listenFaceIndexFinished, listenClusterProgress, resetFaces, getFaceStats, importApplePets } from '@/common/api';
 import { resolveMergedPersonName } from '@/common/personMerge';
 import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
 import { listen } from '@tauri-apps/api/event';
@@ -392,6 +421,12 @@ const personPanelMenuItems = computed(() => [
     action: () => clickIndexFaces(true),
     disabled: isIndexing.value,
   },
+  {
+    label: localeMsg.value.menu.person.import_apple_pets,
+    icon: IconUpdate,
+    action: () => clickImportApplePets(),
+    disabled: isIndexing.value || isImportingApplePets.value,
+  },
   { label: "-", action: null },
   {
     label: localeMsg.value.menu.person.reset_index,
@@ -494,6 +529,54 @@ watch(() => config.settings.personSort, () => {
   loadPersons();
 });
 
+// People and pets are separate lists; switching clears the selection.
+const PERSON_KINDS = [
+  { kind: 'person', label: 'menu.person.kind_people' },
+  { kind: 'pet', label: 'menu.person.kind_pets' },
+] as const;
+const personKind = computed({
+  get: () => (config.settings.personKind === 'pet' ? 'pet' : 'person'),
+  set: (value: 'person' | 'pet') => { config.settings.personKind = value; },
+});
+watch(personKind, () => {
+  libConfig.person.id = null;
+  libConfig.person.name = null;
+  void loadPersons(true);
+});
+
+const isImportingApplePets = ref(false);
+const appleImportProgress = ref({ current: 0, total: 0 });
+
+// Confirm pets named in Apple Photos, then re-cluster so the names spread.
+async function clickImportApplePets() {
+  if (isIndexing.value || isImportingApplePets.value) return;
+  isImportingApplePets.value = true;
+  appleImportProgress.value = { current: 0, total: 0 };
+  personKind.value = 'pet';
+  let unlistenImportProgress: (() => void) | null = null;
+  try {
+    unlistenImportProgress = await listen('apple_pet_import_progress', (event: any) => {
+      appleImportProgress.value = {
+        current: Number(event?.payload?.current ?? 0),
+        total: Number(event?.payload?.total ?? 0),
+      };
+    });
+    const result: any = await importApplePets();
+    toast.success(t('menu.person.apple_pets_imported', { count: result?.confirmed ?? 0, names: result?.names ?? 0 }));
+    if ((result?.missing_detection ?? 0) > 0) {
+      toast.info(t('menu.person.apple_pets_missing', { count: result.missing_detection }));
+    }
+    await loadPersons(true);
+    await clickIndexFaces();
+  } catch (error) {
+    toast.error(String(error));
+  } finally {
+    if (unlistenImportProgress) unlistenImportProgress();
+    isImportingApplePets.value = false;
+    appleImportProgress.value = { current: 0, total: 0 };
+  }
+}
+
 watch(personSearch, () => {
   if (personSearchTimer) clearTimeout(personSearchTimer);
   personLoadRequest++;
@@ -533,6 +616,7 @@ async function loadPersons(reset = true, validateSelectedPerson = false) {
 
   try {
     const page = await getPersonsPage({
+      kind: personKind.value,
       sort: config.settings.personSort,
       offset: reset ? 0 : allPersons.value.length,
       limit: PERSON_PAGE_SIZE,
@@ -638,7 +722,7 @@ async function handleRenamePerson() {
   }
 
   // If another person already has this exact name, offer to merge instead of creating duplicates.
-  const existing = await findPersonByName(newName, person.id);
+  const existing = await findPersonByName(newName, person.id, personKind.value);
   if (existing && existing.id !== person.id) {
     person.name = previousName;
     pendingRenameMerge.value = {
@@ -909,7 +993,7 @@ async function clickIndexFaces(rescan = false) {
     await loadPersons();
     await checkFaceStats();
   } catch (e) {
-    console.error('indexFaces error:', e);
+    toast.error(String(e));
     isIndexing.value = false;
   }
 }

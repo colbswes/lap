@@ -1,7 +1,8 @@
 <template>
   <div
     ref="container"
-    class="relative isolate w-full h-full overflow-hidden cursor-default"
+    class="relative isolate w-full h-full overflow-hidden"
+    :class="isDrawingFace ? 'cursor-crosshair select-none' : 'cursor-default'"
     style="touch-action: none;"
     @wheel="handleImageWheel"
     @mousemove="onFaceHover"
@@ -75,7 +76,7 @@
         <img
           ref="activeImageEl"
           :src="src"
-          :class="isGrabbing ? (isDraggingImage ? 'cursor-grabbing' : 'cursor-grab') : (hoveredFaceId !== null ? 'cursor-pointer' : 'cursor-default')"
+          :class="isDrawingFace ? 'cursor-crosshair' : (isGrabbing ? (isDraggingImage ? 'cursor-grabbing' : 'cursor-grab') : (hoveredFaceId !== null ? 'cursor-pointer' : 'cursor-default'))"
           :style="getImageStyle(index)"
           draggable="false"
           @mousedown="handleImageMouseDown"
@@ -103,7 +104,7 @@
 
     <!-- Faces Overlay -->
     <div 
-      v-if="showFaceOverlay && faces.length > 0 && !isDraggingImage && !isSlideShow"
+      v-if="showFaceOverlay && (faces.length > 0 || activeDraftFaceBox) && !isDraggingImage && !isSlideShow && imageFilePath[activeImage] === filePath"
       class="absolute inset-0 w-full h-full pointer-events-none overflow-hidden"
     >
       <div
@@ -111,10 +112,10 @@
         :style="{
           width: `${imageSize[activeImage].width}px`,
           height: `${imageSize[activeImage].height}px`,
-          transform: `translate(${position[activeImage].x}px, ${position[activeImage].y}px) 
+          transform: `translate3d(${position[activeImage].x}px, ${position[activeImage].y}px, 0) 
                       scale(${scale[activeImage]}) 
                       rotate(${imageRotate[activeImage]}deg)`,
-          transition: !isDraggingImage && !noTransition && !isResizingContainer ? (isDraggingNavBox ? 'transform 0.2s ease-out' : 'transform 0.3s ease-in-out') : 'none',
+          transition: !isSliding && !isDraggingImage && !noTransition && !isResizingContainer && !isWheelZooming ? (isDraggingNavBox ? 'transform 0.2s ease-out' : 'transform 0.3s ease-in-out') : 'none',
         }"
       >
         <!-- Boxes never take pointer events; hovering/clicking is hit-tested on the
@@ -125,12 +126,7 @@
           :data-face-id="face.id"
           class="absolute"
           :class="showAllFaces || face.person_id === libConfig.person.id || hoveredFaceId === face.id ? 'opacity-100' : 'opacity-0'"
-          :style="{
-            left: `${face.bbox.x}px`,
-            top: `${face.bbox.y}px`,
-            width: `${face.bbox.width}px`,
-            height: `${face.bbox.height}px`,
-          }"
+          :style="getFaceBoxStyle(face.bbox)"
         >
           <div
             v-for="corner in FACE_CORNERS"
@@ -151,16 +147,83 @@
             }"
           >
             <template v-if="face.person_id">{{ face.person_name || t('menu.person.unnamed') }}</template>
-            <template v-else>{{ t('menu.person.unknown_face') }} · <span class="text-white/70">{{ t('menu.person.click_to_name') }}</span></template>
+            <template v-else>{{ t(face.kind === 'pet' ? 'menu.person.unknown_pet' : 'menu.person.unknown_face') }} · <span class="text-white/70">{{ t('menu.person.click_to_name') }}</span></template>
           </div>
         </div>
+
+        <!-- Live manually drawn face/pet box -->
+        <div
+          v-if="activeDraftFaceBox"
+          class="absolute bg-primary/15"
+          :style="{
+            left: `${activeDraftFaceBox.x * 100}%`,
+            top: `${activeDraftFaceBox.y * 100}%`,
+            width: `${activeDraftFaceBox.width * 100}%`,
+            height: `${activeDraftFaceBox.height * 100}%`,
+            outline: `${1.5 / scale[activeImage]}px dashed rgba(255, 255, 255, 0.85)`,
+          }"
+        >
+          <div
+            v-for="corner in FACE_CORNERS"
+            :key="corner.key"
+            class="absolute w-1/8 h-1/8 border-primary"
+            :class="corner.class"
+            :style="corner.style(scale[activeImage])"
+          ></div>
+        </div>
       </div>
+    </div>
+
+    <!-- Floating face/pet tagging controls when Show Faces is active -->
+    <div
+      v-if="showAllFaces && !isSlideShow && !loadError && fileId && [1, 3].includes(Number(fileType))"
+      data-face-toolbar
+      class="absolute left-1/2 -translate-x-1/2 bottom-4 z-60 inline-flex h-9 items-center gap-1 rounded-box bg-base-100/75 backdrop-blur-md px-1.5 shadow border border-base-content/10 text-xs"
+      @mousedown.stop
+      @mouseup.stop
+      @click.stop
+      @dblclick.stop
+    >
+      <template v-if="isDrawingFace">
+        <span class="px-2 text-base-content/80 whitespace-nowrap">{{ $t('menu.person.draw_face_hint') }}</span>
+        <button
+          type="button"
+          class="inline-flex h-7 items-center gap-1 rounded-box px-2 text-base-content/70 hover:bg-base-content/10 hover:text-base-content transition-colors cursor-pointer"
+          @click="cancelDrawFace"
+        >
+          <IconClose class="size-3.5" />
+          <span>{{ $t('msgbox.cancel') }}</span>
+        </button>
+      </template>
+      <template v-else>
+        <button
+          type="button"
+          class="inline-flex h-7 items-center gap-1.5 rounded-box px-2.5 text-base-content/80 hover:bg-base-content/10 hover:text-base-content transition-colors cursor-pointer whitespace-nowrap"
+          :disabled="isScanningFaces"
+          @click="startDrawFace"
+        >
+          <IconAdd class="size-3.5" />
+          <span>{{ $t('menu.person.add_person_or_pet') }}</span>
+        </button>
+        <span class="h-4 w-px bg-base-content/15"></span>
+        <button
+          type="button"
+          class="inline-flex h-7 items-center gap-1.5 rounded-box px-2.5 text-base-content/80 hover:bg-base-content/10 hover:text-base-content transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+          :disabled="isScanningFaces"
+          :title="$t('menu.person.scan_photo_tooltip')"
+          @click="handleScanCurrentPhoto"
+        >
+          <span v-if="isScanningFaces" class="loading loading-spinner loading-xs"></span>
+          <IconRefresh v-else class="size-3.5" />
+          <span>{{ isScanningFaces ? $t('menu.person.scan_photo_scanning') : $t('menu.person.scan_photo') }}</span>
+        </button>
+      </template>
     </div>
 
     <AssignFaceDialog
       v-if="assignFace"
       :face="assignFace"
-      @cancel="assignFace = null"
+      @cancel="onAssignFaceCancel"
       @changed="onFaceChanged"
     />
 
@@ -191,6 +254,7 @@
 import { loadNativeJxl, loadBrowserImage } from '@/common/nativeJxl';
 import { ref, shallowRef, triggerRef, watch, onMounted, onBeforeUnmount, computed, nextTick } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, emit as tauriEmit } from '@tauri-apps/api/event';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
 import { SIDEBAR, GESTURE_LOCK_THRESHOLD, HORIZONTAL_NAV_THRESHOLD, MOUSE_DRAG_NAV_THRESHOLD } from '@/common/constants';
@@ -205,9 +269,10 @@ import {
   isWin,
   setThumbnailDataUrlInflight,
 } from '@/common/utils';
-import { getFacesForFile, getFaceThumbnail, getFileThumbById, getFfmpegBackedImageExtensions } from '@/common/api';
+import { getFacesForFile, getFaceThumbnail, getFileThumbById, getFfmpegBackedImageExtensions, scanFileFaces } from '@/common/api';
+import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
 import AssignFaceDialog, { type AssignFaceTarget } from '@/components/AssignFaceDialog.vue';
-import { RawFace, Face } from '@/common/types';
+import { BBox, RawFace, Face } from '@/common/types';
 import { rawDisplayKey, getRawDisplayOptions, appendRawDisplayParams, type RawPreviewSource, type RawDisplayOptions } from '@/common/rawDisplay';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
@@ -215,7 +280,7 @@ import { createDragPreview, isWindowDragEdge, startNativeFileDrag } from '@/comm
 
 import { checkFileAccessibility, isCloudOnlyFile } from '@/common/api';
 import { setFileAccessibility } from '@/common/availability';
-import { IconCloud, IconError, IconBrightness, IconEmbedded, IconRender } from '@/common/icons';
+import { IconCloud, IconError, IconBrightness, IconEmbedded, IconRender, IconAdd, IconRefresh, IconClose } from '@/common/icons';
 import ImageNavigator from '@/components/ImageNavigator.vue';
 
 const { t } = useI18n();
@@ -1618,7 +1683,9 @@ async function loadFaces(fileId: number | undefined, enabled: boolean) {
   if (seq !== facesRequestSeq || !result?.length) return;
   faces.value = result.map((face: RawFace) => {
     try {
-      return { ...face, bbox: JSON.parse(face.bbox) };
+      const bbox = JSON.parse(face.bbox);
+      if (!bbox || !(Number(bbox.width) > 0) || !(Number(bbox.height) > 0)) return null;
+      return { ...face, bbox };
     } catch (e) {
       console.error("Error parsing face bbox", e);
       return null;
@@ -1627,10 +1694,223 @@ async function loadFaces(fileId: number | undefined, enabled: boolean) {
 }
 
 watch(() => [props.fileId, config.settings.face.enabled], ([newFileId, faceEnabled]) => {
+  cancelDrawFace();
+  pendingManualBox.value = null;
   void loadFaces(newFileId as number | undefined, Boolean(faceEnabled));
 }, { immediate: true });
 
+watch(showAllFaces, (visible) => {
+  if (!visible) {
+    cancelDrawFace();
+    pendingManualBox.value = null;
+  }
+});
+
+// --- Manual face/pet box drawing & single-photo scan ---
+interface NormBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+const isDrawingFace = ref(false);
+const draftFaceBox = ref<NormBox | null>(null);
+const pendingManualBox = ref<NormBox | null>(null);
+const activeDraftFaceBox = computed(() => draftFaceBox.value || pendingManualBox.value);
+const isScanningFaces = ref(false);
+
+let drawFaceOrigin: { clientX: number; clientY: number; nx: number; ny: number } | null = null;
+let unlistenPersonsChanged: (() => void) | null = null;
+
+function clientToImageNorm(clientX: number, clientY: number): { nx: number; ny: number } | null {
+  const root = container.value as HTMLElement | null;
+  const idx = activeImage.value;
+  const img = imageSize.value[idx];
+  const s = scale.value[idx];
+  if (!root || !img.width || !img.height || !s) return null;
+
+  const cr = root.getBoundingClientRect();
+  const mx = clientX - cr.left;
+  const my = clientY - cr.top;
+  const tx = position.value[idx].x;
+  const ty = position.value[idx].y;
+  const rad = ((imageRotate.value[idx] || 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+
+  const dx = (mx - (img.width / 2 + tx)) / s;
+  const dy = (my - (img.height / 2 + ty)) / s;
+  const u = img.width / 2 + dx * cos + dy * sin;
+  const v = img.height / 2 - dx * sin + dy * cos;
+
+  return {
+    nx: Math.max(0, Math.min(1, u / img.width)),
+    ny: Math.max(0, Math.min(1, v / img.height)),
+  };
+}
+
+function cropDraftThumbnail(norm: NormBox): string {
+  try {
+    const raw = activeImageEl.value as unknown as HTMLImageElement | HTMLImageElement[] | null;
+    const imgEl = Array.isArray(raw) ? raw[activeImage.value] : raw;
+    if (!imgEl || !imgEl.naturalWidth || !imgEl.naturalHeight) return '';
+    const nw = imgEl.naturalWidth;
+    const nh = imgEl.naturalHeight;
+    const bx = norm.x * nw;
+    const by = norm.y * nh;
+    const bw = norm.width * nw;
+    const bh = norm.height * nh;
+    const pad = Math.max(bw, bh) * 0.2;
+    const sx = Math.max(0, bx - pad);
+    const sy = Math.max(0, by - pad);
+    const sw = Math.min(nw - sx, bw + pad * 2);
+    const sh = Math.min(nh - sy, bh + pad * 2);
+    if (sw <= 1 || sh <= 1) return '';
+    const size = 112;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    const scaleCover = Math.max(size / sw, size / sh);
+    const dw = sw * scaleCover;
+    const dh = sh * scaleCover;
+    ctx.drawImage(imgEl, sx, sy, sw, sh, (size - dw) / 2, (size - dh) / 2, dw, dh);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } catch {
+    return '';
+  }
+}
+
+function onDrawFaceWindowMove(event: MouseEvent) {
+  if (!drawFaceOrigin) return;
+  const pt = clientToImageNorm(event.clientX, event.clientY);
+  if (!pt) return;
+  const x = Math.min(drawFaceOrigin.nx, pt.nx);
+  const y = Math.min(drawFaceOrigin.ny, pt.ny);
+  const width = Math.abs(pt.nx - drawFaceOrigin.nx);
+  const height = Math.abs(pt.ny - drawFaceOrigin.ny);
+  draftFaceBox.value = { x, y, width, height };
+}
+
+function onDrawFaceWindowUp(event: MouseEvent) {
+  const origin = drawFaceOrigin;
+  drawFaceOrigin = null;
+  window.removeEventListener('mousemove', onDrawFaceWindowMove);
+  window.removeEventListener('mouseup', onDrawFaceWindowUp);
+
+  const box = draftFaceBox.value;
+  draftFaceBox.value = null;
+  if (!origin || !box || !props.fileId) return;
+
+  const dist = Math.hypot(event.clientX - origin.clientX, event.clientY - origin.clientY);
+  if (dist < 10 || box.width < 0.005 || box.height < 0.005) return;
+
+  const thumbnail = cropDraftThumbnail(box);
+  cancelDrawFace();
+  pendingManualBox.value = box;
+  assignFace.value = {
+    id: null,
+    file_id: props.fileId,
+    person_id: null,
+    person_name: null,
+    thumbnail,
+    kind: 'person',
+    manual: true,
+    norm_bbox: box,
+  };
+}
+
+function onDrawFaceKeyDown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && isDrawingFace.value) {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelDrawFace();
+  }
+}
+
+function startDrawFace() {
+  if (isDrawingFace.value) return;
+  cancelPendingFaceClick();
+  hoveredFaceId.value = null;
+  isDrawingFace.value = true;
+  uiStore.pushInputHandler('Image-drawFace');
+  window.addEventListener('keydown', onDrawFaceKeyDown, true);
+}
+
+function cancelDrawFace() {
+  drawFaceOrigin = null;
+  draftFaceBox.value = null;
+  window.removeEventListener('mousemove', onDrawFaceWindowMove);
+  window.removeEventListener('mouseup', onDrawFaceWindowUp);
+  if (isDrawingFace.value) {
+    isDrawingFace.value = false;
+    window.removeEventListener('keydown', onDrawFaceKeyDown, true);
+    uiStore.removeInputHandler('Image-drawFace');
+  }
+}
+
+async function handleScanCurrentPhoto() {
+  if (!props.fileId || isScanningFaces.value) return;
+  isScanningFaces.value = true;
+  try {
+    const res: any = await scanFileFaces(props.fileId);
+    const added = Number(res?.added || 0);
+    const matched = Number(res?.matched || 0);
+    if (added > 0) {
+      void tauriEmit(PERSONS_CHANGED_EVENT, { fileId: props.fileId });
+      await loadFaces(props.fileId, config.settings.face.enabled);
+      toast.success(
+        matched > 0
+          ? t('menu.person.scan_photo_found_matched', { count: added, matched })
+          : t('menu.person.scan_photo_found', { count: added }),
+      );
+    } else {
+      toast.info(t('menu.person.scan_photo_none'));
+    }
+  } catch (error) {
+    console.error('Failed to scan photo for faces:', error);
+    toast.error(t('menu.person.scan_photo_failed'));
+  } finally {
+    isScanningFaces.value = false;
+  }
+}
+
+onMounted(async () => {
+  try {
+    unlistenPersonsChanged = await listen(PERSONS_CHANGED_EVENT, () => {
+      void loadFaces(props.fileId, config.settings.face.enabled);
+    });
+  } catch {
+    // ignore in non-Tauri environments
+  }
+});
+
 // --- Face hover / click-to-name ---
+// Face bboxes are stored in original (afiles.width x afiles.height) pixel coordinates,
+// while backend previews (e.g. 24MP/48MP HEIC capped at 4096px) or thumbnails may render
+// at a smaller layout size. Express boxes as percentages of the original image dimensions
+// so they stay aligned regardless of the rendered preview resolution.
+function getFaceBoxStyle(bbox: BBox) {
+  const img = imageSize.value[activeImage.value];
+  const refW = props.imageWidth > 0 ? props.imageWidth : img.width;
+  const refH = props.imageHeight > 0 ? props.imageHeight : img.height;
+  if (!refW || !refH) {
+    return {
+      left: `${bbox.x}px`,
+      top: `${bbox.y}px`,
+      width: `${bbox.width}px`,
+      height: `${bbox.height}px`,
+    };
+  }
+  return {
+    left: `${(bbox.x / refW) * 100}%`,
+    top: `${(bbox.y / refH) * 100}%`,
+    width: `${(bbox.width / refW) * 100}%`,
+    height: `${(bbox.height / refH) * 100}%`,
+  };
+}
+
 const FACE_CORNERS = [
   { key: 'tl', class: 'top-0 left-0 rounded-tl-lg', style: (s: number) => ({ borderTopWidth: `${2 / s}px`, borderLeftWidth: `${2 / s}px` }) },
   { key: 'tr', class: 'top-0 right-0 rounded-tr-lg', style: (s: number) => ({ borderTopWidth: `${2 / s}px`, borderRightWidth: `${2 / s}px` }) },
@@ -1644,7 +1924,7 @@ let faceMouseDown: { x: number; y: number; faceId: number } | null = null;
 let pendingFaceClick: ReturnType<typeof setTimeout> | null = null;
 
 const faceHitTestEnabled = computed(() =>
-  showFaceOverlay.value && faces.value.length > 0 && !props.isSlideShow
+  showFaceOverlay.value && faces.value.length > 0 && !props.isSlideShow && !isDrawingFace.value
 );
 
 // Smallest face box under the pointer (boxes follow zoom/pan/rotation via their DOM rects).
@@ -1662,16 +1942,36 @@ function faceAt(clientX: number, clientY: number): number | null {
 }
 
 function onFaceHover(event: MouseEvent) {
-  if (isDraggingImage.value || assignFace.value) return;
+  if (isDrawingFace.value || isDraggingImage.value || assignFace.value) return;
   hoveredFaceId.value = faceAt(event.clientX, event.clientY);
 }
 
 function onFaceMouseDown(event: MouseEvent) {
+  if (isDrawingFace.value) {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('[data-face-toolbar]') || target?.closest('[data-raw-preview-controls]')) {
+      return;
+    }
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const pt = clientToImageNorm(event.clientX, event.clientY);
+    if (!pt) return;
+    drawFaceOrigin = { clientX: event.clientX, clientY: event.clientY, nx: pt.nx, ny: pt.ny };
+    draftFaceBox.value = { x: pt.nx, y: pt.ny, width: 0, height: 0 };
+    window.addEventListener('mousemove', onDrawFaceWindowMove);
+    window.addEventListener('mouseup', onDrawFaceWindowUp);
+    return;
+  }
   const faceId = event.button === 0 ? faceAt(event.clientX, event.clientY) : null;
   faceMouseDown = faceId !== null ? { x: event.clientX, y: event.clientY, faceId } : null;
 }
 
 function onFaceMouseUp(event: MouseEvent) {
+  if (isDrawingFace.value) {
+    event.stopPropagation();
+    return;
+  }
   const down = faceMouseDown;
   faceMouseDown = null;
   if (!down || event.button !== 0) return;
@@ -1694,19 +1994,33 @@ async function openAssignFace(faceId: number) {
   const thumbnail = (await getFaceThumbnail(faceId)) || '';
   assignFace.value = {
     id: face.id,
+    file_id: props.fileId,
     person_id: face.person_id || null,
     person_name: face.person_name || null,
     thumbnail,
+    kind: face.kind || 'face',
+    manual: Boolean(face.bbox?.manual),
   };
+}
+
+function onAssignFaceCancel() {
+  assignFace.value = null;
+  pendingManualBox.value = null;
 }
 
 function onFaceChanged(payload: { personId: number | null; message: string }) {
   assignFace.value = null;
+  pendingManualBox.value = null;
   toast.success(payload.message);
   void loadFaces(props.fileId, config.settings.face.enabled);
 }
 
-onBeforeUnmount(cancelPendingFaceClick);
+onBeforeUnmount(() => {
+  cancelPendingFaceClick();
+  cancelDrawFace();
+  unlistenPersonsChanged?.();
+  unlistenPersonsChanged = null;
+});
 
 // watch rotate changes
 watch(() => props.rotate, (newRotate) => {

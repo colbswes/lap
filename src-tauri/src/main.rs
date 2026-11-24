@@ -26,6 +26,7 @@ mod t_dedup;
 mod t_drag;
 mod t_embedded_jpeg;
 mod t_face;
+mod t_pet;
 mod t_heif;
 mod t_http;
 mod t_affinity;
@@ -440,8 +441,12 @@ async fn main() {
             t_cmds::get_faces_for_file,
             t_cmds::get_face_thumbnail,
             t_cmds::assign_face_to_person,
+            t_cmds::add_manual_face,
+            t_cmds::delete_face,
+            t_cmds::scan_file_faces,
             t_cmds::remove_face_from_person,
             t_cmds::remove_person_from_files,
+            t_cmds::import_apple_pets,
             t_af_area::get_af_areas,
             t_cmds::get_person_thumbnail,
             // dedup

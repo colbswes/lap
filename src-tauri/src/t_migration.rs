@@ -206,6 +206,11 @@ fn get_migrations() -> Vec<Migration> {
                 DROP TABLE sideways_face_files;
             ",
         },
+        Migration {
+            version: 26,
+            description: "Keep at most one face of a person per photo",
+            sql: "",
+        },
     ]
 }
 
@@ -585,6 +590,11 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
                     conn.execute_batch(migration.sql)
                         .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;
                 }
+            } else if migration.version == 26 {
+                if table_has_column(conn, "faces", "embedding")? && table_has_column(conn, "faces", "confirmed")? {
+                    let removed = crate::t_sqlite::Person::dedupe_all_per_photo(conn)?;
+                    println!("Unassigned {} duplicate faces of the same person in one photo", removed);
+                }
             } else if migration.version == 21 {
                 migrate_tag_tree(conn)?;
             } else if !migration.sql.trim().is_empty() {
@@ -688,11 +698,11 @@ mod album_filter_migration_tests {
         assert!(!has_exclusion_index(&conn));
         check_and_migrate(&conn).unwrap();
         assert!(has_exclusion_index(&conn));
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 25);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 26);
         // Running again changes nothing.
         check_and_migrate(&conn).unwrap();
         assert!(has_exclusion_index(&conn));
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 25);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 26);
     }
 
     #[test]
@@ -754,7 +764,7 @@ mod album_filter_migration_tests {
         // Simulate migration completing before the version was persisted.
         conn.execute_batch("PRAGMA user_version=17;").unwrap();
         check_and_migrate(&conn).unwrap();
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),25);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),26);
     }
 
     #[test]
@@ -769,7 +779,7 @@ mod album_filter_migration_tests {
         // Simulate migration completing before the version was persisted.
         conn.execute_batch("PRAGMA user_version=18;").unwrap();
         check_and_migrate(&conn).unwrap();
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
     }
 
     #[test]
@@ -784,7 +794,7 @@ mod album_filter_migration_tests {
         conn.execute_batch("UPDATE afiles SET e_title='Existing'; PRAGMA user_version=21;").unwrap();
         check_and_migrate(&conn).unwrap();
         assert_eq!(conn.query_row("SELECT e_title FROM afiles", [], |r| r.get::<_,String>(0)).unwrap(), "Existing");
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_,i32>(0)).unwrap(), 25);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_,i32>(0)).unwrap(), 26);
     }
 }
 

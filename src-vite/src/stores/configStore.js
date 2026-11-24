@@ -163,6 +163,7 @@ export const useConfigStore = defineStore('configStore', {
       tagSort: 0,
       locationSort: 0,
       personSort: 0,
+      personKind: 'person',       // People panel shows 'person' or 'pet'
       cameraSort: 0,
       showSubfolderFiles: false,  // show subfolder files (in album folder view)
 

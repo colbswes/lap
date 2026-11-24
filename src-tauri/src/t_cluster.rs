@@ -293,19 +293,94 @@ where
 
     let mut outcome = ClusterOutcome::default();
     let mut assigned = vec![false; n];
+    let mut suppressed_duplicate = vec![false; n];
     for (i, pid, _) in person_candidates {
         if occupied.insert((nodes[i].file_id, pid)) {
             outcome.matched.push((i, pid));
             assigned[i] = true;
+        } else {
+            // Same person already appears in this photo (e.g. a photo-booth collage);
+            // keep the strongest match and ignore the duplicate copy rather than
+            // letting it fall through and create a new person.
+            suppressed_duplicate[i] = true;
         }
     }
 
-    // 4. Remaining unconfirmed faces form new persons by cluster
+    // Also suppress unconfirmed faces that closely match an already-assigned face in
+    // the SAME photo (e.g. a collage copy wearing sunglasses that had no cross-photo
+    // edges). Same-file edges are skipped in step 1 so distinct people aren't merged,
+    // which means collage duplicates can otherwise look like isolated new people.
+    let same_photo_dup_threshold = threshold.min(0.50);
+    let mut by_file: HashMap<i64, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        by_file.entry(nodes[i].file_id).or_default().push(i);
+    }
+    for indices in by_file.values() {
+        if indices.len() < 2 {
+            continue;
+        }
+        for &i in indices {
+            if nodes[i].confirmed_person.is_some()
+                || assigned[i]
+                || suppressed_duplicate[i]
+                || is_deferred(&nodes[i])
+            {
+                continue;
+            }
+            let Some(emb_i) = &nodes[i].embedding else { continue };
+            let is_dup_of_assigned = indices.iter().any(|&j| {
+                if j == i {
+                    return false;
+                }
+                let Some(pid_j) = nodes[j].confirmed_person.or_else(|| {
+                    if assigned[j] { tentative[j] } else { None }
+                }) else {
+                    return false;
+                };
+                if nodes[i].rejected.contains(&pid_j) {
+                    return false;
+                }
+                nodes[j]
+                    .embedding
+                    .as_deref()
+                    .is_some_and(|emb_j| cosine_distance(emb_i, emb_j) < same_photo_dup_threshold)
+            });
+            if is_dup_of_assigned {
+                suppressed_duplicate[i] = true;
+            }
+        }
+    }
+
+    // 4. Remaining unconfirmed faces form new persons by cluster. A cluster can still
+    //    gather two faces of one photo through other faces, so keep only the member most
+    //    connected to the rest of its cluster in each photo.
     let mut cluster_map: HashMap<usize, Vec<usize>> = HashMap::new();
     for i in 0..n {
-        if nodes[i].confirmed_person.is_none() && !assigned[i] && !is_deferred(&nodes[i]) {
+        if nodes[i].confirmed_person.is_none()
+            && !assigned[i]
+            && !suppressed_duplicate[i]
+            && !is_deferred(&nodes[i])
+        {
             cluster_map.entry(labels[i]).or_default().push(i);
         }
+    }
+    let cluster_support = |i: usize| -> f32 {
+        graph[i]
+            .iter()
+            .filter(|e| labels[e.to] == labels[i] && nodes[e.to].confirmed_person.is_none())
+            .map(|e| e.weight)
+            .sum()
+    };
+    for members in cluster_map.values_mut() {
+        let mut best_in_file: HashMap<i64, (usize, f32)> = HashMap::new();
+        for &i in members.iter() {
+            let s = cluster_support(i);
+            let entry = best_in_file.entry(nodes[i].file_id).or_insert((i, s));
+            if s > entry.1 || (s == entry.1 && i < entry.0) {
+                *entry = (i, s);
+            }
+        }
+        members.retain(|&i| best_in_file[&nodes[i].file_id].0 == i);
     }
     const MIN_SAMPLES: usize = t_common::MIN_SAMPLES;
     let mut clusters: Vec<Vec<usize>> = cluster_map
@@ -314,6 +389,33 @@ where
         .collect();
     // Largest first, so "Person 1" is the most frequent new face.
     clusters.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
+
+    // Suppress duplicate copies of the same unconfirmed person within a single collage
+    // photo across separate new clusters (keeping the highest-priority cluster's copy).
+    let mut kept_in_file: HashMap<i64, Vec<usize>> = HashMap::new();
+    for members in &mut clusters {
+        members.retain(|&i| {
+            let is_dup = nodes[i].embedding.as_deref().is_some_and(|emb_i| {
+                kept_in_file
+                    .get(&nodes[i].file_id)
+                    .is_some_and(|kept| {
+                        kept.iter().any(|&j| {
+                            nodes[j]
+                                .embedding
+                                .as_deref()
+                                .is_some_and(|emb_j| cosine_distance(emb_i, emb_j) < same_photo_dup_threshold)
+                        })
+                    })
+            });
+            if is_dup {
+                false
+            } else {
+                kept_in_file.entry(nodes[i].file_id).or_default().push(i);
+                true
+            }
+        });
+    }
+    clusters.retain(|members| members.len() >= MIN_SAMPLES);
     outcome.new_clusters = clusters;
 
     // 5. Attach low-quality faces to the group they clearly match; leave the rest
@@ -422,6 +524,7 @@ fn attach_low_quality(
 /// faces keep their person and pull similar unconfirmed faces into it.
 pub fn cluster_faces<F, C>(
     threshold: f32,
+    kind: t_sqlite::PersonKind,
     mut progress_fn: F,
     is_cancelled_fn: C,
 ) -> Result<usize, String>
@@ -431,11 +534,13 @@ where
 {
     let mut conn = t_sqlite::open_conn()?;
 
-    // 1. Drop automatic assignments (confirmed faces keep their person)
-    Face::reset_unconfirmed_assignments_with_conn(&mut conn)?;
+    // 1. Repair persons with several faces in one photo, then drop automatic
+    //    assignments (confirmed faces keep their person)
+    Person::dedupe_all_per_photo(&conn)?;
+    Face::reset_unconfirmed_assignments_with_conn(&mut conn, kind)?;
 
     // 2. Load faces and rejections
-    let faces = Face::get_all_for_clustering_with_conn(&conn)?;
+    let faces = Face::get_all_for_clustering_with_conn(&conn, kind)?;
     if faces.is_empty() {
         return Ok(0);
     }
@@ -478,7 +583,7 @@ where
         .iter()
         .map(|members| members.iter().map(|&i| face_ids[i]).collect())
         .collect();
-    let total_assigned = Face::apply_auto_assignments_with_conn(&mut conn, &matched, &new_clusters)?;
+    let total_assigned = Face::apply_auto_assignments_with_conn(&mut conn, kind, &matched, &new_clusters)?;
     progress_fn(ClusterProgress {
         phase: "assign".to_string(),
         current: total_clusters,
@@ -619,5 +724,27 @@ mod tests {
         ];
         let outcome = run(&nodes);
         assert_eq!(outcome.matched, vec![(1, 7)]);
+        // Duplicate copies of person 7 in files 2 and 3 must be ignored, not turned into new people.
+        assert!(outcome.new_clusters.is_empty());
+    }
+
+    #[test]
+    fn collage_duplicates_of_same_person_are_ignored_instead_of_creating_new_people() {
+        // Photo-booth collage (file 10) with:
+        // - 3 copies of confirmed person 7 (one confirmed, one identical, one slightly shifted like sunglasses)
+        // - 2 copies of an unconfirmed person who only appears in this collage
+        // - 1 distinct third person
+        let nodes = vec![
+            node(10, [1.0, 0.0, 0.0, 0.0], Some(7), vec![]),
+            node(10, [0.98, 0.1, 0.0, 0.0], None, vec![]),
+            node(10, [0.85, 0.5, 0.0, 0.0], None, vec![]),
+            node(10, [0.0, 0.0, 1.0, 0.0], None, vec![]),
+            node(10, [0.0, 0.0, 0.96, 0.15], None, vec![]),
+            node(10, [0.0, 0.0, 0.0, 1.0], None, vec![]),
+        ];
+        let outcome = run(&nodes);
+        assert!(outcome.matched.is_empty());
+        // Should keep only 1 copy of the unconfirmed collage person and 1 copy of the distinct person.
+        assert_eq!(outcome.new_clusters, vec![vec![3], vec![5]]);
     }
 }

@@ -2201,13 +2201,7 @@ export async function listenIndexFinished(callback) {
 // index faces for all images in library
 // rescan: re-detect every photo, keeping stored faces and adding only missed ones
 export async function indexFaces(clusterEpsilon, rescan = false) {
-  try {
-    const result = await invoke('index_faces', { clusterEpsilon, rescan });
-    return result;
-  } catch (error) {
-    console.error('Failed to index faces:', error);
-  }
-  return null;
+  return invoke('index_faces', { clusterEpsilon, rescan });
 }
 
 // cancel face indexing
@@ -2322,9 +2316,9 @@ export async function mergePersons(sourceIds, targetId, newName = null) {
 }
 
 // find an existing person by name (case-insensitive, trimmed), optionally excluding one id
-export async function findPersonByName(name, excludePersonId = null) {
+export async function findPersonByName(name, excludePersonId = null, kind = null) {
   try {
-    return await invoke('find_person_by_name', { name, excludePersonId });
+    return await invoke('find_person_by_name', { name, excludePersonId, kind });
   } catch (error) {
     console.error('Failed to find person by name:', error);
   }
@@ -2354,9 +2348,31 @@ export async function getFaceThumbnail(faceId) {
   return null;
 }
 
-// confirm a face as an existing person (personId) or a person by name (created if missing); returns the person id
-export async function assignFaceToPerson(faceId, { personId = null, name = null } = {}) {
-  return await invoke('assign_face_to_person', { faceId, personId, name });
+// Name a face as an existing person/pet (personId) or by name (created if missing). With
+// wholeGroup, a face in an automatic "Person N" group names the whole group. Similar
+// unconfirmed faces join right away. Returns { person_id, added }.
+export async function assignFaceToPerson(faceId, { personId = null, name = null, wholeGroup = false, kind = null } = {}) {
+  return await invoke('assign_face_to_person', { faceId, personId, name, wholeGroup, kind });
+}
+
+// Manually add a person or pet tag to a photo, with an optional normalized bbox ({ x, y, width, height } in 0..1).
+export async function addManualFace(fileId, { bbox = null, personId = null, name = null, kind = 'person' } = {}) {
+  return await invoke('add_manual_face', { fileId, bbox, personId, name, kind });
+}
+
+// Delete a face/pet tag or box. Returns its previous person id if any.
+export async function deleteFace(faceId) {
+  return await invoke('delete_face', { faceId });
+}
+
+// Scan a single photo on demand for faces and pets. Returns { added, matched, total }.
+export async function scanFileFaces(fileId) {
+  return await invoke('scan_file_faces', { fileId });
+}
+
+// confirm Lap pets with the pet names given in Apple Photos (reads the Photos database directly)
+export async function importApplePets() {
+  return await invoke('import_apple_pets');
 }
 
 // mark a face as not being its current person; returns that person's id
