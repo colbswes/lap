@@ -4,6 +4,11 @@
     class="relative isolate w-full h-full overflow-hidden cursor-default"
     style="touch-action: none;"
     @wheel="handleImageWheel"
+    @mousemove="onFaceHover"
+    @mouseleave="hoveredFaceId = null"
+    @mousedown.capture="onFaceMouseDown"
+    @mouseup.capture="onFaceMouseUp"
+    @dblclick.capture="cancelPendingFaceClick"
   >
 
     <!-- Loading overlay -->
@@ -70,7 +75,7 @@
         <img
           ref="activeImageEl"
           :src="src"
-          :class="isGrabbing ? (isDraggingImage ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default'"
+          :class="isGrabbing ? (isDraggingImage ? 'cursor-grabbing' : 'cursor-grab') : (hoveredFaceId !== null ? 'cursor-pointer' : 'cursor-default')"
           :style="getImageStyle(index)"
           draggable="false"
           @mousedown="handleImageMouseDown"
@@ -112,11 +117,14 @@
           transition: !isDraggingImage && !noTransition && !isResizingContainer ? (isDraggingNavBox ? 'transform 0.2s ease-out' : 'transform 0.3s ease-in-out') : 'none',
         }"
       >
+        <!-- Boxes never take pointer events; hovering/clicking is hit-tested on the
+             container so dragging, panning and double-click zoom keep working. -->
         <div
           v-for="face in faces"
           :key="face.id"
-          v-show="face.person_id === libConfig.person.id"
-          class="absolute group"
+          :data-face-id="face.id"
+          class="absolute"
+          :class="showAllFaces || face.person_id === libConfig.person.id || hoveredFaceId === face.id ? 'opacity-100' : 'opacity-0'"
           :style="{
             left: `${face.bbox.x}px`,
             top: `${face.bbox.y}px`,
@@ -124,59 +132,37 @@
             height: `${face.bbox.height}px`,
           }"
         >
-          <!-- Corner: Top Left -->
-          <div 
-            class="absolute top-0 left-0 w-1/8 h-1/8 border-secondary/50 rounded-tl-lg"
-            :style="{ 
-              borderTopWidth: `${2 / scale[activeImage]}px`, 
-              borderLeftWidth: `${2 / scale[activeImage]}px` 
-            }"
-          ></div>
-          
-          <!-- Corner: Top Right -->
-          <div 
-            class="absolute top-0 right-0 w-1/8 h-1/8 border-secondary/50 rounded-tr-lg"
-            :style="{ 
-              borderTopWidth: `${2 / scale[activeImage]}px`, 
-              borderRightWidth: `${2 / scale[activeImage]}px` 
-            }"
+          <div
+            v-for="corner in FACE_CORNERS"
+            :key="corner.key"
+            class="absolute w-1/8 h-1/8"
+            :class="[corner.class, face.person_id === libConfig.person.id && config.main.sidebarIndex === SIDEBAR.PERSON ? 'border-secondary/50' : 'border-white/80']"
+            :style="corner.style(scale[activeImage])"
           ></div>
 
-          <!-- Corner: Bottom Left -->
-          <div 
-            class="absolute bottom-0 left-0 w-1/8 h-1/8 border-secondary/50 rounded-bl-lg"
-            :style="{ 
-              borderBottomWidth: `${2 / scale[activeImage]}px`, 
-              borderLeftWidth: `${2 / scale[activeImage]}px` 
-            }"
-          ></div>
-
-          <!-- Corner: Bottom Right -->
-          <div 
-            class="absolute bottom-0 right-0 w-1/8 h-1/8 border-secondary/50 rounded-br-lg"
-            :style="{ 
-              borderBottomWidth: `${2 / scale[activeImage]}px`, 
-              borderRightWidth: `${2 / scale[activeImage]}px` 
-            }"
-          ></div>
-
-          <!-- Person Name Tag (Hover) -->
-          <!-- <div 
-            class="hidden group-hover:flex absolute left-1/2 -translate-x-1/2 
-                   bg-black/60 backdrop-blur-sm text-white text-xs font-medium 
-                   px-2 py-1 rounded shadow-sm whitespace-nowrap z-10 pointer-events-none"
+          <!-- Name tag on hover -->
+          <div
+            v-if="showAllFaces || hoveredFaceId === face.id"
+            class="absolute left-1/2 top-full bg-black/65 backdrop-blur-sm text-white text-xs font-medium px-2 py-1 rounded shadow-sm whitespace-nowrap"
             :style="{
-              bottom: '100%',
-              marginBottom: `${8 / scale[activeImage]}px`,
+              marginTop: `${6 / scale[activeImage]}px`,
               transform: `translateX(-50%) scale(${1 / scale[activeImage]})`,
-              transformOrigin: 'bottom center',
+              transformOrigin: 'top center',
             }"
           >
-            {{ face.person_id ? `Person ${face.person_id}` : 'Unknown' }}
-          </div> -->
+            <template v-if="face.person_id">{{ face.person_name || t('menu.person.unnamed') }}</template>
+            <template v-else>{{ t('menu.person.unknown_face') }} · <span class="text-white/70">{{ t('menu.person.click_to_name') }}</span></template>
+          </div>
         </div>
       </div>
     </div>
+
+    <AssignFaceDialog
+      v-if="assignFace"
+      :face="assignFace"
+      @cancel="assignFace = null"
+      @changed="onFaceChanged"
+    />
 
     <!-- Navigator view -->
     <transition name="fade">
@@ -219,7 +205,8 @@ import {
   isWin,
   setThumbnailDataUrlInflight,
 } from '@/common/utils';
-import { getFacesForFile, getFileThumbById, getFfmpegBackedImageExtensions } from '@/common/api';
+import { getFacesForFile, getFaceThumbnail, getFileThumbById, getFfmpegBackedImageExtensions } from '@/common/api';
+import AssignFaceDialog, { type AssignFaceTarget } from '@/components/AssignFaceDialog.vue';
 import { RawFace, Face } from '@/common/types';
 import { rawDisplayKey, getRawDisplayOptions, appendRawDisplayParams, type RawPreviewSource, type RawDisplayOptions } from '@/common/rawDisplay';
 import { useI18n } from 'vue-i18n';
@@ -394,8 +381,11 @@ const mouseDragNavDeltaY = ref(0);
 const mouseDragNavTriggered = ref(false);
 
 const faces = ref<any[]>([]); // Store faces for the current image
+// "Show faces" toolbar toggle shows every face with its name in any view; the People
+// view always highlights the selected person and reveals other faces on hover.
+const showAllFaces = computed(() => config.settings.face.enabled && Boolean(config.mediaViewer.showFaces));
 const showFaceOverlay = computed(() =>
-  config.settings.face.enabled && config.main.sidebarIndex === SIDEBAR.PERSON
+  config.settings.face.enabled && (config.main.sidebarIndex === SIDEBAR.PERSON || showAllFaces.value)
 );
 
 let animationFrameId: number | null = null;
@@ -1613,27 +1603,110 @@ watch(displayThumbnailSrc, async (newThumbSrc) => {
   }
 });
 
-// watch fileId / face toggle changes to fetch faces
-watch(() => [props.fileId, config.settings.face.enabled], async ([newFileId, faceEnabled]) => {
-  faces.value = []; // Clear previous faces
-  if (faceEnabled && newFileId) {
-    const result = await getFacesForFile(newFileId);
-    if (result && result.length > 0) {
-      // Parse bbox JSON string for each face
-      faces.value = result.map((face: RawFace) => {
-        try {
-          return {
-            ...face,
-            bbox: JSON.parse(face.bbox)
-          };
-        } catch (e) {
-          console.error("Error parsing face bbox", e);
-          return null;
-        }
-      }).filter((f: Face | null) => f);
+// Declared before the immediate watcher below, which resets them on load.
+const hoveredFaceId = ref<number | null>(null);
+const assignFace = ref<AssignFaceTarget | null>(null);
+
+// Fetch faces for the current file (bbox JSON parsed).
+let facesRequestSeq = 0;
+async function loadFaces(fileId: number | undefined, enabled: boolean) {
+  const seq = ++facesRequestSeq;
+  faces.value = [];
+  hoveredFaceId.value = null;
+  if (!enabled || !fileId) return;
+  const result = await getFacesForFile(fileId);
+  if (seq !== facesRequestSeq || !result?.length) return;
+  faces.value = result.map((face: RawFace) => {
+    try {
+      return { ...face, bbox: JSON.parse(face.bbox) };
+    } catch (e) {
+      console.error("Error parsing face bbox", e);
+      return null;
     }
-  }
+  }).filter((f: Face | null) => f);
+}
+
+watch(() => [props.fileId, config.settings.face.enabled], ([newFileId, faceEnabled]) => {
+  void loadFaces(newFileId as number | undefined, Boolean(faceEnabled));
 }, { immediate: true });
+
+// --- Face hover / click-to-name ---
+const FACE_CORNERS = [
+  { key: 'tl', class: 'top-0 left-0 rounded-tl-lg', style: (s: number) => ({ borderTopWidth: `${2 / s}px`, borderLeftWidth: `${2 / s}px` }) },
+  { key: 'tr', class: 'top-0 right-0 rounded-tr-lg', style: (s: number) => ({ borderTopWidth: `${2 / s}px`, borderRightWidth: `${2 / s}px` }) },
+  { key: 'bl', class: 'bottom-0 left-0 rounded-bl-lg', style: (s: number) => ({ borderBottomWidth: `${2 / s}px`, borderLeftWidth: `${2 / s}px` }) },
+  { key: 'br', class: 'bottom-0 right-0 rounded-br-lg', style: (s: number) => ({ borderBottomWidth: `${2 / s}px`, borderRightWidth: `${2 / s}px` }) },
+];
+const FACE_CLICK_MAX_MOVE = 4;   // px of movement still treated as a click
+const FACE_CLICK_DELAY_MS = 250; // wait so a double-click can still zoom
+
+let faceMouseDown: { x: number; y: number; faceId: number } | null = null;
+let pendingFaceClick: ReturnType<typeof setTimeout> | null = null;
+
+const faceHitTestEnabled = computed(() =>
+  showFaceOverlay.value && faces.value.length > 0 && !props.isSlideShow
+);
+
+// Smallest face box under the pointer (boxes follow zoom/pan/rotation via their DOM rects).
+function faceAt(clientX: number, clientY: number): number | null {
+  const root = container.value as HTMLElement | null;
+  if (!faceHitTestEnabled.value || !root) return null;
+  let best: { id: number; area: number } | null = null;
+  for (const el of root.querySelectorAll<HTMLElement>('[data-face-id]')) {
+    const r = el.getBoundingClientRect();
+    if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) continue;
+    const area = r.width * r.height;
+    if (!best || area < best.area) best = { id: Number(el.dataset.faceId), area };
+  }
+  return best?.id ?? null;
+}
+
+function onFaceHover(event: MouseEvent) {
+  if (isDraggingImage.value || assignFace.value) return;
+  hoveredFaceId.value = faceAt(event.clientX, event.clientY);
+}
+
+function onFaceMouseDown(event: MouseEvent) {
+  const faceId = event.button === 0 ? faceAt(event.clientX, event.clientY) : null;
+  faceMouseDown = faceId !== null ? { x: event.clientX, y: event.clientY, faceId } : null;
+}
+
+function onFaceMouseUp(event: MouseEvent) {
+  const down = faceMouseDown;
+  faceMouseDown = null;
+  if (!down || event.button !== 0) return;
+  if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > FACE_CLICK_MAX_MOVE) return;
+  cancelPendingFaceClick();
+  pendingFaceClick = setTimeout(() => {
+    pendingFaceClick = null;
+    void openAssignFace(down.faceId);
+  }, FACE_CLICK_DELAY_MS);
+}
+
+function cancelPendingFaceClick() {
+  if (pendingFaceClick) clearTimeout(pendingFaceClick);
+  pendingFaceClick = null;
+}
+
+async function openAssignFace(faceId: number) {
+  const face = faces.value.find((f: any) => f.id === faceId);
+  if (!face) return;
+  const thumbnail = (await getFaceThumbnail(faceId)) || '';
+  assignFace.value = {
+    id: face.id,
+    person_id: face.person_id || null,
+    person_name: face.person_name || null,
+    thumbnail,
+  };
+}
+
+function onFaceChanged(payload: { personId: number | null; message: string }) {
+  assignFace.value = null;
+  toast.success(payload.message);
+  void loadFaces(props.fileId, config.settings.face.enabled);
+}
+
+onBeforeUnmount(cancelPendingFaceClick);
 
 // watch rotate changes
 watch(() => props.rotate, (newRotate) => {

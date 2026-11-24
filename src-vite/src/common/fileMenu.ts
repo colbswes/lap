@@ -2,6 +2,7 @@ import { isOriginalStorageUnavailable, isOriginalUnavailable, requiresOriginalAc
 import { computed, markRaw, Ref } from 'vue';
 import { config, libConfig } from '@/common/config';
 import { SIDEBAR } from '@/common/constants';
+import { personViewContext } from '@/common/personContext';
 import { DEFAULT_PLATFORM, getShortcutLabel, ShortcutActionId } from '@/common/shortcuts';
 import {
   IconMonitor,
@@ -42,7 +43,7 @@ export const useFileMenuItems = (
   file: Ref<any>,
   localeMsg: Ref<any>,
   isMac: boolean,
-  translate: (key: string) => string,
+  translate: (key: string, params?: Record<string, unknown>) => string,
   onAction: (action: string) => void,
   options?: {
     selectMode?: Ref<boolean>;
@@ -166,6 +167,12 @@ export const useFileMenuItems = (
         disabled: selectionCount === 0,
         action: createAction('remove-selected-from-collection'),
         hideInSelectionPanel: true,
+      },
+      {
+        label: translate('menu.file.not_person', { name: personViewContext.value?.name || '' }),
+        hidden: !config.settings.face.enabled || !personViewContext.value,
+        disabled: selectionCount === 0,
+        action: createAction('remove-selected-from-person'),
       },
       { label: '-', action: null },
       {
@@ -367,6 +374,12 @@ export const useFileMenuItems = (
         hidden: !config.settings.face.enabled,
         disabled: !isImage,
         action: createAction('find-person')
+      },
+      {
+        label: translate('menu.file.not_person', { name: personViewContext.value?.name || '' }),
+        icon: markRaw(IconPersonSearch),
+        hidden: !config.settings.face.enabled || !personViewContext.value,
+        action: createAction('remove-from-person')
       },
       { label: "-", action: null },
       {

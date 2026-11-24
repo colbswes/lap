@@ -78,6 +78,7 @@ export const useConfigStore = defineStore('configStore', {
 
     mediaViewer: {
       showAfAreas: false,   // remember AF overlay visibility across viewer sessions
+      showFaces: false,     // show detected faces with names (and click-to-name) in any view
       isFullScreen: false,  // remember preview fullscreen independently of ImageViewer
       isZoomFit: true,      // true: zoom to fit container; false: original size(scale = 1)
       isPinned: true,       // pinned mode

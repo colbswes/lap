@@ -120,6 +120,14 @@
           :shortcut="shortcut('view.toggleAfAreas')"
           @click="toggleAfAreas"
         />
+        <TButton
+          v-if="config.settings.face.enabled"
+          :icon="IconPerson"
+          :selected="Boolean(config.mediaViewer.showFaces)"
+          :disabled="fileIndex < 0 || isSlideShow || !canInteract || ![1, 3].includes(Number(file?.file_type))"
+          :tooltip="config.mediaViewer.showFaces ? $t('image_viewer.toolbar.hide_faces') : $t('image_viewer.toolbar.show_faces')"
+          @click="config.mediaViewer.showFaces = !config.mediaViewer.showFaces"
+        />
         <template v-if="showExtraIcons">
           <IconSeparator class="t-icon-size-sm text-base-content/30" />
           <TButton
@@ -518,6 +526,7 @@ import {
   IconLivePhoto,
   IconExclamation,
   IconAutoFocus,
+  IconPerson,
 } from '@/common/icons';
 import ContextMenu from '@/components/ContextMenu.vue';
 import iconLogo from '@/assets/images/icon.png';

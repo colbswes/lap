@@ -831,6 +831,7 @@ import { getExternalDropUris, getExternalHttpDropUrls, getExternalFileDropPaths,
 import PrintImage from '@/components/PrintImage.vue';
 import { defineAsyncComponent, ref, shallowRef, watch, computed, createVNode, onMounted, onBeforeUnmount, nextTick, render, markRaw } from 'vue';
 import { emit as tauriEmit, listen } from '@tauri-apps/api/event';
+import { personViewContext, PERSONS_CHANGED_EVENT } from '@/common/personContext';
 import { ask, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { PREVIEW_WINDOW_FOCUS_RESTORED } from '@/common/previewWindow';
@@ -842,7 +843,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          moveFile, moveFileOutsideLibrary, copyFile, withFileTransferBatch, batchDeleteFiles, getFileThumb, getFileThumbById, getFileThumbs, getFileInfo,
          setFileRotate, setFileFavorite, setFileRating, setFileCullingFlag, batchUpdateFileMetadata, getTagsForFile, searchSimilarImages, generateEmbedding,
          getTagName, indexAlbum, listenIndexProgress, listenIndexFinished, setAlbumCover, setDesktopWallpaper,
-         updateFileInfo, refreshFileInfo, changeVideoThumbnail, getSupportedFormatExtensions, importFiles, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, isCloudOnlyFile, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
+         updateFileInfo, refreshFileInfo, changeVideoThumbnail, getSupportedFormatExtensions, importFiles, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, isCloudOnlyFile, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, removePersonFromFiles, listenFaceIndexProgress,
          openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, setLastSelectedItemIndex,
          dedupDelete, getQueryFilePosition, getFolderSearchExcluded,
          listCollections, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile, saveXmpMetadata } from '@/common/api';
@@ -2616,6 +2617,36 @@ async function removeFileFromCurrentCollection(index: number) {
   toast.success(t('collection.removed_toast', { count: 1 }));
 }
 
+// Mark the current person as not appearing in the given files and drop them from the grid.
+async function removeFilesFromCurrentPerson(fileIds: number[]) {
+  const context = personViewContext.value;
+  if (!context || fileIds.length === 0) return;
+  try {
+    await removePersonFromFiles(context.id, fileIds);
+  } catch (error) {
+    console.error('Failed to remove person from files:', error);
+    toast.error(t('menu.person.remove_failed'));
+    return;
+  }
+  if (groupedModeActive.value) {
+    await updateContent(true);
+  } else {
+    const removedIdSet = new Set(fileIds);
+    const removedItems = fileList.value.filter(f => removedIdSet.has(Number(f?.id)));
+    fileList.value = fileList.value.filter(f => !removedIdSet.has(Number(f?.id)));
+    totalFileCount.value = fileList.value.length;
+    totalFileSize.value = fileList.value.reduce((total, file) => total + getMediaItemSize(file), 0);
+    selectedItemIndex.value = fileList.value.length > 0 ? Math.min(selectedItemIndex.value, fileList.value.length - 1) : -1;
+    if (selectMode.value) {
+      for (const id of fileIds) selectedFileIds.delete(id);
+      selectedCount.value = Math.max(0, selectedCount.value - removedItems.length);
+      selectedSize.value = Math.max(0, selectedSize.value - removedItems.reduce((total, item) => total + getMediaItemSize(item), 0));
+    }
+  }
+  void tauriEmit(PERSONS_CHANGED_EVENT, { personId: context.id });
+  toast.success(t('menu.person.removed_from_person', { count: fileIds.length, name: context.name }));
+}
+
 async function removeSelectedFromCollection() {
   if (!selectMode.value || selectedCount.value === 0 || !currentCollectionId.value) return;
   const selectedItems = getActionableSelectedItems();
@@ -4193,6 +4224,18 @@ function showLoadingContent(requestId: number) {
 
 // Similar Search Mode State
 const tempViewMode = ref<'none' | 'similar' | 'album' | 'person' | 'camera' | 'lens' | 'location' | 'tag' | 'map'>('none');
+
+// Expose which person's photos the grid shows so file menus can offer "Not <name>".
+watch(
+  () => [config.main.sidebarIndex, libConfig.person.id, libConfig.person.name, tempViewMode.value] as const,
+  ([sidebarIndex, personId, personName, viewMode]) => {
+    const showingPerson = viewMode === 'person' || (viewMode === 'none' && sidebarIndex === SIDEBAR.PERSON);
+    personViewContext.value = showingPerson && personId
+      ? { id: Number(personId), name: personName || localeMsg.value.menu.person.unnamed }
+      : null;
+  },
+  { immediate: true },
+);
 let suppressPersonContextRefresh = false;
 const dedupQueryParams = computed(() => {
   return { ...currentQueryParams.value };
@@ -4943,6 +4986,15 @@ function handleItemAction(payload: { action: string, index: number }) {
     'find-person': () => {
       if (!config.settings.face.enabled) return;
       enterPersonSearchMode(fileList.value[selectedItemIndex.value]);
+    },
+    'remove-from-person': () => {
+      const file = fileList.value[selectedItemIndex.value];
+      if (file?.id) void removeFilesFromCurrentPerson([Number(file.id)]);
+    },
+    'remove-selected-from-person': () => {
+      if (!selectMode.value || selectedCount.value === 0) return;
+      const ids = getActionableSelectedItems().map((item: any) => Number(item.id)).filter((id: number) => id > 0);
+      void removeFilesFromCurrentPerson(ids);
     },
     'set-album-cover': clickSetAlbumCover,
     'set-desktop-wallpaper': () => void clickSetDesktopWallpaper(),

@@ -268,6 +268,8 @@ import { useI18n } from 'vue-i18n';
 import { config, libConfig } from '@/common/config';
 import { getPersonsPage, renamePerson, deletePerson, mergePersons, findPersonByName, indexFaces, cancelFaceIndex, isFaceIndexing, listenFaceIndexProgress, listenFaceIndexFinished, listenClusterProgress, resetFaces, getFaceStats } from '@/common/api';
 import { resolveMergedPersonName } from '@/common/personMerge';
+import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
+import { listen } from '@tauri-apps/api/event';
 import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { useLibraryChangeRefresh } from '@/composables/useLibraryChangeRefresh';
@@ -382,6 +384,12 @@ const personPanelMenuItems = computed(() => [
     label: localeMsg.value.menu.person.index_faces,
     icon: IconUpdate,
     action: () => clickIndexFaces(),
+    disabled: isIndexing.value,
+  },
+  {
+    label: localeMsg.value.menu.person.rescan_faces,
+    icon: IconUpdate,
+    action: () => clickIndexFaces(true),
     disabled: isIndexing.value,
   },
   { label: "-", action: null },
@@ -883,7 +891,7 @@ async function clickDeletePerson() {
 }
 
 // Called from title bar context menu
-async function clickIndexFaces() {
+async function clickIndexFaces(rescan = false) {
   if (isIndexing.value) {
     return;
   }
@@ -897,7 +905,7 @@ async function clickIndexFaces() {
     const thresholds = config.faceClusterThresholds ?? [0.35, 0.45, 0.55, 0.65];
     const clusterEpsilon = thresholds[thresholdIndex] ?? 0.55;
     console.log('clusterEpsilon', clusterEpsilon);
-    await indexFaces(clusterEpsilon);
+    await indexFaces(clusterEpsilon, rescan);
     await loadPersons();
     await checkFaceStats();
   } catch (e) {
@@ -948,6 +956,19 @@ async function checkFaceStats() {
 useLibraryChangeRefresh(() => {
   void loadPersons(true, true);
   void checkFaceStats();
+});
+
+// Face edits made outside this panel (file info, "Not <name>") change counts and may delete persons.
+let unlistenPersonsChanged: (() => void) | null = null;
+let personsChangedDisposed = false;
+onMounted(async () => {
+  const stop = await listen(PERSONS_CHANGED_EVENT, () => void loadPersons(true, true));
+  if (personsChangedDisposed) stop();
+  else unlistenPersonsChanged = stop;
+});
+onUnmounted(() => {
+  personsChangedDisposed = true;
+  unlistenPersonsChanged?.();
 });
 
 // Only refresh the active view. Inactive panel data is refreshed on re-entry.

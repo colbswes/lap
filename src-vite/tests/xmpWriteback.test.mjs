@@ -18,6 +18,7 @@ const deps = {
   isOriginalUnavailable: file => !!file?.unavailable,
   isOriginalStorageUnavailable: file => !!file?.unavailable, requiresOriginalAction, requiresLocalContent: () => false,
   isPreviewOnlyDocument: () => false,
+  personViewContext: ref(null),
 };
 const useFileMenuItems = new Function(...Object.keys(deps), menuCode + ';return useFileMenuItems;')(...Object.values(deps));
 
@@ -197,4 +198,31 @@ test('file info rename reports the backend reason without changing catalog field
   assert.ok(messages[0].includes(error));
   assert.equal(isRenaming.value, false);
   assert.equal(values.props.fileInfo.name, 'photo.jpg');
+});
+
+test('person view menus offer "Not <name>" for the shown person only', () => {
+  const findItem = (items, name) => items.find(item => item.action?.actionName === name);
+  const file = ref({ id: 1, name: 'photo.jpg', file_type: 1 });
+  deps.config.settings.face.enabled = true;
+  try {
+    for (const [selected, actionName] of [[false, 'remove-from-person'], [true, 'remove-selected-from-person']]) {
+      const options = { selectMode: ref(selected), selectionCount: ref(2), selectionHasUnavailable: ref(false), selectionMediaKind: ref('image') };
+      const calls = [];
+      const translate = (key, params) => `${key}:${params?.name ?? ''}`;
+      deps.personViewContext.value = null;
+      const hidden = useFileMenuItems(file, ref(locale), true, translate, action => calls.push(action), options);
+      assert.equal(findItem(hidden.value, actionName).hidden, true);
+
+      deps.personViewContext.value = { id: 7, name: 'Alex' };
+      const shown = useFileMenuItems(file, ref(locale), true, translate, action => calls.push(action), options);
+      const item = findItem(shown.value, actionName);
+      assert.equal(item.hidden, false);
+      assert.equal(item.label, 'menu.file.not_person:Alex');
+      item.action();
+      assert.deepEqual(calls, [actionName]);
+    }
+  } finally {
+    deps.config.settings.face.enabled = false;
+    deps.personViewContext.value = null;
+  }
 });

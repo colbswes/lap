@@ -2199,9 +2199,10 @@ export async function listenIndexFinished(callback) {
 }
 
 // index faces for all images in library
-export async function indexFaces(clusterEpsilon) {
+// rescan: re-detect every photo, keeping stored faces and adding only missed ones
+export async function indexFaces(clusterEpsilon, rescan = false) {
   try {
-    const result = await invoke('index_faces', { clusterEpsilon });
+    const result = await invoke('index_faces', { clusterEpsilon, rescan });
     return result;
   } catch (error) {
     console.error('Failed to index faces:', error);
@@ -2341,6 +2342,31 @@ export async function getFacesForFile(fileId) {
     console.error('Failed to get faces for file:', error);
   }
   return null;
+}
+
+// get a single face's crop (Base64)
+export async function getFaceThumbnail(faceId) {
+  try {
+    return await invoke('get_face_thumbnail', { faceId });
+  } catch (error) {
+    console.error('Failed to get face thumbnail:', error);
+  }
+  return null;
+}
+
+// confirm a face as an existing person (personId) or a person by name (created if missing); returns the person id
+export async function assignFaceToPerson(faceId, { personId = null, name = null } = {}) {
+  return await invoke('assign_face_to_person', { faceId, personId, name });
+}
+
+// mark a face as not being its current person; returns that person's id
+export async function removeFaceFromPerson(faceId) {
+  return await invoke('remove_face_from_person', { faceId });
+}
+
+// mark a person as not appearing in the given files; returns the number of faces removed
+export async function removePersonFromFiles(personId, fileIds) {
+  return await invoke('remove_person_from_files', { personId, fileIds });
 }
 
 // get a single person's face thumbnail (Base64)

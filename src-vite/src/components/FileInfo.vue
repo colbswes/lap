@@ -203,28 +203,42 @@
               </div>
             </template>
 
-            <!-- People -->
-            <template v-if="config.settings.face.enabled && filePersons.length">
+            <!-- People: one chip per detected face; edit to confirm, rename, or reject -->
+            <template v-if="config.settings.face.enabled && fileFaces.length">
               <div class="flex items-center text-[11px] text-base-content/30 min-h-6 py-1.5">{{ $t('sidebar.people') }}</div>
               <div class="flex items-center min-h-6 gap-x-3 gap-y-1 flex-wrap">
-                <button
-                  v-for="person in filePersons"
-                  :key="person.id"
-                  type="button"
-                  class="inline-flex items-center gap-1.5 text-[12px] font-medium text-base-content/70 transition-colors hover:text-base-content cursor-pointer"
-                  @click.stop="navigatePerson(person)"
+                <span
+                  v-for="face in fileFaces"
+                  :key="face.id"
+                  class="group inline-flex items-center gap-1.5 text-[12px] font-medium"
                 >
-                  <span class="w-5 h-5 rounded-full overflow-hidden bg-base-300/70 ring-1 ring-base-content/5 shrink-0 flex items-center justify-center">
-                    <img
-                      v-if="person.thumbnail"
-                      :src="'data:image/jpeg;base64,' + person.thumbnail"
-                      class="w-full h-full object-cover"
-                      draggable="false"
-                    />
-                    <IconPerson v-else class="w-3.5 h-3.5 text-base-content/30" />
-                  </span>
-                  {{ person.name || person.id }}
-                </button>
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                    :class="face.person_id ? 'text-base-content/70 hover:text-base-content' : 'text-base-content/40 italic hover:text-base-content/70'"
+                    :title="face.person_id ? undefined : $t('menu.person.assign_dialog_title')"
+                    @click.stop="face.person_id ? navigatePerson({ id: face.person_id, name: face.person_name || '' }) : openAssignFace(face)"
+                  >
+                    <span class="w-5 h-5 rounded-full overflow-hidden bg-base-300/70 ring-1 ring-base-content/5 shrink-0 flex items-center justify-center">
+                      <img
+                        v-if="face.thumbnail"
+                        :src="'data:image/jpeg;base64,' + face.thumbnail"
+                        class="w-full h-full object-cover"
+                        draggable="false"
+                      />
+                      <IconPerson v-else class="w-3.5 h-3.5 text-base-content/30" />
+                    </span>
+                    {{ face.person_id ? (face.person_name || face.person_id) : $t('menu.person.unknown_face') }}
+                  </button>
+                  <button
+                    type="button"
+                    class="p-0.5 rounded text-base-content/30 hover:text-base-content/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer"
+                    :title="$t('menu.person.edit_face')"
+                    @click.stop="openAssignFace(face)"
+                  >
+                    <IconEdit class="w-3 h-3" />
+                  </button>
+                </span>
               </div>
             </template>
 
@@ -529,12 +543,20 @@
         </div>
       </div>
     </div>
+
+    <AssignFaceDialog
+      v-if="assignFace"
+      :face="assignFace"
+      @cancel="assignFace = null"
+      @changed="onFaceChanged"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import AssignTagsPanel from './AssignTagsPanel.vue';
 import FileInfoFieldsDialog from '@/components/FileInfoFieldsDialog.vue';
+import AssignFaceDialog from '@/components/AssignFaceDialog.vue';
 import { getShortcutLabel } from '@/common/shortcuts';
 import { editableMetadataFields, normalizeFileInfoFields } from '@/common/fileInfoFields';
 import ImageNavigator from '@/components/ImageNavigator.vue';
@@ -548,7 +570,7 @@ import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
 import { isWebViewVideoPlaybackDisabled, getGStreamerAvailability } from '@/common/video';
 import { isOriginalUnavailable } from '@/common/availability';
-import { getTagsForFile, editFileMetadata, renameFile, editImage, getAlbum, getFileCollections, getFileInfo, getMotionPhotoVideoPath, revealPath, getFacesForFile, getPersonThumbnail, isCloudOnlyFile } from '@/common/api';
+import { getTagsForFile, editFileMetadata, renameFile, editImage, getAlbum, getFileCollections, getFileInfo, getMotionPhotoVideoPath, revealPath, getFacesForFile, getFaceThumbnail, isCloudOnlyFile } from '@/common/api';
 import { 
   copyFilePaths,
   extractFileName, 
@@ -1530,42 +1552,49 @@ function navigateLocation() {
   emit('navigateMetadata', { type: 'location', cc: props.fileInfo?.geo_cc || null, admin1: props.fileInfo?.geo_admin1 || null, name: props.fileInfo?.geo_name || null });
 }
 
-// People recognized in this file (deduplicated by person id).
-const filePersons = ref<Array<{ id: number; name: string; thumbnail: string }>>([]);
+// Faces detected in this file, each with its own crop so wrong matches are easy to spot.
+interface FileFace {
+  id: number;
+  person_id: number | null;
+  person_name: string | null;
+  confirmed: boolean;
+  thumbnail: string;
+}
+const fileFaces = ref<FileFace[]>([]);
 let filePersonsRequestSeq = 0;
 
 async function loadFilePersons(fileId: number) {
   const seq = ++filePersonsRequestSeq;
   if (!fileId || fileId <= 0) {
-    if (seq === filePersonsRequestSeq) filePersons.value = [];
+    if (seq === filePersonsRequestSeq) fileFaces.value = [];
     return;
   }
   const faces = await getFacesForFile(fileId);
   if (seq !== filePersonsRequestSeq) return;
-
-  // Dedupe persons by id, keeping the name from the face.
-  const personsById = new Map<number, string>();
-  for (const face of faces || []) {
-    const id = Number(face?.person_id || 0);
-    if (id > 0 && !personsById.has(id)) {
-      personsById.set(id, face?.person_name || '');
-    }
-  }
-  if (personsById.size === 0) {
-    filePersons.value = [];
-    return;
-  }
-
-  // Fetch each person's face thumbnail from the backend (People list is
-  // paginated on the frontend, so we can't rely on locally loaded thumbnails).
-  const persons = await Promise.all(
-    Array.from(personsById.entries()).map(async ([id, name]) => {
-      const thumbnail = (await getPersonThumbnail(id)) || '';
-      return { id, name, thumbnail };
-    }),
+  const loaded = await Promise.all(
+    (faces || []).map(async (face: any) => ({
+      id: Number(face.id),
+      person_id: Number(face.person_id || 0) || null,
+      person_name: face.person_name || null,
+      confirmed: Boolean(face.confirmed),
+      thumbnail: (await getFaceThumbnail(Number(face.id))) || '',
+    })),
   );
   if (seq !== filePersonsRequestSeq) return;
-  filePersons.value = persons;
+  // Named people first, unknown faces last.
+  fileFaces.value = loaded.sort((a, b) => Number(!a.person_id) - Number(!b.person_id));
+}
+
+const assignFace = ref<FileFace | null>(null);
+
+function openAssignFace(face: FileFace) {
+  assignFace.value = face;
+}
+
+function onFaceChanged(payload: { personId: number | null; message: string }) {
+  assignFace.value = null;
+  toast.success(payload.message);
+  void loadFilePersons(Number(props.fileInfo?.id || 0));
 }
 
 watch(() => props.fileInfo?.id, (id) => {

@@ -43,8 +43,8 @@ test('offline state does not remove catalog data and follows reconnection, indiv
 const source = fs.readFileSync(new URL('../src/common/fileMenu.ts', import.meta.url), 'utf8');
 const iconNames = source.match(/import \{([^}]+)\} from '@\/common\/icons'/)[1].split(',').map(s => s.trim()).filter(Boolean);
 const config = { main: { sidebarIndex: 1 }, settings: { face: { enabled: true } }, externalAppsFor: () => [{ id: 'editor', name: 'Editor' }], defaultExternalApp: () => null };
-const useFileMenuItems = new Function('computed', 'markRaw', 'config', 'libConfig', 'SIDEBAR', 'DEFAULT_PLATFORM', 'getShortcutLabel', 'isOriginalStorageUnavailable', 'isOriginalUnavailable', 'requiresOriginalAction', 'requiresLocalContent', 'isPreviewOnlyDocument', 'isWin', ...iconNames, moduleBody('../src/common/fileMenu.ts') + '; return useFileMenuItems;')(
-  computed, markRaw, config, libConfig, { ALBUM: 1 }, '', () => '', isOriginalStorageUnavailable, isOriginalUnavailable, requiresOriginalAction, requiresLocalContent, () => false, true, ...iconNames.map(() => ({})),
+const useFileMenuItems = new Function('computed', 'markRaw', 'config', 'libConfig', 'SIDEBAR', 'DEFAULT_PLATFORM', 'getShortcutLabel', 'isOriginalStorageUnavailable', 'isOriginalUnavailable', 'requiresOriginalAction', 'requiresLocalContent', 'isPreviewOnlyDocument', 'isWin', 'personViewContext', ...iconNames, moduleBody('../src/common/fileMenu.ts') + '; return useFileMenuItems;')(
+  computed, markRaw, config, libConfig, { ALBUM: 1 }, '', () => '', isOriginalStorageUnavailable, isOriginalUnavailable, requiresOriginalAction, requiresLocalContent, () => false, true, ref(null), ...iconNames.map(() => ({})),
 );
 const words = () => new Proxy({}, { get: (_, key) => String(key) });
 const locale = ref({ menu: { file: words(), meta: words() }, rating: words(), culling: words() });
