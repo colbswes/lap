@@ -196,6 +196,9 @@ cargo install tauri-cli --version "^2.0.0" --locked
 ./scripts/download_ffmpeg_sidecar.sh    # Windows: .\scripts\download_ffmpeg_sidecar.ps1
 cd src-vite && pnpm install && cd ..
 cargo tauri dev
+
+# Fast local macOS release build + install to ~/Applications/Lap.app
+./scripts/build_install.sh
 ```
 
 Distribution packages can link against the system libheif (1.17 or newer) instead of the bundled libheif and libde265. Set `LAP_SYSTEM_LIBHEIF=1` for the build. The submodules `third_party/libheif` and `third_party/libde265` are then not needed. HEVC decoding depends on the codec plugins of the system libheif.

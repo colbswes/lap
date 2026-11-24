@@ -2,6 +2,19 @@
 
 Utility scripts for the Lap project.
 
+## 0. build_install (local `release-fast` macOS build & install)
+
+Builds Lap with Cargo's `release-fast` profile (thin LTO + parallel codegen), syncs the resulting `Lap.app` into `~/Applications/Lap.app`, verifies the copy with `diff -qr`, and relaunches Lap. Automatically locates `cargo-tauri` / `tauri` / cached `npx` Tauri CLI, falls back from `pnpm` to `npm`, and uses `/Volumes/Builds/lap/target` when writable (override with `CARGO_TARGET_DIR` or `--target-dir`).
+
+### Usage
+
+```bash
+./scripts/build_install.sh                  # build release-fast, install to ~/Applications/Lap.app, relaunch
+./scripts/build_install.sh --no-launch      # build & install without relaunching
+./scripts/build_install.sh --no-install     # build Lap.app bundle only
+./scripts/build_install.sh --profile release
+```
+
 ## 1. download_models
 
 Downloads AI model files (CLIP + InsightFace) required for the app to `src-tauri/resources/models/`. The Bash script pins model revisions and verifies SHA-256 before reusing cached files or publishing new downloads; a mismatch stops the build. The PowerShell script retains its existing existence-only cache behavior.

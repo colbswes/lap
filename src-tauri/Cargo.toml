@@ -22,6 +22,15 @@ opt-level = "z"
 panic = "abort"
 strip = true
 
+# Faster local release builds: thin LTO with parallel codegen instead of the
+# shipping profile's single-threaded fat LTO. Larger binary, slightly less
+# optimized; run `./scripts/build_install.sh` (or `cargo tauri build -- --profile release-fast`).
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+opt-level = 3
+
 [profile.dev.package."*"]
 opt-level = 3
 
