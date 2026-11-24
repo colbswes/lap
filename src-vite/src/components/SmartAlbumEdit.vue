@@ -101,7 +101,6 @@
                     :lens-options="lensOptions"
                     :location-options="locationOptions"
                     :file-type-options="fileTypeOptions"
-                    :culling-options="cullingOptions"
                     :media-subtype-options="mediaSubtypeOptions"
                     :extension-options="extensionOptions"
                   />
@@ -172,14 +171,16 @@ const descriptionRef = ref<HTMLTextAreaElement | null>(null);
 const rulesListRef = ref<HTMLElement | null>(null);
 const maxRules = 20;
 
-const isNew = computed(() => !props.smartAlbum);
+const isNew = computed(() => !props.smartAlbum?.id);
 const name = ref(props.smartAlbum?.name || '');
 const description = ref(props.smartAlbum?.description || '');
 const showDescription = ref(description.value.trim().length > 0);
 const matchMode = ref(props.smartAlbum?.query?.match === 'any' ? 'any' : 'all');
 const sortType = ref(Number(props.smartAlbum?.sort?.type ?? config.search.sortType ?? 0));
 const sortOrder = ref(Number(props.smartAlbum?.sort?.order ?? config.search.sortOrder ?? 1));
-const groupType = ref(Number(props.smartAlbum?.group?.type ?? config.search.groupBy ?? 0));
+const initialGroupType = Number(props.smartAlbum?.group?.type ?? config.search.groupBy ?? 0);
+// 4 (rating) and 10 (culling) were removed group-by options.
+const groupType = ref(initialGroupType === 4 || initialGroupType === 10 ? GROUP.NONE : initialGroupType);
 const isRandomSort = computed(() => sortType.value === 7);
 const displayedGroupType = computed({
   get: () => isRandomSort.value ? GROUP.NONE : groupType.value,
@@ -200,12 +201,6 @@ const fileTypeOptions = computed(() => [
   { value: 1, label: localeMsg.value.toolbar.filter?.file_type_options?.[1] || 'Images' },
   { value: 4, label: localeMsg.value.toolbar.filter?.file_type_options?.[2] || 'RAW' },
   { value: 2, label: localeMsg.value.toolbar.filter?.file_type_options?.[3] || 'Video' },
-]);
-
-const cullingOptions = computed(() => [
-  { value: 0, label: t('culling.unreviewed') },
-  { value: 1, label: t('culling.picks') },
-  { value: 2, label: t('culling.rejected') },
 ]);
 
 const mediaSubtypeOptions = computed(() => [
@@ -233,7 +228,7 @@ const sortOrderOptions = computed(() => indexedOptions(
 
 const groupOptions = computed(() => {
   const labels = localeMsg.value.toolbar.filter?.group_type_options || [];
-  return [GROUP.NONE, GROUP.FOLDER, GROUP.DAY, GROUP.MONTH, GROUP.YEAR, GROUP.FILE_TYPE, GROUP.CULLING, GROUP.RATING, GROUP.CAMERA, GROUP.LENS, GROUP.LOCATION]
+  return [GROUP.NONE, GROUP.FOLDER, GROUP.DAY, GROUP.MONTH, GROUP.YEAR, GROUP.FILE_TYPE, GROUP.CAMERA, GROUP.LENS, GROUP.LOCATION]
     .map(value => ({ value, label: String(labels[value] || '') }))
     .filter(option => option.label);
 });
@@ -245,8 +240,6 @@ const fieldOptions = computed(() => [
 
   // Workflow
   { value: 'favorite', label: t('album.smart_edit.fields.favorite') },
-  { value: 'rating', label: t('album.smart_edit.fields.rating') },
-  { value: 'culling', label: t('album.smart_edit.fields.culling') },
 
   // Organization
   { value: 'tag', label: t('album.smart_edit.fields.tag') },
@@ -303,8 +296,9 @@ function makeRule(field = 'date_taken') {
 }
 
 function cloneRules(source: any[] | undefined) {
+  // Rating and culling rules were removed; drop any left in older saved albums.
   const cloned = Array.isArray(source)
-    ? source.map(rule => normalizeRuleForEdit(rule))
+    ? source.filter(rule => rule?.field !== 'rating' && rule?.field !== 'culling').map(rule => normalizeRuleForEdit(rule))
     : [];
   return cloned.length > 0 ? cloned.slice(0, maxRules) : [makeRule()];
 }
@@ -325,9 +319,7 @@ function getOperatorOptions(field: string) {
   if (['folder_name', 'name'].includes(field)) return [op('contains'), op('not_contains')];
   if (['file_type', 'media_subtype', 'extension', 'camera', 'lens', 'location', 'album', 'collection'].includes(field)) return [op('is'), op('is_not')];
   if (field === 'favorite' || field === 'has_gps') return [op('is')];
-  if (field === 'culling') return [op('is'), op('is_not')];
   if (field === 'orientation') return [op('is')];
-  if (field === 'rating') return [op('is'), op('is_not'), op('gt'), op('gte'), op('lt'), op('lte'), op('between'), op('empty'), op('not_empty')];
   if (isDateRuleField(field)) return [op('is'), op('before'), op('after'), op('between'), op('in_last'), op('older_than')];
   if (['size', 'width', 'height', 'duration'].includes(field)) return [op('gt'), op('gte'), op('lt'), op('lte'), op('between'), op('empty'), op('not_empty')];
   if (field === 'tag' || field === 'person') return [op('has'), op('not_has'), op('empty'), op('not_empty')];
@@ -350,8 +342,6 @@ function setDefaultRuleValue(rule: any) {
   else if (rule.field === 'extension') rule.value = '';
   else if (rule.field === 'favorite' || rule.field === 'has_gps') rule.value = true;
   else if (rule.field === 'orientation') rule.value = 'landscape';
-  else if (rule.field === 'rating') rule.value = rule.operator === 'between' ? { min: 1, max: 5 } : 1;
-  else if (rule.field === 'culling') rule.value = 0;
   else if (isDateRuleField(rule.field)) {
     if (rule.operator === 'between') rule.value = { start: dateToUnix(new Date()), end: dateToUnix(addDays(new Date(), 1)) };
     else if (isRelativeDateOperator(rule.operator)) rule.value = { amount: 7, unit: 'day' };
@@ -688,7 +678,6 @@ const RuleValueControl = defineComponent({
     lensOptions: { type: Array, default: () => [] },
     locationOptions: { type: Array, default: () => [] },
     fileTypeOptions: { type: Array, default: () => [] },
-    cullingOptions: { type: Array, default: () => [] },
     mediaSubtypeOptions: { type: Array, default: () => [] },
     extensionOptions: { type: Array, default: () => [] },
   },
@@ -696,7 +685,6 @@ const RuleValueControl = defineComponent({
     const suppressDatePopoverUntil = ref(0);
     const inputClass = 'input input-sm text-xs w-full';
     const selectClass = 'select select-sm text-xs w-full';
-    const numberInput = (value: any, onInput: any, attrs: Record<string, any> = {}) => h('input', { class: inputClass, type: 'number', value, onInput, ...attrs });
     const inputWithUnit = (inputNode: any, unit: string) => {
       if (!unit) return inputNode;
       return h('label', { class: 'input input-sm w-full flex items-center gap-1 px-0 overflow-hidden' }, [
@@ -911,12 +899,10 @@ const RuleValueControl = defineComponent({
     return () => {
       if (['empty', 'not_empty'].includes(props.rule.operator) && !isDateRuleField(props.rule.field)) return h('span', { class: 'text-xs text-base-content/30' }, '-');
       if (props.rule.field === 'file_type') return fileTypeInput();
-      if (props.rule.field === 'culling') return selectInput(props.cullingOptions);
       if (props.rule.field === 'media_subtype') return mediaSubtypeInput();
       if (props.rule.field === 'extension') return extensionInput();
       if (props.rule.field === 'favorite' || props.rule.field === 'has_gps') return boolSelect();
       if (props.rule.field === 'orientation') return orientationSelect();
-      if (props.rule.field === 'rating') return props.rule.operator === 'between' ? rangeInput('', 1, { min: 0, max: 5, step: 1 }) : numberInput(props.rule.value, (event: any) => { props.rule.value = Number(event.target.value); }, { min: 0, max: 5, step: 1 });
       if (isDateRuleField(props.rule.field)) return dateControl();
       if (props.rule.field === 'size') return props.rule.operator === 'between' ? rangeInput(valueUnit()) : unitNumberInput(props.rule.value, valueUnit(), (event: any) => { props.rule.value = Number(event.target.value); });
       if (['width', 'height', 'duration'].includes(props.rule.field)) return props.rule.operator === 'between' ? rangeInput(valueUnit()) : unitNumberInput(props.rule.value, valueUnit(), (event: any) => { props.rule.value = Number(event.target.value); });

@@ -33,7 +33,7 @@ interface FileMetadataState {
   activePromise: Promise<void> | null;
 }
 
-export type MetadataField = 'culling_flag' | 'rating' | 'is_favorite';
+export type MetadataField = 'is_favorite';
 
 export function getMatchingPaneFileInfo<T extends { id?: unknown }>(
   info: T | null | undefined,
@@ -43,8 +43,8 @@ export function getMatchingPaneFileInfo<T extends { id?: unknown }>(
   return Number(info.id) === expectedFileId ? info : null;
 }
 
-export function createMetadataSyncTracker(field: MetadataField = 'culling_flag') {
-  const max = { culling_flag: 2, rating: 5, is_favorite: 1 }[field];
+export function createMetadataSyncTracker(field: MetadataField = 'is_favorite') {
+  const max = { is_favorite: 1 }[field];
   const paneRequestIds: Record<MetadataPane, number> = {
     left: 0,
     right: 0,

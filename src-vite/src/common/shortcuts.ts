@@ -34,15 +34,6 @@ export type ShortcutActionId =
   | 'file.reveal'
   | 'file.searchSimilar'
   | 'meta.favorite'
-  | 'meta.rating.clear'
-  | 'meta.rating.one'
-  | 'meta.rating.two'
-  | 'meta.rating.three'
-  | 'meta.rating.four'
-  | 'meta.rating.five'
-  | 'meta.culling.pick'
-  | 'meta.culling.reject'
-  | 'meta.culling.unreviewed'
   | 'meta.tag'
   | 'meta.collection'
   | 'meta.edit'
@@ -279,69 +270,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: 'meta.favorite',
     contexts: ['content', 'media-viewer', 'image-viewer'],
     defaultBindings: [{ code: 'KeyF', allowShift: true, label: 'F' }],
-  },
-  {
-    id: 'meta.rating.clear',
-    contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [
-      { key: '0', label: '0' },
-      { code: 'Digit0', modifiers: ['shift'], label: { mac: '⇧0', windows: 'Shift+0', linux: 'Shift+0' } },
-    ],
-  },
-  {
-    id: 'meta.rating.one',
-    contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [
-      { key: '1', label: '1' },
-      { code: 'Digit1', modifiers: ['shift'], label: { mac: '⇧1', windows: 'Shift+1', linux: 'Shift+1' } },
-    ],
-  },
-  {
-    id: 'meta.rating.two',
-    contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [
-      { key: '2', label: '2' },
-      { code: 'Digit2', modifiers: ['shift'], label: { mac: '⇧2', windows: 'Shift+2', linux: 'Shift+2' } },
-    ],
-  },
-  {
-    id: 'meta.rating.three',
-    contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [
-      { key: '3', label: '3' },
-      { code: 'Digit3', modifiers: ['shift'], label: { mac: '⇧3', windows: 'Shift+3', linux: 'Shift+3' } },
-    ],
-  },
-  {
-    id: 'meta.rating.four',
-    contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [
-      { key: '4', label: '4' },
-      { code: 'Digit4', modifiers: ['shift'], label: { mac: '⇧4', windows: 'Shift+4', linux: 'Shift+4' } },
-    ],
-  },
-  {
-    id: 'meta.rating.five',
-    contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [
-      { key: '5', label: '5' },
-      { code: 'Digit5', modifiers: ['shift'], label: { mac: '⇧5', windows: 'Shift+5', linux: 'Shift+5' } },
-    ],
-  },
-  {
-    id: 'meta.culling.pick',
-    contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [{ code: 'KeyP', allowShift: true, label: 'P' }],
-  },
-  {
-    id: 'meta.culling.reject',
-    contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [{ code: 'KeyX', allowShift: true, label: 'X' }],
-  },
-  {
-    id: 'meta.culling.unreviewed',
-    contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [{ code: 'KeyU', allowShift: true, label: 'U' }],
   },
   {
     id: 'meta.tag',

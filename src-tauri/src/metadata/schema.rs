@@ -90,7 +90,6 @@ pub(super) enum SystemEncoding {
     PlistString,
     Utf8,
     CommaSeparated,
-    RatingTen,
 }
 
 pub(super) struct SystemMapping {
@@ -135,11 +134,6 @@ pub(super) const LINUX_FIELDS: &[SystemMapping] = &[
         source: "user.xdg.comment",
         field: CatalogField::Description,
         encoding: SystemEncoding::Utf8,
-    },
-    SystemMapping {
-        source: "user.baloo.rating",
-        field: CatalogField::Rating,
-        encoding: SystemEncoding::RatingTen,
     },
 ];
 
@@ -391,10 +385,9 @@ pub const NS_PHOTOSHOP: &str = "http://ns.adobe.com/photoshop/1.0/";
 pub const NS_RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 /// Catalog fields have stable dirty bits shared by imports, edit tracking and export.
+/// Bits 1 and 2 belonged to the removed rating and culling fields; never reuse them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CatalogField {
-    Rating,
-    Culling,
     Description,
     Tags,
     Favorite,
@@ -403,8 +396,6 @@ pub(crate) enum CatalogField {
 impl CatalogField {
     pub const fn mask(self) -> i32 {
         match self {
-            Self::Rating => 1,
-            Self::Culling => 2,
             Self::Description => 4,
             Self::Tags => 8,
             Self::Favorite => 16,
@@ -413,8 +404,6 @@ impl CatalogField {
 
     pub const fn column(self) -> Option<&'static str> {
         match self {
-            Self::Rating => Some("rating"),
-            Self::Culling => Some("culling_flag"),
             Self::Description => Some("comments"),
             Self::Favorite => Some("is_favorite"),
             Self::Tags => None,
@@ -430,9 +419,10 @@ pub(crate) const EDITABLE_XMP_TEXT: [(&str, &str, i32); 4] = [
     ("e_copyright", "copyright", 256),
 ];
 
+/// Set when the user edits a file's location; scans and sidecar imports keep the edited GPS.
+pub(crate) const LOCATION_EDIT_BIT: i32 = 512;
+
 pub(super) const CATALOG_FIELDS: &[CatalogField] = &[
-    CatalogField::Rating,
-    CatalogField::Culling,
     CatalogField::Description,
     CatalogField::Tags,
     CatalogField::Favorite,
@@ -453,47 +443,12 @@ impl XmpProperty {
     pub fn qualified_name(self) -> String {
         format!("{}:{}", self.prefix, self.name)
     }
-
-    pub fn text_xml(self, escaped_value: &str) -> String {
-        let name = self.qualified_name();
-        format!("<{name}>{escaped_value}</{name}>")
-    }
 }
 
 pub(super) const FAVORITE: XmpProperty = XmpProperty {
     uri: NS_LAP,
     prefix: "lap",
     name: "Favorite",
-};
-pub(super) const RATING: XmpProperty = XmpProperty {
-    uri: NS_XMP,
-    prefix: "xmp",
-    name: "Rating",
-};
-pub(super) const PICK: XmpProperty = XmpProperty {
-    uri: NS_XMP_DM,
-    prefix: "xmpDM",
-    name: "pick",
-};
-pub(super) const GOOD: XmpProperty = XmpProperty {
-    uri: NS_XMP_DM,
-    prefix: "xmpDM",
-    name: "good",
-};
-pub(super) const REJECTED: XmpProperty = XmpProperty {
-    uri: NS_DARKTABLE,
-    prefix: "darktable",
-    name: "rejected",
-};
-pub(super) const DIGIKAM_PICK: XmpProperty = XmpProperty {
-    uri: NS_DIGIKAM,
-    prefix: "digiKam",
-    name: "PickLabel",
-};
-pub(super) const LABEL: XmpProperty = XmpProperty {
-    uri: NS_XMP,
-    prefix: "xmp",
-    name: "Label",
 };
 // First present value wins, including explicit clears.
 pub(super) const DESCRIPTION: &[XmpProperty] = &[

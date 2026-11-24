@@ -4,7 +4,6 @@
     "library": "Libreria",
     "album": "Album",
     "search": "Cerca",
-    "rating": "Valutazioni",
     "tag": "Tag",
     "calendar": "Calendario",
     "location": "Luoghi",
@@ -164,8 +163,6 @@
         "media_subtype": "Sottotipo di media",
         "extension": "Estensione",
         "favorite": "Preferito",
-        "rating": "Valutazione",
-        "culling": "Selezione",
         "date": "Data",
         "date_taken": "Data di scatto",
         "date_created": "Data di creazione",
@@ -334,28 +331,10 @@
     "resume": "Riprendi indicizzazione"
   },
   "favorite": {
+    "mixed": "Misto",
     "title": "Preferito",
     "files": "File preferiti",
     "folders": "Cartelle preferite"
-  },
-  "rating": {
-    "mixed": "Misto",
-    "title": "Valutazioni",
-    "unrated": "Senza valutazione",
-    "all_rated": "Tutte valutate",
-    "rated": "Valutate",
-    "clear_rating": "Azzera valutazione",
-    "five_stars": "5 stelle",
-    "four_stars": "4 stelle",
-    "three_stars": "3 stelle",
-    "two_stars": "2 stelle",
-    "one_star": "1 stella"
-  },
-  "culling": {
-    "title": "Selezione",
-    "picks": "Scelte",
-    "rejected": "Scartate",
-    "unreviewed": "Non revisionate"
   },
   "assign_tags": {
     "recent_link": "Recenti",
@@ -473,13 +452,12 @@
         "Cartella",
         "Giorno",
         "Mese",
-        "Valutazione",
+        "",
         "Luogo",
         "Fotocamera",
         "Obiettivo",
         "Anno",
-        "Tipo di file",
-        "Selezione"
+        "Tipo di file"
       ],
       "sort_type_options": [
         "Data di scatto",
@@ -1482,7 +1460,7 @@
       "title": "Metadati",
       "section_import": "Importa metadati",
       "import": "Da EXIF, IPTC e XMP",
-      "import_hint": "Importa preferiti, valutazioni, contrassegni di selezione, tag e descrizioni durante scansioni e aggiornamenti, mantenendo le modifiche locali."
+      "import_hint": "Importa preferiti, tag e descrizioni durante scansioni e aggiornamenti, mantenendo le modifiche locali."
     },
     "browse": {
       "section_album": "Cartella album",
@@ -1707,20 +1685,6 @@
         "print": "Stampa",
         "toggle_favorite": "Aggiungi / Rimuovi dai preferiti",
         "toggle_favorite_and_next": "Aggiungi / Rimuovi dai preferiti → Successivo",
-        "set_clear_rating": "Valutazione",
-        "set_clear_rating_and_next": "Valutazione → Successivo",
-        "mark_pick": "Selezione · Scelte",
-        "mark_pick_and_next": "Selezione · Scelte → Successivo",
-        "mark_rejected": "Selezione · Scartate",
-        "mark_rejected_and_next": "Selezione · Scartate → Successivo",
-        "mark_unreviewed": "Selezione · Non revisionate",
-        "mark_unreviewed_and_next": "Selezione · Non revisionate → Successivo",
-        "clear_rating": "Azzera valutazione",
-        "rate_one": "Valuta 1 stella",
-        "rate_two": "Valuta 2 stelle",
-        "rate_three": "Valuta 3 stelle",
-        "rate_four": "Valuta 4 stelle",
-        "rate_five": "Valuta 5 stelle",
         "edit_tags": "Tag",
         "edit_collections": "Raccolte",
         "edit_comment": "Descrizione",
@@ -1800,7 +1764,7 @@
       "change_location": "Cambia",
       "change_location_confirm": "Scegli cartella",
       "prechange_title": "Cambia posizione dei dati",
-      "prechange_message": "I dati della libreria memorizzano metadati, preferiti, valutazioni, tag e altri dati di organizzazione. È consigliata la posizione predefinita di sistema. Se la sposti, usa una cartella locale per prestazioni migliori.",
+      "prechange_message": "I dati della libreria memorizzano metadati, preferiti, tag e altri dati di organizzazione. È consigliata la posizione predefinita di sistema. Se la sposti, usa una cartella locale per prestazioni migliori.",
       "restore_default_location": "Reimposta posizione predefinita",
       "restore_default_confirm_title": "Reimposta posizione predefinita",
       "restore_default_confirm_message": "Tutti i file di dati della libreria verranno spostati di nuovo nella posizione predefinita.",

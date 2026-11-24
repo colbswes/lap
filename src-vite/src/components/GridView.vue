@@ -135,14 +135,10 @@ import {
   IconCameraAperture,
   IconFile,
   IconFiles,
-  IconFlag,
-  IconFlagFilled,
-  IconFlagOff,
   IconFolder,
   IconLocation,
   IconPhoto,
   IconSearch,
-  IconStarFilled,
   IconVideo,
 } from '@/common/icons';
 
@@ -743,15 +739,15 @@ function scrollToItem(index: number, center = false) {
     // Only scroll if the item is not fully visible
     const isFullyVisible = itemTop >= viewportTop && itemBottom <= viewportBottom;
     
+    // Sync the virtual rows before Quick View uncovers the scroller. The
+    // browser may deliver its scroll event after Vue renders the grid.
+    let target = scrollTop;
     if (!isFullyVisible) {
-      if (itemTop < viewportTop) {
-        // Item is above viewport, scroll to show it at the top
-        el.scrollTop = itemTop;
-      } else if (itemBottom > viewportBottom) {
-        // Item is below viewport, scroll to show it at the bottom (accounting for bottom padding)
-        el.scrollTop = itemBottom - clientHeight + (topPadding + bottomPadding);
-      }
+      target = itemTop < viewportTop
+        ? itemTop
+        : itemBottom - clientHeight + topPadding + bottomPadding;
     }
+    scroller.value.scrollToPosition(target);
   } else {
     // Filmstrip mode: center the item
     const isHorizontal = config.settings.grid.previewPosition < 2;
@@ -926,17 +922,6 @@ function getGroupIcon(item: any) {
     case GROUP.MONTH:
     case GROUP.YEAR:
       return IconCalendarMonth;
-    case GROUP.RATING:
-      return IconStarFilled;
-    case GROUP.CULLING:
-      switch (Number(item?.group_id ?? 0)) {
-        case 1:
-          return IconFlagFilled;
-        case 2:
-          return IconFlagOff;
-        default:
-          return IconFlag;
-      }
     case GROUP.FILE_TYPE:
       switch (item?.group_id) {
         case 'image':

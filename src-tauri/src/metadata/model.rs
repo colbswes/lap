@@ -12,19 +12,8 @@ pub(super) struct SourceCapture {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XmpMetadata {
-    /// Missing is distinct from explicit false. Independent of ratings and picks.
+    /// Missing is distinct from explicit false.
     pub favorite: Option<bool>,
-    /// Star rating (`0..=5`).
-    /// - `None`: rating property is omitted from the sidecar.
-    /// - `Some(0)`: explicitly unrated (`0` or `""`, or `-1` when mapped to reject).
-    /// - `Some(1..=5)`: star rating.
-    pub rating: Option<i32>,
-    /// Culling flag (`0` = unflagged, `1` = pick, `2` = reject).
-    /// - `None`: no culling/pick/reject property is present in the sidecar.
-    /// - `Some(0)`: explicitly unflagged.
-    /// - `Some(1)`: pick.
-    /// - `Some(2)`: reject.
-    pub culling_flag: Option<i32>,
     /// Keywords / subject tags (`dc:subject`, `lr:hierarchicalSubject`, `digiKam:TagsList`).
     /// - `None`: no tag container element exists in the sidecar.
     /// - `Some(vec![])`: tag container exists in the sidecar but contains no user tags.

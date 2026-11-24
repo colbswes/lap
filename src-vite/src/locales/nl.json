@@ -4,7 +4,6 @@
     "library": "Bibliotheek",
     "album": "Albums",
     "search": "Zoeken",
-    "rating": "Beoordelingen",
     "tag": "Tags",
     "calendar": "Kalender",
     "location": "Locaties",
@@ -164,8 +163,6 @@
         "media_subtype": "Mediasubtype",
         "extension": "Extensie",
         "favorite": "Favoriet",
-        "rating": "Beoordeling",
-        "culling": "Schiften",
         "date": "Datum",
         "date_taken": "Opnamedatum",
         "date_created": "Aanmaakdatum",
@@ -334,28 +331,10 @@
     "resume": "Indexeren hervatten"
   },
   "favorite": {
+    "mixed": "Gemengd",
     "title": "Favoriet",
     "files": "Favoriete bestanden",
     "folders": "Favoriete mappen"
-  },
-  "rating": {
-    "mixed": "Gemengd",
-    "title": "Beoordelingen",
-    "unrated": "Niet beoordeeld",
-    "all_rated": "Alle beoordeelde",
-    "rated": "Beoordeeld",
-    "clear_rating": "Beoordeling wissen",
-    "five_stars": "5 sterren",
-    "four_stars": "4 sterren",
-    "three_stars": "3 sterren",
-    "two_stars": "2 sterren",
-    "one_star": "1 ster"
-  },
-  "culling": {
-    "title": "Schiften",
-    "picks": "Gekozen",
-    "rejected": "Afgewezen",
-    "unreviewed": "Niet bekeken"
   },
   "assign_tags": {
     "recent_link": "Recent",
@@ -473,13 +452,12 @@
         "Map",
         "Dag",
         "Maand",
-        "Beoordeling",
+        "",
         "Locatie",
         "Camera",
         "Objectief",
         "Jaar",
-        "Bestandstype",
-        "Schiften"
+        "Bestandstype"
       ],
       "sort_type_options": [
         "Opnamedatum",
@@ -1482,7 +1460,7 @@
       "title": "Metagegevens",
       "section_import": "Metagegevens importeren",
       "import": "Uit EXIF, IPTC en XMP",
-      "import_hint": "Importeer favorieten, beoordelingen, schiftmarkeringen, tags en beschrijvingen bij scans en vernieuwingen, met behoud van lokale wijzigingen."
+      "import_hint": "Importeer favorieten, tags en beschrijvingen bij scans en vernieuwingen, met behoud van lokale wijzigingen."
     },
     "browse": {
       "section_album": "Albummap",
@@ -1707,20 +1685,6 @@
         "print": "Afdrukken",
         "toggle_favorite": "Toevoegen aan / Verwijderen uit favorieten",
         "toggle_favorite_and_next": "Toevoegen aan / Verwijderen uit favorieten → Volgende",
-        "set_clear_rating": "Beoordeling",
-        "set_clear_rating_and_next": "Beoordeling → Volgende",
-        "mark_pick": "Schiften · Gekozen",
-        "mark_pick_and_next": "Schiften · Gekozen → Volgende",
-        "mark_rejected": "Schiften · Afgewezen",
-        "mark_rejected_and_next": "Schiften · Afgewezen → Volgende",
-        "mark_unreviewed": "Schiften · Niet bekeken",
-        "mark_unreviewed_and_next": "Schiften · Niet bekeken → Volgende",
-        "clear_rating": "Beoordeling wissen",
-        "rate_one": "1 ster geven",
-        "rate_two": "2 sterren geven",
-        "rate_three": "3 sterren geven",
-        "rate_four": "4 sterren geven",
-        "rate_five": "5 sterren geven",
         "edit_tags": "Tags",
         "edit_collections": "Collecties",
         "edit_comment": "Beschrijving",
@@ -1800,7 +1764,7 @@
       "change_location": "Wijzigen",
       "change_location_confirm": "Map kiezen",
       "prechange_title": "Gegevenslocatie wijzigen",
-      "prechange_message": "In de bibliotheekgegevens staan metadata, favorieten, beoordelingen, tags en andere ordeningsgegevens. De standaardlocatie van het systeem wordt aanbevolen. Verplaats je de gegevens, gebruik dan een lokale map voor betere prestaties.",
+      "prechange_message": "In de bibliotheekgegevens staan metadata, favorieten, tags en andere ordeningsgegevens. De standaardlocatie van het systeem wordt aanbevolen. Verplaats je de gegevens, gebruik dan een lokale map voor betere prestaties.",
       "restore_default_location": "Standaardlocatie herstellen",
       "restore_default_confirm_title": "Standaardlocatie herstellen",
       "restore_default_confirm_message": "Alle bibliotheekgegevens worden teruggezet naar de standaardlocatie.",

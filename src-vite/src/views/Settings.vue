@@ -1374,10 +1374,6 @@ const shortcutDisplaySections: Array<{ key: string; items: ShortcutDisplayItem[]
     key: 'metadata',
     items: [
       { actionId: 'meta.favorite', labelKey: 'toggle_favorite', advanceLabelKey: 'toggle_favorite_and_next' },
-      { actionId: 'meta.rating.clear', labelKey: 'set_clear_rating', advanceLabelKey: 'set_clear_rating_and_next', keys: ['0 ~ 5'] },
-      { actionId: 'meta.culling.pick', labelKey: 'mark_pick', advanceLabelKey: 'mark_pick_and_next' },
-      { actionId: 'meta.culling.reject', labelKey: 'mark_rejected', advanceLabelKey: 'mark_rejected_and_next' },
-      { actionId: 'meta.culling.unreviewed', labelKey: 'mark_unreviewed', advanceLabelKey: 'mark_unreviewed_and_next' },
       { actionId: 'meta.tag', labelKey: 'edit_tags' },
       { actionId: 'meta.collection', labelKey: 'edit_collections' },
       { actionId: 'meta.edit', labelKey: 'edit_metadata' },

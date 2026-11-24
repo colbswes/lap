@@ -567,9 +567,9 @@ mod tests {
             ["Trip_007.HEIC", "Trip_008.CR3"]
         );
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE afiles(id INTEGER PRIMARY KEY, name TEXT, name_pinyin TEXT, rating INTEGER, folder_id INTEGER DEFAULT 1);
+        conn.execute_batch("CREATE TABLE afiles(id INTEGER PRIMARY KEY, name TEXT, name_pinyin TEXT, size INTEGER, folder_id INTEGER DEFAULT 1);
             CREATE UNIQUE INDEX uidx_afiles_folder_id_name ON afiles(folder_id, name);
-            INSERT INTO afiles(id,name,name_pinyin,rating) VALUES(1,'first.CR3',NULL,5),(2,'first.JPG',NULL,4),(3,'second.HEIC',NULL,3),(4,'second.MOV',NULL,2);").unwrap();
+            INSERT INTO afiles(id,name,name_pinyin,size) VALUES(1,'first.CR3',NULL,5),(2,'first.JPG',NULL,4),(3,'second.HEIC',NULL,3),(4,'second.MOV',NULL,2);").unwrap();
         let updates: Vec<_> = moves
             .iter()
             .filter_map(|entry| {
@@ -614,7 +614,7 @@ mod tests {
             "Trip_008.JPG"
         );
         assert_eq!(
-            conn.query_row("SELECT SUM(rating) FROM afiles", [], |row| row
+            conn.query_row("SELECT SUM(size) FROM afiles", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
             14

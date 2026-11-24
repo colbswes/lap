@@ -4,7 +4,6 @@
     "library": "Biblioteka",
     "album": "Albumy",
     "search": "Wyszukiwanie",
-    "rating": "Oceny",
     "tag": "Tagi",
     "calendar": "Kalendarz",
     "location": "Lokalizacje",
@@ -164,8 +163,6 @@
         "media_subtype": "Podtyp multimediów",
         "extension": "Rozszerzenie",
         "favorite": "Ulubione",
-        "rating": "Ocena",
-        "culling": "Selekcja",
         "date": "Data",
         "date_taken": "Data wykonania",
         "date_created": "Data utworzenia",
@@ -334,28 +331,10 @@
     "resume": "Wznów indeksowanie"
   },
   "favorite": {
+    "mixed": "Różne",
     "title": "Ulubione",
     "files": "Ulubione pliki",
     "folders": "Ulubione foldery"
-  },
-  "rating": {
-    "mixed": "Różne",
-    "title": "Oceny",
-    "unrated": "Bez oceny",
-    "all_rated": "Wszystkie ocenione",
-    "rated": "Ocenione",
-    "clear_rating": "Wyczyść ocenę",
-    "five_stars": "5 gwiazdek",
-    "four_stars": "4 gwiazdki",
-    "three_stars": "3 gwiazdki",
-    "two_stars": "2 gwiazdki",
-    "one_star": "1 gwiazdka"
-  },
-  "culling": {
-    "title": "Selekcja",
-    "picks": "Wybrane",
-    "rejected": "Odrzucone",
-    "unreviewed": "Niesprawdzone"
   },
   "assign_tags": {
     "recent_link": "Ostatnie",
@@ -473,13 +452,12 @@
         "Folder",
         "Dzień",
         "Miesiąc",
-        "Ocena",
+        "",
         "Lokalizacja",
         "Aparat",
         "Obiektyw",
         "Rok",
-        "Typ pliku",
-        "Selekcja"
+        "Typ pliku"
       ],
       "sort_type_options": [
         "Data wykonania",
@@ -1482,7 +1460,7 @@
       "title": "Metadane",
       "section_import": "Importuj metadane",
       "import": "Z EXIF, IPTC i XMP",
-      "import_hint": "Importuj ulubione, oceny, oznaczenia selekcji, tagi i opisy podczas skanowania i odświeżania, zachowując lokalne zmiany."
+      "import_hint": "Importuj ulubione, tagi i opisy podczas skanowania i odświeżania, zachowując lokalne zmiany."
     },
     "browse": {
       "section_album": "Folder albumu",
@@ -1707,20 +1685,6 @@
         "print": "Drukuj",
         "toggle_favorite": "Dodaj / Usuń z ulubionych",
         "toggle_favorite_and_next": "Dodaj / Usuń z ulubionych → Dalej",
-        "set_clear_rating": "Ocena",
-        "set_clear_rating_and_next": "Ocena → Dalej",
-        "mark_pick": "Selekcja · Wybrane",
-        "mark_pick_and_next": "Selekcja · Wybrane → Dalej",
-        "mark_rejected": "Selekcja · Odrzucone",
-        "mark_rejected_and_next": "Selekcja · Odrzucone → Dalej",
-        "mark_unreviewed": "Selekcja · Niesprawdzone",
-        "mark_unreviewed_and_next": "Selekcja · Niesprawdzone → Dalej",
-        "clear_rating": "Wyczyść ocenę",
-        "rate_one": "Oceń na 1 gwiazdkę",
-        "rate_two": "Oceń na 2 gwiazdki",
-        "rate_three": "Oceń na 3 gwiazdki",
-        "rate_four": "Oceń na 4 gwiazdki",
-        "rate_five": "Oceń na 5 gwiazdek",
         "edit_tags": "Tagi",
         "edit_collections": "Kolekcje",
         "edit_comment": "Opis",
@@ -1800,7 +1764,7 @@
       "change_location": "Zmień",
       "change_location_confirm": "Wybierz folder",
       "prechange_title": "Zmień lokalizację danych",
-      "prechange_message": "Dane biblioteki przechowują metadane, ulubione, oceny, tagi i inne dane organizacyjne. Zalecana jest domyślna lokalizacja systemowa. W przypadku przenoszenia użyj folderu lokalnego, aby uzyskać lepszą wydajność.",
+      "prechange_message": "Dane biblioteki przechowują metadane, ulubione, tagi i inne dane organizacyjne. Zalecana jest domyślna lokalizacja systemowa. W przypadku przenoszenia użyj folderu lokalnego, aby uzyskać lepszą wydajność.",
       "restore_default_location": "Przywróć domyślną lokalizację",
       "restore_default_confirm_title": "Przywróć domyślną lokalizację",
       "restore_default_confirm_message": "Wszystkie pliki danych biblioteki zostaną przeniesione z powrotem do domyślnej lokalizacji.",

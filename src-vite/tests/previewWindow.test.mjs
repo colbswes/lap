@@ -138,3 +138,28 @@ test('preview navigation reports boundaries without emitting a navigation event'
     }
   }
 });
+
+test('closing Quick View reveals the last browsed row in the same render', () => {
+  const content = fs.readFileSync(new URL('../src/components/Content.vue', import.meta.url), 'utf8');
+  const grid = fs.readFileSync(new URL('../src/components/GridView.vue', import.meta.url), 'utf8');
+  const virtual = fs.readFileSync(new URL('../src/components/VirtualScroll.vue', import.meta.url), 'utf8');
+  const section = (text, start, end) => ts.transpile(text.slice(text.indexOf(start), text.indexOf(end, text.indexOf(start))), { target: ts.ScriptTarget.ES2022 });
+  const ref = value => ({ value });
+  const el = { scrollTop: 0, clientHeight: 400, scrollHeight: 4000 };
+  const offset = ref(0);
+  const setPosition = new Function('scrollerRef', 'scrollOffset', 'isVertical',
+    section(virtual, 'function scrollToPosition(', 'defineExpose') + 'return scrollToPosition;')(ref(el), offset, ref(true));
+  const reveal = new Function('scroller', 'fileIndexToRowIndex', 'isFilmstripView', 'virtualScrollGeometry', 'columnCount', 'itemHeight', 'config',
+    section(grid, 'function scrollToItem(', 'function scrollToPosition(') + 'return scrollToItem;')(
+    ref({ $el: el, scrollToPosition: setPosition }), ref(new Map()), ref(false), ref(null), ref(4), ref(100), { settings: { scale: 1 } });
+  const open = ref(true);
+  const index = ref(0);
+  const navigate = new Function('checkUnsavedChanges', 'selectedItemIndex', 'fileList',
+    section(content, 'function performNavigate(', 'function updateScrollPosition(') + 'return performNavigate;')(fn => fn(), index, ref(Array(100)));
+  for (let i = 0; i < 32; i++) navigate('next');
+  new Function('showQuickView', 'stopSlideShow', 'gridViewRef', 'selectedItemIndex',
+    section(content, 'function closeQuickPreview(', 'function closeFilmstripFullScreen(') + 'closeQuickPreview();')(open, () => {}, ref({ scrollToItem: reveal }), index);
+  assert.equal(open.value, false);
+  assert.ok(el.scrollTop > 0 && el.scrollTop <= 800 && el.scrollTop + 400 >= 948);
+  assert.equal(offset.value, el.scrollTop);
+});

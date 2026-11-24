@@ -4,7 +4,6 @@
     "library": "资料库",
     "album": "相册",
     "search": "搜索",
-    "rating": "评分",
     "tag": "标签",
     "calendar": "日历",
     "location": "地点",
@@ -164,8 +163,6 @@
         "media_subtype": "媒体子类型",
         "extension": "扩展名",
         "favorite": "收藏",
-        "rating": "评分",
-        "culling": "选片",
         "date": "日期",
         "date_taken": "拍摄时间",
         "date_created": "创建时间",
@@ -334,28 +331,10 @@
     "resume": "继续索引"
   },
   "favorite": {
+    "mixed": "混合",
     "title": "收藏",
     "files": "收藏的文件",
     "folders": "收藏的文件夹"
-  },
-  "rating": {
-    "mixed": "混合",
-    "title": "评分",
-    "unrated": "未评分",
-    "all_rated": "全部已评分",
-    "rated": "已评分",
-    "clear_rating": "清除评分",
-    "five_stars": "5 星",
-    "four_stars": "4 星",
-    "three_stars": "3 星",
-    "two_stars": "2 星",
-    "one_star": "1 星"
-  },
-  "culling": {
-    "title": "选片",
-    "picks": "已选",
-    "rejected": "已排除",
-    "unreviewed": "待筛选"
   },
   "assign_tags": {
     "recent_link": "最近",
@@ -473,13 +452,12 @@
         "文件夹",
         "日",
         "月",
-        "评分",
+        "",
         "地点",
         "相机",
         "镜头",
         "年",
-        "文件类型",
-        "选片"
+        "文件类型"
       ],
       "sort_type_options": [
         "拍摄日期",
@@ -1482,7 +1460,7 @@
       "title": "元数据",
       "section_import": "导入元数据",
       "import": "从 EXIF、IPTC 和 XMP 导入",
-      "import_hint": "扫描和刷新时导入收藏、评分、选片标记、标签和描述，保留本地编辑。"
+      "import_hint": "扫描和刷新时导入收藏、标签和描述，保留本地编辑。"
     },
     "browse": {
       "section_album": "相册文件夹",
@@ -1707,20 +1685,6 @@
         "print": "打印",
         "toggle_favorite": "收藏 / 取消收藏",
         "toggle_favorite_and_next": "收藏 / 取消收藏 → 下一张",
-        "set_clear_rating": "评分",
-        "set_clear_rating_and_next": "评分 → 下一张",
-        "mark_pick": "选片 · 已选",
-        "mark_pick_and_next": "选片 · 已选 → 下一张",
-        "mark_rejected": "选片 · 已排除",
-        "mark_rejected_and_next": "选片 · 已排除 → 下一张",
-        "mark_unreviewed": "选片 · 待筛选",
-        "mark_unreviewed_and_next": "选片 · 待筛选 → 下一张",
-        "clear_rating": "清除评分",
-        "rate_one": "评分 1 星",
-        "rate_two": "评分 2 星",
-        "rate_three": "评分 3 星",
-        "rate_four": "评分 4 星",
-        "rate_five": "评分 5 星",
         "edit_tags": "标签",
         "edit_collections": "合集",
         "edit_comment": "描述",
@@ -1810,7 +1774,7 @@
       "change_location": "更改",
       "change_location_confirm": "选择目录",
       "prechange_title": "更改数据位置",
-      "prechange_message": "资料库数据包含元数据、收藏、评分、标签等整理信息。建议使用系统默认位置。如需更改，请使用本地文件夹以保证性能。",
+      "prechange_message": "资料库数据包含元数据、收藏、标签等整理信息。建议使用系统默认位置。如需更改，请使用本地文件夹以保证性能。",
       "restore_default_location": "恢复默认位置",
       "restore_default_confirm_title": "重置默认位置",
       "restore_default_confirm_message": "所有资料库数据文件将迁回默认位置。",

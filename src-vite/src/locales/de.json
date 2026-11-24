@@ -4,7 +4,6 @@
     "library": "Bibliothek",
     "album": "Alben",
     "search": "Suche",
-    "rating": "Bewertungen",
     "tag": "Tags",
     "calendar": "Kalender",
     "location": "Orte",
@@ -164,8 +163,6 @@
         "media_subtype": "Medienuntertyp",
         "extension": "Erweiterung",
         "favorite": "Favorit",
-        "rating": "Bewertung",
-        "culling": "Auswahl",
         "date": "Datum",
         "date_taken": "Aufnahmedatum",
         "date_created": "Erstellungsdatum",
@@ -334,28 +331,10 @@
     "resume": "Fortsetzen"
   },
   "favorite": {
+    "mixed": "Unterschiedlich",
     "title": "Favoriten",
     "files": "Favorisierte Dateien",
     "folders": "Favorisierte Ordner"
-  },
-  "rating": {
-    "mixed": "Unterschiedlich",
-    "title": "Bewertungen",
-    "unrated": "Unbewertet",
-    "all_rated": "Alle bewerteten",
-    "rated": "Bewertet",
-    "clear_rating": "Bewertung löschen",
-    "five_stars": "5 Sterne",
-    "four_stars": "4 Sterne",
-    "three_stars": "3 Sterne",
-    "two_stars": "2 Sterne",
-    "one_star": "1 Stern"
-  },
-  "culling": {
-    "title": "Auswahl",
-    "picks": "Ausgewählt",
-    "rejected": "Abgelehnt",
-    "unreviewed": "Nicht geprüft"
   },
   "assign_tags": {
     "recent_link": "Zuletzt verwendet",
@@ -473,13 +452,12 @@
         "Ordner",
         "Tag",
         "Monat",
-        "Bewertung",
+        "",
         "Ort",
         "Kamera",
         "Objektiv",
         "Jahr",
-        "Dateityp",
-        "Auswahl"
+        "Dateityp"
       ],
       "sort_type_options": [
         "Aufnahmedatum",
@@ -1482,7 +1460,7 @@
       "title": "Metadaten",
       "section_import": "Metadaten importieren",
       "import": "Aus EXIF, IPTC und XMP",
-      "import_hint": "Beim Scannen und Aktualisieren Favoriten, Bewertungen, Auswahlmarkierungen, Tags und Beschreibungen importieren. Lokale Änderungen bleiben erhalten."
+      "import_hint": "Beim Scannen und Aktualisieren Favoriten, Tags und Beschreibungen importieren. Lokale Änderungen bleiben erhalten."
     },
     "browse": {
       "section_album": "Albumordner",
@@ -1707,20 +1685,6 @@
         "print": "Drucken",
         "toggle_favorite": "Favorisieren / Favorit entfernen",
         "toggle_favorite_and_next": "Favorisieren / Favorit entfernen → Weiter",
-        "set_clear_rating": "Bewertung",
-        "set_clear_rating_and_next": "Bewertung → Weiter",
-        "mark_pick": "Auswahl · Ausgewählt",
-        "mark_pick_and_next": "Auswahl · Ausgewählt → Weiter",
-        "mark_rejected": "Auswahl · Abgelehnt",
-        "mark_rejected_and_next": "Auswahl · Abgelehnt → Weiter",
-        "mark_unreviewed": "Auswahl · Nicht geprüft",
-        "mark_unreviewed_and_next": "Auswahl · Nicht geprüft → Weiter",
-        "clear_rating": "Bewertung löschen",
-        "rate_one": "1 Stern bewerten",
-        "rate_two": "2 Sterne bewerten",
-        "rate_three": "3 Sterne bewerten",
-        "rate_four": "4 Sterne bewerten",
-        "rate_five": "5 Sterne bewerten",
         "edit_tags": "Tags",
         "edit_collections": "Sammlungen",
         "edit_comment": "Beschreibung",
@@ -1800,7 +1764,7 @@
       "change_location": "Ändern",
       "change_location_confirm": "Ordner wählen",
       "prechange_title": "Datenort ändern",
-      "prechange_message": "Bibliotheksdaten enthalten Metadaten, Favoriten, Bewertungen, Tags und andere Organisationsdaten. Der Standardspeicherort wird empfohlen. Wenn Sie ihn ändern, verwenden Sie für beste Leistung einen lokalen Ordner.",
+      "prechange_message": "Bibliotheksdaten enthalten Metadaten, Favoriten, Tags und andere Organisationsdaten. Der Standardspeicherort wird empfohlen. Wenn Sie ihn ändern, verwenden Sie für beste Leistung einen lokalen Ordner.",
       "restore_default_location": "Auf Standard zurücksetzen",
       "restore_default_confirm_title": "Standard zurücksetzen",
       "restore_default_confirm_message": "Alle Bibliotheksdaten werden an den Standardspeicherort zurückverschoben.",

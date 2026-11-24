@@ -124,7 +124,7 @@
           v-if="config.settings.face.enabled"
           :icon="IconPerson"
           :selected="Boolean(config.mediaViewer.showFaces)"
-          :disabled="fileIndex < 0 || isSlideShow || !canInteract || ![1, 3].includes(Number(file?.file_type))"
+          :disabled="fileIndex < 0 || isSlideShow || !canInteract || ![1, 2, 3].includes(Number(file?.file_type))"
           :tooltip="config.mediaViewer.showFaces ? $t('image_viewer.toolbar.hide_faces') : $t('image_viewer.toolbar.show_faces')"
           @click="config.mediaViewer.showFaces = !config.mediaViewer.showFaces"
         />
@@ -138,39 +138,6 @@
             :shortcut="shortcut('meta.favorite')"
             @click="$emit('item-action', { action: 'favorite', index: fileIndex })"
           />
-          <ContextMenu
-            :menuItems="ratingMenuItems"
-            :disabled="fileIndex < 0 || isSlideShow || !canInteract"
-            @open-change="handleMenuOpenChange"
-            @click.stop
-          >
-            <template #trigger="{ toggle }">
-              <TButton
-                :icon="Number(file?.rating || 0) > 0 ? IconStarFilled : IconStar"
-                :disabled="fileIndex < 0 || isSlideShow || !canInteract"
-                :selected="Number(file?.rating || 0) > 0 && !isSlideShow"
-                :tooltip="$t('rating.title')"
-                :shortcut="ratingShortcutLabel"
-                @click.stop="toggle"
-              />
-            </template>
-          </ContextMenu>
-          <ContextMenu
-            :menuItems="cullingMenuItems"
-            :disabled="fileIndex < 0 || isSlideShow || !canInteract"
-            @open-change="handleMenuOpenChange"
-            @click.stop
-          >
-            <template #trigger="{ toggle }">
-              <TButton
-                :icon="Number(file?.culling_flag ?? file?.cullingFlag ?? 0) === 1 ? IconFlagFilled : Number(file?.culling_flag ?? file?.cullingFlag ?? 0) === 2 ? IconFlagOff : IconFlag"
-                :disabled="fileIndex < 0 || isSlideShow || !canInteract"
-                :selected="Number(file?.culling_flag ?? file?.cullingFlag ?? 0) > 0 && !isSlideShow"
-                :tooltip="$t('culling.title')"
-                @click.stop="toggle"
-              />
-            </template>
-          </ContextMenu>
           <TButton
             :icon="IconTag"
             :disabled="fileIndex < 0 || isSlideShow || !canInteract"
@@ -310,11 +277,6 @@
             :style="badge.iconStyle"
           />
           <span v-if="badge.label" class="leading-none">{{ badge.label }}</span>
-          <component
-            v-if="badge.trailingIcon"
-            :is="badge.trailingIcon"
-            :class="['h-3.5 w-3.5 shrink-0', badge.trailingIconClass]"
-          />
         </div>
       </div>
       </Transition>
@@ -375,38 +337,41 @@
       </div>
 
       <div
-        v-if="file?.file_type === 1 || file?.file_type === 3"
+        v-if="hasImage"
+        v-show="imageFile"
         :class="[
           isLivePhotoLike
             ? 'absolute inset-0 z-20 transition-opacity duration-150'
-            : 'contents',
+            : 'w-full h-full',
           isLivePhotoLike && (isLivePhotoPlaying ? 'pointer-events-none opacity-0' : 'opacity-100'),
         ]"
       >
         <Image
-          ref="mediaRef"
+          ref="imageRef"
           :showAfAreas="showAfAreas"
           :afAreaFeedbackRequest="afAreaFeedbackRequest"
-          :filePath="file?.file_path"
-          :fileId="file?.id"
-          :fileType="file?.file_type"
+          :filePath="imageFile?.file_path"
+          :fileId="imageFile?.id"
+          :fileType="imageFile?.file_type"
           :originalUnavailable="originalUnavailable"
-          :rawPairPath="file?.media_subtype === 'raw_jpeg_pair' ? file?.live_photo_video_path : ''"
-          :fileVersion="file?.modified_at || 0"
-          :imageWidth="file?.width"
-          :imageHeight="file?.height"
-          :thumbnailSrc="file?.thumbnail || ''"
+          :rawPairPath="imageFile?.media_subtype === 'raw_jpeg_pair' ? imageFile?.live_photo_video_path : ''"
+          :fileVersion="imageFile?.modified_at || 0"
+          :imageWidth="imageFile?.width"
+          :imageHeight="imageFile?.height"
+          :thumbnailSrc="imageFile?.thumbnail || ''"
           :showThumbnailPlaceholder="showThumbnailPlaceholder"
           :showInlineLoading="mode === 2"
           :suppressAutoNavigator="suppressAutoNavigator && !previewFullScreen"
           :nextFilePath="nextFilePath"
-          :rotate="file?.rotate ?? 0"
+          :prefetchFiles="prefetchFiles"
+          :loadDelay="loadDelay"
+          :rotate="imageFile?.rotate ?? 0"
           :isZoomFit="isZoomFit"
           :isSlideShow="isSlideShow"
           :slideShowTransitionMode="slideShowTransitionMode"
           @update:isZoomFit="(val: boolean) => $emit('update:isZoomFit', val)"
-          @scale="handleScale"
-          @viewport-change="handleViewportChange"
+          @scale="imageFile && handleScale($event)"
+          @viewport-change="imageFile && handleViewportChange($event)"
           @message-from-image-viewer="handleMessageFromImageViewer"
           @context-menu="handleContextMenu"
           @pointerdown.capture="handleOverlayPointerDown"
@@ -430,23 +395,34 @@
       </button>
 
       <div
-        v-if="file?.file_type === 2"
+        v-if="hasVideo"
+        v-show="videoFile"
         class="absolute inset-0 z-20"
       >
+        <img
+          v-if="videoFile && !videoRef"
+          :src="videoFile.thumbnail || getThumbUrl(videoFile.id, false, config.settings.thumbnailSize, videoFile.modified_at)"
+          class="absolute inset-0 m-auto object-contain pointer-events-none"
+          :class="isZoomFit ? 'w-full h-full' : 'max-w-full max-h-full'"
+          decoding="sync"
+          alt=""
+        />
         <Video
-          ref="mediaRef"
+          ref="videoRef"
           class="h-full w-full"
-          :filePath="file?.file_path"
-          :fileId="file?.id"
-          :thumbnailSrc="file?.thumbnail || ''"
+          :filePath="videoFile?.file_path"
+          :fileId="videoFile?.id"
+          :fileVersion="videoFile?.modified_at || 0"
+          :loadDelay="loadDelay"
+          :thumbnailSrc="videoFile?.thumbnail || ''"
           :originalUnavailable="originalUnavailable"
-          :rotate="file?.rotate ?? 0"
+          :rotate="videoFile?.rotate ?? 0"
           :isZoomFit="isZoomFit"
           @update:isZoomFit="(val: boolean) => $emit('update:isZoomFit', val)"
           :isSlideShow="isSlideShow"
-          :isActive="isPlaybackActive"
-          @scale="handleScale"
-          @viewport-change="handleViewportChange"
+          :isActive="!!videoFile && isPlaybackActive"
+          @scale="videoFile && handleScale($event)"
+          @viewport-change="videoFile && handleViewportChange($event)"
           @message-from-video-viewer="handleMessageFromImageViewer"
           @slideshow-next="emit('slideshow-next')"
           @context-menu="handleContextMenu"
@@ -454,8 +430,68 @@
           @pointerup.capture="handleOverlayPointerUp"
           @pointercancel.capture="resetOverlayPointer"
         ></Video>
+
+        <!-- Floating people/pets bar for videos when Show Faces is active -->
+        <div
+          v-if="showVideoFaceBar"
+          data-video-face-toolbar
+          class="absolute left-1/2 -translate-x-1/2 top-4 z-60 inline-flex max-w-[calc(100%-2rem)] flex-wrap items-center justify-center gap-1 rounded-box bg-base-100/75 backdrop-blur-md px-1.5 py-1 shadow border border-base-content/10 text-xs"
+          @mousedown.stop
+          @mouseup.stop
+          @click.stop
+          @dblclick.stop
+        >
+          <button
+            v-for="face in videoFaces"
+            :key="face.id"
+            type="button"
+            class="inline-flex h-7 items-center gap-1.5 rounded-box px-2 text-base-content/85 hover:bg-base-content/10 hover:text-base-content transition-colors cursor-pointer whitespace-nowrap"
+            :title="$t(face.kind === 'pet' ? 'menu.person.edit_pet' : 'menu.person.edit_face')"
+            @click="openVideoAssignFace(face)"
+          >
+            <span class="w-4 h-4 rounded-full overflow-hidden bg-base-300/70 ring-1 ring-base-content/10 shrink-0 flex items-center justify-center">
+              <img
+                v-if="face.thumbnail"
+                :src="'data:image/jpeg;base64,' + face.thumbnail"
+                class="w-full h-full object-cover"
+                draggable="false"
+              />
+              <IconPerson v-else class="w-3 h-3 text-base-content/40" />
+            </span>
+            <span>{{ face.person_id ? (face.person_name || face.person_id) : $t(face.kind === 'pet' ? 'menu.person.unknown_pet' : 'menu.person.unknown_face') }}</span>
+          </button>
+          <span v-if="videoFaces.length > 0" class="h-4 w-px bg-base-content/15"></span>
+          <button
+            type="button"
+            class="inline-flex h-7 items-center gap-1.5 rounded-box px-2.5 text-base-content/80 hover:bg-base-content/10 hover:text-base-content transition-colors cursor-pointer whitespace-nowrap"
+            :disabled="isScanningVideoFaces"
+            @click="openAddVideoManualFace"
+          >
+            <IconAdd class="size-3.5" />
+            <span>{{ $t('menu.person.add_person_or_pet') }}</span>
+          </button>
+          <span class="h-4 w-px bg-base-content/15"></span>
+          <button
+            type="button"
+            class="inline-flex h-7 items-center gap-1.5 rounded-box px-2.5 text-base-content/80 hover:bg-base-content/10 hover:text-base-content transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+            :disabled="isScanningVideoFaces"
+            :title="$t('menu.person.scan_video_tooltip')"
+            @click="handleScanCurrentVideo"
+          >
+            <span v-if="isScanningVideoFaces" class="loading loading-spinner loading-xs"></span>
+            <IconRefresh v-else class="size-3.5" />
+            <span>{{ isScanningVideoFaces ? $t('menu.person.scan_photo_scanning') : $t('menu.person.scan_video') }}</span>
+          </button>
+        </div>
       </div>
     </div>
+
+    <AssignFaceDialog
+      v-if="videoAssignFace"
+      :face="videoAssignFace"
+      @cancel="videoAssignFace = null"
+      @changed="onVideoFaceChanged"
+    />
 
     </template>
 
@@ -472,20 +508,22 @@
 </template>
 
 <script setup lang="ts">
-import { OVERLAY_CLICK_MOVE_TOLERANCE } from '@/common/constants';
-import { defineAsyncComponent, ref, computed, watch, onMounted, onUpdated, onBeforeUnmount, type Component, type CSSProperties } from 'vue';
+import { OVERLAY_CLICK_MOVE_TOLERANCE, SIDEBAR } from '@/common/constants';
+import { defineAsyncComponent, ref, computed, watch, onMounted, onUpdated, onBeforeUnmount, type Component, type CSSProperties, type PropType } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { runPreviewWindowOperation, recoverPreviewWindowFocus } from '@/common/previewWindow';
 import { config, libConfig } from '@/common/config';
 import { useToast } from '@/common/toast';
-import { isWin, isMac, isLinux, getSlideShowInterval } from '@/common/utils';
+import { isWin, isMac, isLinux, getSlideShowInterval, getThumbUrl } from '@/common/utils';
 import { getShortcutLabel, ShortcutActionId, ShortcutPlatform, VIEW_BACKGROUND_SHORTCUTS } from '@/common/shortcuts';
 import { isOriginalUnavailable, setFileAccessibility } from '@/common/availability';
-import { getMotionPhotoVideoPath, checkFileAccessibility } from '@/common/api';
+import { getMotionPhotoVideoPath, checkFileAccessibility, getFacesForFile, getFaceThumbnail, getPersonThumbnail, scanFileFaces } from '@/common/api';
+import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
 
 import Image from '@/components/Image.vue';
-import { emit as tauriEmit } from '@tauri-apps/api/event';
+import AssignFaceDialog, { type AssignFaceTarget } from '@/components/AssignFaceDialog.vue';
+import { emit as tauriEmit, listen } from '@tauri-apps/api/event';
 import TButton from '@/components/TButton.vue';
 import { 
   IconLeft, 
@@ -506,11 +544,6 @@ import {
   IconMore,
   IconHeart,
   IconHeartFilled,
-  IconFlag,
-  IconFlagFilled,
-  IconFlagOff,
-  IconStar,
-  IconStarFilled,
   IconCollection,
   IconTag,
   IconComment,
@@ -527,10 +560,13 @@ import {
   IconExclamation,
   IconAutoFocus,
   IconPerson,
+  IconAdd,
+  IconRefresh,
 } from '@/common/icons';
 import ContextMenu from '@/components/ContextMenu.vue';
 import iconLogo from '@/assets/images/icon.png';
 import { useFileMenuItems } from '@/common/fileMenu';
+import type { PrefetchFile } from '@/common/viewerImages';
 
 const Video = defineAsyncComponent(() => import('@/components/Video.vue'));
 
@@ -564,6 +600,7 @@ const props = defineProps({
     type: Number,
     default: 0
   },
+  prefetchFiles: { type: Array as PropType<PrefetchFile[]>, default: () => [] },
   nextFilePath: {
     type: String,
     default: ''
@@ -724,7 +761,24 @@ const contextMenuRef = ref<any>(null);
 const backgroundContextMenuRef = ref<any>(null);
 const containerRef = ref<HTMLElement | null>(null);
 const mediaAreaRef = ref<HTMLElement | null>(null);
-const mediaRef = ref<any>(null);
+const imageRef = ref<any>(null);
+const videoRef = ref<any>(null);
+const imageFile = computed(() => [1, 3].includes(props.file?.file_type) ? props.file : null);
+const videoFile = computed(() => props.file?.file_type === 2 ? props.file : null);
+const hasImage = ref(false);
+const hasVideo = ref(false);
+watch(imageFile, file => { if (file) hasImage.value = true; }, { immediate: true });
+watch(videoFile, file => { if (file) hasVideo.value = true; }, { immediate: true });
+const mediaRef = computed(() => videoFile.value ? videoRef.value : imageFile.value ? imageRef.value : null);
+
+const loadDelay = ref(0);
+let lastSwitchAt = -Infinity;
+watch(() => props.file?.id, id => {
+  if (!id) return;
+  const now = performance.now();
+  loadDelay.value = now - lastSwitchAt < 150 ? 70 : 0;
+  lastSwitchAt = now;
+}, { immediate: true });
 const reportedDisplayScale = ref<number | null>(null);
 const reportedFit = ref<boolean | null>(null);
 const displayIsFit = computed(() => (props.toolbarOnly ? props.displayZoomFit : reportedFit.value) ?? props.isZoomFit);
@@ -933,11 +987,6 @@ const toggleMaximizeWindow = () => {
 const closeWindow = () => desktopAppWindow?.close();
 const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
 const shortcut = (actionId: ShortcutActionId) => getShortcutLabel(actionId, shortcutPlatform);
-const ratingShortcutLabel = computed(() => {
-  const first = shortcut('meta.rating.clear');
-  const last = shortcut('meta.rating.five');
-  return first && last ? `${first}-${last}` : '';
-});
 const effectiveSlideShowIntervalIndex = computed(() => {
   return props.slideShowIntervalIndex ?? config.settings.slideShowInterval;
 });
@@ -974,74 +1023,6 @@ const viewBackgroundMenuItems = computed(() => {
     })),
   ];
 });
-// const ratingButtonTooltip = computed(() => {
-//   const rating = Number(props.file?.rating || 0);
-//   return rating > 0 ? `${localeMsg.value.rating.title}: ${rating}` : localeMsg.value.rating.title;
-// });
-const ratingMenuItems = computed(() => {
-  const rating = Number(props.file?.rating || 0);
-  return [
-    {
-      label: localeMsg.value.rating.clear_rating,
-      icon: IconStar,
-      shortcut: shortcut('meta.rating.clear'),
-      action: () => emit('item-action', { action: 'rating-0', index: props.fileIndex }),
-    },
-    { label: '-', action: null },
-    {
-      label: localeMsg.value.rating.five_stars,
-      icon: rating === 5 ? IconStarFilled : IconStar,
-      shortcut: shortcut('meta.rating.five'),
-      action: () => emit('item-action', { action: 'rating-5', index: props.fileIndex }),
-    },
-    {
-      label: localeMsg.value.rating.four_stars,
-      icon: rating === 4 ? IconStarFilled : IconStar,
-      shortcut: shortcut('meta.rating.four'),
-      action: () => emit('item-action', { action: 'rating-4', index: props.fileIndex }),
-    },
-    {
-      label: localeMsg.value.rating.three_stars,
-      icon: rating === 3 ? IconStarFilled : IconStar,
-      shortcut: shortcut('meta.rating.three'),
-      action: () => emit('item-action', { action: 'rating-3', index: props.fileIndex }),
-    },
-    {
-      label: localeMsg.value.rating.two_stars,
-      icon: rating === 2 ? IconStarFilled : IconStar,
-      shortcut: shortcut('meta.rating.two'),
-      action: () => emit('item-action', { action: 'rating-2', index: props.fileIndex }),
-    },
-    {
-      label: localeMsg.value.rating.one_star,
-      icon: rating === 1 ? IconStarFilled : IconStar,
-      shortcut: shortcut('meta.rating.one'),
-      action: () => emit('item-action', { action: 'rating-1', index: props.fileIndex }),
-    },
-  ];
-});
-
-const cullingMenuItems = computed(() => [
-  {
-    label: localeMsg.value.culling.picks,
-    icon: Number(props.file?.culling_flag ?? props.file?.cullingFlag ?? 0) === 1 ? IconFlagFilled : IconFlag,
-    shortcut: shortcut('meta.culling.pick'),
-    action: () => emit('item-action', { action: 'culling-pick', index: props.fileIndex }),
-  },
-  {
-    label: localeMsg.value.culling.rejected,
-    icon: Number(props.file?.culling_flag ?? props.file?.cullingFlag ?? 0) === 2 ? IconFlagFilled : IconFlagOff,
-    shortcut: shortcut('meta.culling.reject'),
-    action: () => emit('item-action', { action: 'culling-reject', index: props.fileIndex }),
-  },
-  {
-    label: localeMsg.value.culling.unreviewed,
-    icon: Number(props.file?.culling_flag ?? props.file?.cullingFlag ?? 0) === 0 ? IconFlagFilled : IconFlag,
-    shortcut: shortcut('meta.culling.unreviewed'),
-    action: () => emit('item-action', { action: 'culling-unreviewed', index: props.fileIndex }),
-  },
-]);
-
 const slideShowIntervalOptions = [1, 3, 5, 10, 15, 30];
 const slideShowIntervalMenuItems = computed(() => {
   const currentInterval = getSlideShowInterval(effectiveSlideShowIntervalIndex.value);
@@ -1067,49 +1048,17 @@ type StatusBadge = {
   label?: string;
   iconClass?: string;
   iconStyle?: CSSProperties;
-  trailingIcon?: Component;
-  trailingIconClass?: string;
 };
 
 const quickViewStatusBadges = computed<StatusBadge[]>(() => {
   const badges: StatusBadge[] = [];
   const metaIcons: StatusBadge['icons'] = [];
-  const rating = Number(props.file?.rating || 0);
-  const cullingFlag = Number(props.file?.culling_flag ?? props.file?.cullingFlag ?? 0);
-  const cullingIcon = cullingFlag === 1
-    ? IconFlagFilled
-    : cullingFlag === 2
-      ? IconFlagOff
-      : undefined;
-  const cullingIconClass = cullingFlag === 1
-    ? 'text-primary'
-    : cullingFlag === 2
-      ? 'text-error'
-      : undefined;
 
   if (props.file?.is_favorite) {
     badges.push({
       key: 'favorite',
       icon: IconHeartFilled,
       iconClass: 'text-error',
-      label: rating > 0 ? `${rating}` : undefined,
-      trailingIcon: cullingIcon,
-      trailingIconClass: cullingIconClass,
-    });
-  } else if (rating > 0) {
-    badges.push({
-      key: 'rating',
-      icon: IconStarFilled,
-      iconClass: 'text-warning',
-      label: `${rating}`,
-      trailingIcon: cullingIcon,
-      trailingIconClass: cullingIconClass,
-    });
-  } else if (cullingIcon) {
-    badges.push({
-      key: cullingFlag === 1 ? 'culling-pick' : 'culling-reject',
-      icon: cullingIcon,
-      iconClass: cullingIconClass,
     });
   }
   if (props.file?.has_tags) metaIcons.push({ icon: IconTag });
@@ -1135,8 +1084,7 @@ function sameStatusBadges(badges: StatusBadge[], previous: StatusBadge[]) {
   return badges.length === previous.length && badges.every((badge, index) => {
     const other = previous[index];
     return badge.key === other.key && badge.icon === other.icon && badge.label === other.label
-      && badge.iconClass === other.iconClass && badge.trailingIcon === other.trailingIcon
-      && badge.trailingIconClass === other.trailingIconClass
+      && badge.iconClass === other.iconClass
       && badge.icons?.length === other.icons?.length
       && (badge.icons || []).every((entry, i) => entry.icon === other.icons![i].icon);
   });
@@ -1198,11 +1146,24 @@ onMounted(() => {
   if (props.mode === 0 && config.mediaViewer.isFullScreen) {
     void toggleFullScreen();
   }
+  void listen(PERSONS_CHANGED_EVENT, () => {
+    if (showVideoFaceBar.value && videoFile.value?.id) {
+      void loadVideoFaces(Number(videoFile.value.id));
+    }
+  }).then(unlisten => {
+    if (previewDisposed) {
+      unlisten();
+    } else {
+      unlistenVideoPersonsChanged = unlisten;
+    }
+  }).catch(() => {});
 });
 
 onBeforeUnmount(() => {
   clearStatusFeedback();
   previewDisposed = true;
+  unlistenVideoPersonsChanged?.();
+  unlistenVideoPersonsChanged = null;
   stopPreviewResizeListener();
   void exitPreviewFullScreen();
   if (resizeObserver) {
@@ -1379,7 +1340,7 @@ const applyViewportState = (viewport: any, silent = false) => {
   }
 };
 const getCurrentImageSrc = () => mediaRef.value?.getCurrentImageSrc?.() || '';
-const clearPreloadCache = (filePath?: string) => mediaRef.value?.clearPreloadCache?.(filePath);
+const clearPreloadCache = (filePath?: string) => imageRef.value?.clearPreloadCache?.(filePath);
 const showMessage = (message: string, isWarning: boolean = false) => {
   if (isWarning) {
     toast.warning(message, { placement: 'bottom-right' });
@@ -1529,20 +1490,159 @@ const originalUnavailable = computed(() => isOriginalUnavailable(props.file));
 watch(originalUnavailable, unavailable => {
   if (unavailable) isLivePhotoPlaying.value = false;
 });
-let accessRequest = 0;
-async function refreshOriginalAccess() {
-  const path = props.file?.file_path;
-  const request = ++accessRequest;
-  const libraryId = libConfig._libraryId;
+watch(() => [!props.toolbarOnly && props.file?.file_path, libConfig._libraryId] as const, ([path, libraryId], _previous, onCleanup) => {
   if (!path) return;
-  try {
-    const available = await checkFileAccessibility(path);
-    if (request === accessRequest && libraryId === libConfig._libraryId) setFileAccessibility(path, available);
-  } catch { /* An IPC failure is not evidence that the original is offline. */ }
-}
-watch(() => [props.file, props.file?.file_path, libConfig._libraryId], refreshOriginalAccess, { immediate: true });
+  let cancelled = false;
+  const timer = setTimeout(async () => {
+    try {
+      const available = await checkFileAccessibility(path);
+      if (!cancelled && libraryId === libConfig._libraryId) setFileAccessibility(path, available);
+    } catch { /* An IPC failure is not evidence that the original is offline. */ }
+  }, 150);
+  onCleanup(() => {
+    clearTimeout(timer);
+    cancelled = true;
+  });
+}, { immediate: true });
 
 const selectedFile = computed(() => props.file);
+
+interface VideoFaceTag {
+  id: number;
+  file_id: number;
+  person_id: number | null;
+  person_name: string | null;
+  kind: string;
+  manual: boolean;
+  thumbnail: string;
+}
+
+const videoFaces = ref<VideoFaceTag[]>([]);
+const videoAssignFace = ref<AssignFaceTarget | null>(null);
+const isScanningVideoFaces = ref(false);
+let videoFacesRequestSeq = 0;
+let unlistenVideoPersonsChanged: (() => void) | null = null;
+
+const showVideoFaceBar = computed(() =>
+  Boolean(
+    videoFile.value?.id
+    && config.settings.face.enabled
+    && config.mediaViewer.showFaces
+    && !props.isSlideShow
+    && !props.toolbarOnly
+  ),
+);
+
+async function loadVideoFaces(fileId: number) {
+  const seq = ++videoFacesRequestSeq;
+  if (!fileId || fileId <= 0) {
+    if (seq === videoFacesRequestSeq) videoFaces.value = [];
+    return;
+  }
+  const faces = await getFacesForFile(fileId);
+  if (seq !== videoFacesRequestSeq) return;
+  const loaded = await Promise.all(
+    (faces || []).map(async (face: any) => {
+      let parsedBbox: any = null;
+      try {
+        parsedBbox = face.bbox ? JSON.parse(face.bbox) : null;
+      } catch {
+        parsedBbox = null;
+      }
+      const hasBox = Boolean(parsedBbox && Number(parsedBbox.width) > 0 && Number(parsedBbox.height) > 0);
+      const personId = Number(face.person_id || 0) || null;
+      let thumbnail = hasBox ? ((await getFaceThumbnail(Number(face.id))) || '') : '';
+      if (!thumbnail && personId) {
+        thumbnail = (await getPersonThumbnail(personId)) || '';
+      }
+      return {
+        id: Number(face.id),
+        file_id: fileId,
+        person_id: personId,
+        person_name: face.person_name || null,
+        kind: face.kind || 'face',
+        manual: Boolean(parsedBbox?.manual || !hasBox),
+        thumbnail,
+      };
+    }),
+  );
+  if (seq !== videoFacesRequestSeq) return;
+  videoFaces.value = loaded.sort((a, b) => Number(!a.person_id) - Number(!b.person_id));
+}
+
+watch(
+  () => [showVideoFaceBar.value, Number(videoFile.value?.id || 0)] as const,
+  ([visible, fileId]) => {
+    if (!visible || !fileId) {
+      videoFacesRequestSeq++;
+      videoFaces.value = [];
+      return;
+    }
+    void loadVideoFaces(fileId);
+  },
+  { immediate: true },
+);
+
+function openVideoAssignFace(face: VideoFaceTag) {
+  videoAssignFace.value = {
+    id: face.id,
+    file_id: face.file_id,
+    person_id: face.person_id,
+    person_name: face.person_name,
+    thumbnail: face.thumbnail,
+    kind: face.kind,
+    manual: face.manual,
+  };
+}
+
+function openAddVideoManualFace() {
+  const fileId = Number(videoFile.value?.id || 0);
+  if (!fileId) return;
+  videoAssignFace.value = {
+    id: null,
+    file_id: fileId,
+    person_id: null,
+    person_name: null,
+    thumbnail: '',
+    kind: config.main.sidebarIndex === SIDEBAR.PERSON && config.settings.personKind === 'pet' ? 'pet' : 'person',
+    manual: true,
+    norm_bbox: null,
+  };
+}
+
+async function handleScanCurrentVideo() {
+  const fileId = Number(videoFile.value?.id || 0);
+  if (!fileId || isScanningVideoFaces.value) return;
+  isScanningVideoFaces.value = true;
+  try {
+    const res: any = await scanFileFaces(fileId);
+    const added = Number(res?.added || 0);
+    const matched = Number(res?.matched || 0);
+    if (added > 0) {
+      void tauriEmit(PERSONS_CHANGED_EVENT, { fileId });
+      await loadVideoFaces(fileId);
+      toast.success(
+        matched > 0
+          ? t('menu.person.scan_photo_found_matched', { count: added, matched })
+          : t('menu.person.scan_photo_found', { count: added }),
+      );
+    } else {
+      toast.info(t('menu.person.scan_photo_none'));
+    }
+  } catch (error) {
+    console.error('Failed to scan video for faces:', error);
+    toast.error(t('menu.person.scan_video_failed'));
+  } finally {
+    isScanningVideoFaces.value = false;
+  }
+}
+
+function onVideoFaceChanged(payload: { personId: number | null; message: string }) {
+  videoAssignFace.value = null;
+  toast.success(payload.message);
+  const fileId = Number(videoFile.value?.id || 0);
+  if (fileId) void loadVideoFaces(fileId);
+}
 
 const singleFileMenuItems = computed(() => {
   if (props.mode === 2) return [];

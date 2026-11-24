@@ -455,21 +455,34 @@ test('same-file tag invalidation keeps badges visible until replacement data arr
   const info = await readFile(new URL('../src/components/FileInfo.vue', import.meta.url), 'utf8');
   const start = info.indexOf('watch(() => [props.fileInfo?.id, props.fileInfo?.tags, libConfig._libraryId]');
   const end = info.indexOf('onMounted(async () => { const stop = await listen', start);
-  let callback;
-  const props = {fileInfo: {id:10, tags:[{id:3,name:'Travel'}]}};
+  let callback, cleanup, pending;
+  let reads = 0;
+  const props = { fileInfo: { id: 10, tags: [{ id: 3, name: 'Travel' }] } };
   const displayTags = ref([]);
-  new Function('watch','props','libConfig','displayTags','refreshTags', ts.transpile(info.slice(start,end), {target:ts.ScriptTarget.ES2022}))(
-    (_, handler) => { callback = handler; }, props, {_libraryId:'library'}, displayTags, () => {});
-  callback([10,props.fileInfo.tags,'library'], undefined);
+  new Function('watch', 'props', 'libConfig', 'displayTags', 'refreshTags', 'setTimeout', 'clearTimeout',
+    ts.transpile(info.slice(start, end), { target: ts.ScriptTarget.ES2022 }))(
+    (_, handler) => { callback = handler; }, props, { _libraryId: 'library' }, displayTags, () => { reads++; },
+    (fn, delay) => { assert.equal(delay, 120); pending = fn; return 1; }, () => { pending = undefined; });
+  const notify = (current, previous) => {
+    cleanup?.();
+    cleanup = undefined;
+    callback(current, previous, fn => { cleanup = fn; });
+  };
+  notify([10, props.fileInfo.tags, 'library'], undefined);
   props.fileInfo.tags = undefined;
-  callback([10,undefined,'library'], [10,[], 'library']);
+  notify([10, undefined, 'library'], [10, [], 'library']);
   assert.equal(displayTags.value[0].id, 3);
+  assert.equal(reads, 0);
   props.fileInfo.tags = [];
-  callback([10,[],'library'], [10,undefined,'library']);
+  notify([10, [], 'library'], [10, undefined, 'library']);
   assert.equal(displayTags.value.length, 0);
-  displayTags.value = [{id:3}]; props.fileInfo = {id:20};
-  callback([20,undefined,'library'], [10,[], 'library']);
+  assert.equal(pending, undefined);
+  displayTags.value = [{ id: 3 }];
+  props.fileInfo = { id: 20 };
+  notify([20, undefined, 'library'], [10, [], 'library']);
   assert.equal(displayTags.value.length, 0);
+  pending();
+  assert.equal(reads, 1);
 });
 
 test('switching photos reuses the tag catalog and only refreshes membership', async () => {

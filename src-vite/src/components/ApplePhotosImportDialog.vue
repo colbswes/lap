@@ -91,37 +91,20 @@
         </div>
       </div>
 
-      <!-- Target scope + Versions row -->
-      <div class="grid grid-cols-2 gap-3 min-w-0">
-        <div class="flex flex-col gap-1 min-w-0">
-          <label class="text-xs font-medium text-base-content/80">
-            {{ $t('apple_photos.target_scope') }}
-          </label>
-          <select
-            v-model="targetScopeId"
-            :disabled="isRunning"
-            class="select select-sm w-full min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
-          >
-            <option :value="SCOPE_EVERYDAY">{{ $t('scope.everyday') }}</option>
-            <option :value="SCOPE_FAMILY">{{ $t('scope.family') }}</option>
-            <option :value="SCOPE_EVERYTHING">{{ $t('scope.everything') }}</option>
-          </select>
-        </div>
-
-        <div class="flex flex-col gap-1 min-w-0">
-          <label class="text-xs font-medium text-base-content/80">
-            {{ $t('apple_photos.versions_label') }}
-          </label>
-          <select
-            v-model="versions"
-            :disabled="isRunning"
-            class="select select-sm w-full min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
-          >
-            <option value="edited-prefer">{{ $t('apple_photos.versions_edited_prefer') }}</option>
-            <option value="both">{{ $t('apple_photos.versions_both') }}</option>
-            <option value="originals">{{ $t('apple_photos.versions_originals') }}</option>
-          </select>
-        </div>
+      <!-- Versions row -->
+      <div class="flex flex-col gap-1 min-w-0">
+        <label class="text-xs font-medium text-base-content/80">
+          {{ $t('apple_photos.versions_label') }}
+        </label>
+        <select
+          v-model="versions"
+          :disabled="isRunning"
+          class="select select-sm w-full min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
+        >
+          <option value="edited-prefer">{{ $t('apple_photos.versions_edited_prefer') }}</option>
+          <option value="both">{{ $t('apple_photos.versions_both') }}</option>
+          <option value="originals">{{ $t('apple_photos.versions_originals') }}</option>
+        </select>
       </div>
 
       <!-- Core checkboxes -->
@@ -364,12 +347,6 @@ import {
   indexAlbum,
   runApplePhotosExport,
 } from '@/common/api';
-import {
-  SCOPE_EVERYDAY,
-  SCOPE_FAMILY,
-  SCOPE_EVERYTHING,
-  isAlbumInScope,
-} from '@/common/collectionScopes';
 import { SIDEBAR } from '@/common/constants';
 import { normalizePathForCompare, getFolderName } from '@/common/utils';
 import { IconRight } from '@/common/icons';
@@ -381,7 +358,6 @@ const props = defineProps<{
     dest?: string;
     excludeShared?: boolean;
     downloadMissing?: boolean;
-    targetScopeId?: string;
   } | null;
 }>();
 
@@ -395,7 +371,6 @@ const uiStore = useUIStore();
 
 const toolStatus = ref<any>(null);
 const destPath = ref(props.initialPreset?.dest || '');
-const targetScopeId = ref<string>(props.initialPreset?.targetScopeId || SCOPE_EVERYDAY);
 const versions = ref<'edited-prefer' | 'both' | 'originals'>('edited-prefer');
 const preserveLivePhotos = ref(true);
 const excludeShared = ref(props.initialPreset?.excludeShared ?? true);
@@ -434,12 +409,6 @@ const totalResultCount = computed(() => {
   );
 });
 
-function scopeLabel(scopeId: string): string {
-  if (scopeId === SCOPE_EVERYDAY) return t('scope.everyday');
-  if (scopeId === SCOPE_FAMILY) return t('scope.family');
-  return t('scope.everything');
-}
-
 async function chooseDestination() {
   const picked = await openDialog({
     directory: true,
@@ -472,17 +441,6 @@ async function addAndIndexExportedFolder(destination: string) {
     return;
   }
 
-  if (
-    targetScopeId.value !== SCOPE_EVERYTHING &&
-    !isAlbumInScope(libConfig.collectionScope, targetScopeId.value, Number(album.id))
-  ) {
-    await libConfig.toggleAlbumInScope(targetScopeId.value, Number(album.id));
-  }
-
-  if (targetScopeId.value !== SCOPE_EVERYTHING) {
-    await libConfig.setActiveScope(targetScopeId.value);
-  }
-
   libConfig.activePane = 'main';
   libConfig.album.id = Number(album.id);
   libConfig.album.folderId = null;
@@ -492,8 +450,8 @@ async function addAndIndexExportedFolder(destination: string) {
   config.leftPanel.show = true;
 
   await tauriEmit('albums-refreshed', { libraryId: libConfig._libraryId });
-  await tauriEmit('library-total-refreshed', { source: 'collection-scope' });
-  indexedNotice.value = t('apple_photos.indexed_notice', { scope: scopeLabel(targetScopeId.value) });
+  await tauriEmit('library-total-refreshed', { source: 'album-visibility' });
+  indexedNotice.value = t('apple_photos.indexed_notice');
   emit('imported');
   void indexAlbum(Number(album.id));
 }

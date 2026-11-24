@@ -217,7 +217,7 @@ pub fn delete_folder_permanently(path: &str) -> Result<(), String> {
 }
 
 // reverse geocoder
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct GeoRecord {
     pub lat: f64,
     pub lon: f64,
@@ -283,6 +283,46 @@ impl ReverseGeocoder {
             records,
             tree: RTree::bulk_load(points),
         }
+    }
+
+    /// Find places by name. "Paris, TX" narrows by region or country code after the comma.
+    pub fn search_name(&self, query: &str, limit: usize) -> Vec<&GeoRecord> {
+        let mut parts = query.split(',').map(|part| part.trim().to_lowercase());
+        let name = parts.next().unwrap_or_default();
+        let qualifiers: Vec<String> = parts.filter(|part| !part.is_empty()).collect();
+        if name.is_empty() {
+            return Vec::new();
+        }
+        let mut matches: Vec<(u8, &GeoRecord)> = self
+            .records
+            .iter()
+            .filter_map(|record| {
+                let candidate = record.name.to_lowercase();
+                let rank = if candidate == name {
+                    0
+                } else if candidate.starts_with(&name) {
+                    1
+                } else if candidate.split([' ', '-']).any(|word| word.starts_with(&name)) {
+                    2
+                } else {
+                    return None;
+                };
+                let qualified = qualifiers.iter().all(|qualifier| {
+                    record.cc.eq_ignore_ascii_case(qualifier)
+                        || record.admin1.to_lowercase().starts_with(qualifier.as_str())
+                        || record.admin2.to_lowercase().starts_with(qualifier.as_str())
+                });
+                qualified.then_some((rank, record))
+            })
+            .collect();
+        matches.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.name.len().cmp(&b.1.name.len()))
+                .then_with(|| a.1.name.cmp(&b.1.name))
+                .then_with(|| a.1.cc.cmp(&b.1.cc))
+                .then_with(|| a.1.admin1.cmp(&b.1.admin1))
+        });
+        matches.into_iter().take(limit).map(|(_, record)| record).collect()
     }
 
     pub fn search(&self, loc: (f64, f64)) -> Option<SearchResult<'_>> {
@@ -5309,4 +5349,29 @@ fn finder_path_validation_rejects_unsafe_names_and_accepts_safe_names() {
     assert!(finder_trash_path(&safe).is_some());
     assert!(finder_trash_path(&unsafe_name).is_none());
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(test)]
+mod place_search_tests {
+    use super::GEOCODER;
+
+    #[test]
+    fn search_name_ranks_exact_matches_and_applies_qualifiers() {
+        let results = GEOCODER.search_name("nashville", 20);
+        assert!(results.iter().take(7).all(|record| record.name == "Nashville"));
+        let results = GEOCODER.search_name("Nashville, tenn", 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!((results[0].admin1.as_str(), results[0].cc.as_str()), ("Tennessee", "US"));
+        assert!(GEOCODER.search_name("  , US", 5).is_empty());
+    }
+
+    #[test]
+    fn jerusalem_and_region_geocode_to_il() {
+        let old_city = GEOCODER.search((31.77667, 35.23417)).expect("Old City match");
+        assert_eq!(
+            (old_city.record.name.as_str(), old_city.record.admin1.as_str(), old_city.record.cc.as_str()),
+            ("Old City", "Jerusalem", "IL")
+        );
+        assert!(GEOCODER.records.iter().all(|record| record.cc != "PS"));
+    }
 }

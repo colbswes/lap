@@ -20,10 +20,60 @@ use crate::t_storage;
 
 static APP_IDENTIFIER: OnceLock<String> = OnceLock::new();
 static CONFIG_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static SELECTION_WRITES: Mutex<SelectionWrites> = Mutex::new(SelectionWrites {
+    flushing: false,
+    pending: None,
+});
+
+type SelectionWriteResult = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+struct SelectionWrites {
+    flushing: bool,
+    pending: Option<(i64, Vec<SelectionWriteResult>)>,
+}
+
+impl SelectionWrites {
+    fn enqueue(&mut self, index: i64, done: SelectionWriteResult) -> bool {
+        let (latest, waiters) = self.pending.get_or_insert_with(|| (index, Vec::new()));
+        *latest = index;
+        waiters.push(done);
+        !std::mem::replace(&mut self.flushing, true)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HiddenFiltersPayload {
+    #[serde(default, alias = "album_ids")]
+    pub album_ids: Vec<i64>,
+    #[serde(default, alias = "collection_ids")]
+    pub collection_ids: Vec<i64>,
+    #[serde(default, alias = "tag_ids")]
+    pub tag_ids: Vec<i64>,
+    #[serde(default, alias = "person_ids")]
+    pub person_ids: Vec<i64>,
+    #[serde(default, alias = "smart_album_ids")]
+    pub smart_album_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HiddenFilters {
+    pub album_ids: Vec<i64>,
+    pub collection_ids: Vec<i64>,
+    pub tag_ids: Vec<i64>,
+    pub person_ids: Vec<i64>,
+    pub smart_albums: Vec<CustomSmartAlbumState>,
+}
+
 static CURRENT_LIBRARY_ID: RwLock<Option<String>> = RwLock::new(None);
-/// Active collection scope album IDs for the current library.
-/// `None` means "everything" (all albums visible); `Some(ids)` restricts queries to those album IDs.
-static ACTIVE_SCOPE_ALBUM_IDS: RwLock<Option<Vec<i64>>> = RwLock::new(None);
+/// Active hidden-item filters for the current library (folders/albums, collections, tags, people/pets, smart collections).
+static HIDDEN_FILTERS: RwLock<HiddenFilters> = RwLock::new(HiddenFilters {
+    album_ids: Vec::new(),
+    collection_ids: Vec::new(),
+    tag_ids: Vec::new(),
+    person_ids: Vec::new(),
+    smart_albums: Vec::new(),
+});
 static SYNC_DELETE_TO_APPLE_PHOTOS: AtomicBool = AtomicBool::new(true);
 
 pub fn sync_delete_to_apple_photos() -> bool {
@@ -46,22 +96,68 @@ pub fn current_library_id() -> Result<String, String> {
     Ok(load_app_config()?.current_library_id)
 }
 
-pub fn active_scope_album_ids() -> Option<Vec<i64>> {
-    ACTIVE_SCOPE_ALBUM_IDS
-        .read()
-        .ok()
-        .and_then(|guard| guard.clone())
+pub fn normalize_hidden_ids(ids: Vec<i64>) -> Vec<i64> {
+    let mut normalized: Vec<i64> = ids.into_iter().filter(|id| *id > 0).collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
 }
 
-fn sync_active_scope_from_config(config: &AppConfig) {
+pub fn normalize_hidden_smart_album_ids(ids: Vec<String>) -> Vec<String> {
+    let mut normalized: Vec<String> = ids
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn normalize_library_hidden_state(state: &mut LibraryState) {
+    state.hidden_album_ids = normalize_hidden_ids(std::mem::take(&mut state.hidden_album_ids));
+    state.hidden_collection_ids = normalize_hidden_ids(std::mem::take(&mut state.hidden_collection_ids));
+    state.hidden_tag_ids = normalize_hidden_ids(std::mem::take(&mut state.hidden_tag_ids));
+    state.hidden_person_ids = normalize_hidden_ids(std::mem::take(&mut state.hidden_person_ids));
+    state.hidden_smart_album_ids =
+        normalize_hidden_smart_album_ids(std::mem::take(&mut state.hidden_smart_album_ids));
+}
+
+pub fn hidden_filters() -> HiddenFilters {
+    HIDDEN_FILTERS
+        .read()
+        .ok()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
+}
+
+fn sync_hidden_filters_from_config(config: &AppConfig) {
     SYNC_DELETE_TO_APPLE_PHOTOS.store(config.sync_delete_to_apple_photos, AtomicOrdering::SeqCst);
-    let album_ids = config
+    let filters = config
         .libraries
         .iter()
         .find(|lib| lib.id == config.current_library_id)
-        .and_then(|lib| lib.state.collection_scope.active_album_ids());
-    if let Ok(mut guard) = ACTIVE_SCOPE_ALBUM_IDS.write() {
-        *guard = album_ids;
+        .map(|lib| {
+            let hidden_smart_ids =
+                normalize_hidden_smart_album_ids(lib.state.hidden_smart_album_ids.clone());
+            let smart_albums = lib
+                .state
+                .smart_albums
+                .iter()
+                .filter(|sa| hidden_smart_ids.iter().any(|id| id == &sa.id))
+                .cloned()
+                .collect();
+            HiddenFilters {
+                album_ids: normalize_hidden_ids(lib.state.hidden_album_ids.clone()),
+                collection_ids: normalize_hidden_ids(lib.state.hidden_collection_ids.clone()),
+                tag_ids: normalize_hidden_ids(lib.state.hidden_tag_ids.clone()),
+                person_ids: normalize_hidden_ids(lib.state.hidden_person_ids.clone()),
+                smart_albums,
+            }
+        })
+        .unwrap_or_default();
+    if let Ok(mut guard) = HIDDEN_FILTERS.write() {
+        *guard = filters;
     }
 }
 
@@ -72,6 +168,42 @@ pub fn set_app_identifier(identifier: &str) {
 
 fn config_io_lock() -> &'static Mutex<()> {
     CONFIG_IO_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub(crate) async fn persist_last_selected_item_index(index: i64) -> Result<(), String> {
+    let (done, result) = tokio::sync::oneshot::channel();
+    let start_flush = SELECTION_WRITES.lock().unwrap().enqueue(index, done);
+    if start_flush {
+        tauri::async_runtime::spawn_blocking(|| {
+            flush_selection_writes(&SELECTION_WRITES, |index| {
+                update_app_config(|config| {
+                    config.last_selected_item_index = index;
+                    Ok(())
+                })
+            });
+        });
+    }
+    result.await.map_err(|e| e.to_string())?
+}
+
+fn flush_selection_writes(
+    writes: &Mutex<SelectionWrites>,
+    mut persist: impl FnMut(i64) -> Result<(), String>,
+) {
+    loop {
+        let (index, waiters) = {
+            let mut writes = writes.lock().unwrap();
+            let Some(pending) = writes.pending.take() else {
+                writes.flushing = false;
+                return;
+            };
+            pending
+        };
+        let result = persist(index);
+        for waiter in waiters {
+            let _ = waiter.send(result.clone());
+        }
+    }
 }
 
 // ============================================================================
@@ -197,10 +329,6 @@ pub struct LibraryPanelState {
     pub item: String,
     #[serde(default, alias = "smart_id")]
     pub smart_id: Option<String>,
-    #[serde(default = "default_ratings_expanded", alias = "ratings_expanded")]
-    pub ratings_expanded: bool,
-    #[serde(default = "default_culling_expanded", alias = "culling_expanded")]
-    pub culling_expanded: bool,
     #[serde(default = "default_subjects_expanded", alias = "subjects_expanded")]
     pub subjects_expanded: bool,
     #[serde(default)]
@@ -215,48 +343,13 @@ fn default_subjects_expanded() -> bool {
     true
 }
 
-fn default_culling_expanded() -> bool {
-    true
-}
-
-fn default_ratings_expanded() -> bool {
-    true
-}
-
 impl Default for LibraryPanelState {
     fn default() -> Self {
         Self {
             item: default_library_item(),
             smart_id: None,
-            ratings_expanded: default_ratings_expanded(),
-            culling_expanded: default_culling_expanded(),
             subjects_expanded: default_subjects_expanded(),
             subject_counts: HashMap::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct RatingState {
-    pub item: Option<i32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CullingState {
-    #[serde(default = "default_culling_item")]
-    pub item: String,
-}
-
-fn default_culling_item() -> String {
-    "pick".to_string()
-}
-
-impl Default for CullingState {
-    fn default() -> Self {
-        Self {
-            item: default_culling_item(),
         }
     }
 }
@@ -404,125 +497,22 @@ pub struct PersonState {
     pub name: Option<String>,
 }
 
-pub const SCOPE_EVERYTHING: &str = "everything";
-pub const SCOPE_EVERYDAY: &str = "everyday";
-pub const SCOPE_FAMILY: &str = "family";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CollectionScopeItem {
-    pub id: String,
-    pub name: String,
-    #[serde(default, alias = "album_ids")]
-    pub album_ids: Vec<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CollectionScopeState {
-    #[serde(default = "default_collection_scope_active_id", alias = "active_id")]
-    pub active_id: String,
-    #[serde(default = "default_collection_scopes")]
-    pub scopes: Vec<CollectionScopeItem>,
-}
-
-fn default_collection_scope_active_id() -> String {
-    SCOPE_EVERYTHING.to_string()
-}
-
-fn default_collection_scopes() -> Vec<CollectionScopeItem> {
-    vec![
-        CollectionScopeItem {
-            id: SCOPE_EVERYDAY.to_string(),
-            name: "Everyday".to_string(),
-            album_ids: Vec::new(),
-        },
-        CollectionScopeItem {
-            id: SCOPE_FAMILY.to_string(),
-            name: "Family Archive".to_string(),
-            album_ids: Vec::new(),
-        },
-    ]
-}
-
-impl Default for CollectionScopeState {
-    fn default() -> Self {
-        Self {
-            active_id: default_collection_scope_active_id(),
-            scopes: default_collection_scopes(),
-        }
-    }
-}
-
-impl CollectionScopeState {
-    pub fn normalized(self) -> Self {
-        let mut by_id: HashMap<String, CollectionScopeItem> = HashMap::new();
-        let mut extra_order: Vec<String> = Vec::new();
-        for mut item in self.scopes {
-            let id = item.id.trim().to_string();
-            if id.is_empty() || id == SCOPE_EVERYTHING {
-                continue;
-            }
-            item.id = id.clone();
-            let mut seen = std::collections::HashSet::new();
-            item.album_ids.retain(|album_id| *album_id > 0 && seen.insert(*album_id));
-            item.album_ids.sort_unstable();
-            if !by_id.contains_key(&id) && id != SCOPE_EVERYDAY && id != SCOPE_FAMILY {
-                extra_order.push(id.clone());
-            }
-            by_id.insert(id, item);
-        }
-
-        let mut scopes = Vec::new();
-        for default_item in default_collection_scopes() {
-            if let Some(mut existing) = by_id.remove(&default_item.id) {
-                if existing.name.trim().is_empty() {
-                    existing.name = default_item.name;
-                }
-                scopes.push(existing);
-            } else {
-                scopes.push(default_item);
-            }
-        }
-        for id in extra_order {
-            if let Some(item) = by_id.remove(&id) {
-                scopes.push(item);
-            }
-        }
-
-        let active_id = if self.active_id == SCOPE_EVERYTHING
-            || scopes.iter().any(|item| item.id == self.active_id)
-        {
-            self.active_id
-        } else {
-            SCOPE_EVERYTHING.to_string()
-        };
-
-        Self { active_id, scopes }
-    }
-
-    /// Returns `None` for "everything" (all albums visible), or `Some(album_ids)`
-    /// for a named collection scope.
-    pub fn active_album_ids(&self) -> Option<Vec<i64>> {
-        if self.active_id == SCOPE_EVERYTHING {
-            return None;
-        }
-        let scope = self.scopes.iter().find(|item| item.id == self.active_id)?;
-        let mut ids: Vec<i64> = scope.album_ids.iter().copied().filter(|id| *id > 0).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        Some(ids)
-    }
-}
-
 /// Per-library state that persists across sessions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryState {
     #[serde(default)]
     pub library: LibraryPanelState,
-    #[serde(default)]
-    pub collection_scope: CollectionScopeState,
+    #[serde(default, alias = "hidden_album_ids")]
+    pub hidden_album_ids: Vec<i64>,
+    #[serde(default, alias = "hidden_collection_ids")]
+    pub hidden_collection_ids: Vec<i64>,
+    #[serde(default, alias = "hidden_tag_ids")]
+    pub hidden_tag_ids: Vec<i64>,
+    #[serde(default, alias = "hidden_person_ids")]
+    pub hidden_person_ids: Vec<i64>,
+    #[serde(default, alias = "hidden_smart_album_ids")]
+    pub hidden_smart_album_ids: Vec<String>,
     pub album: AlbumState,
     #[serde(default)]
     pub smart_album: SmartAlbumState,
@@ -530,10 +520,6 @@ pub struct LibraryState {
     pub smart_albums: Vec<CustomSmartAlbumState>,
     #[serde(default)]
     pub dedup_preferred_folder_ids: Vec<i64>,
-    #[serde(default)]
-    pub rating: RatingState,
-    #[serde(default)]
-    pub culling: CullingState,
     pub tag: TagState,
     pub calendar: CalendarState,
     pub camera: CameraState,
@@ -666,7 +652,7 @@ pub fn load_app_config() -> Result<AppConfig, String> {
         .map_err(|_| "Config lock poisoned".to_string())?;
     let config = load_app_config_locked()?;
     *CURRENT_LIBRARY_ID.write().map_err(|e| e.to_string())? = Some(config.current_library_id.clone());
-    sync_active_scope_from_config(&config);
+    sync_hidden_filters_from_config(&config);
     Ok(config)
 }
 
@@ -769,7 +755,7 @@ fn save_app_config_locked(config: &AppConfig) -> Result<(), String> {
     write_atomic(&config_path, &content)
         .map_err(|e| format!("Failed to write config file: {}", e))?;
     *CURRENT_LIBRARY_ID.write().map_err(|e| e.to_string())? = Some(config.current_library_id.clone());
-    sync_active_scope_from_config(config);
+    sync_hidden_filters_from_config(config);
     Ok(())
 }
 
@@ -1115,7 +1101,7 @@ fn get_thumb_cache_size(library_id: &str) -> i64 {
 
 /// Save library state
 pub fn save_library_state(id: &str, mut state: LibraryState) -> Result<(), String> {
-    state.collection_scope = state.collection_scope.normalized();
+    normalize_library_hidden_state(&mut state);
     update_app_config(|config| {
         if let Some(lib) = config.libraries.iter_mut().find(|l| l.id == id) {
             lib.state = state;
@@ -1126,15 +1112,25 @@ pub fn save_library_state(id: &str, mut state: LibraryState) -> Result<(), Strin
     })
 }
 
-/// Update and persist a library's collection scope configuration, syncing the active runtime filter.
-pub fn set_collection_scope(
+/// Update and persist a library's hidden filters, syncing the active runtime filter.
+pub fn set_hidden_filters(
     id: &str,
-    scope: CollectionScopeState,
-) -> Result<CollectionScopeState, String> {
-    let normalized = scope.normalized();
+    filters: HiddenFiltersPayload,
+) -> Result<HiddenFiltersPayload, String> {
+    let normalized = HiddenFiltersPayload {
+        album_ids: normalize_hidden_ids(filters.album_ids),
+        collection_ids: normalize_hidden_ids(filters.collection_ids),
+        tag_ids: normalize_hidden_ids(filters.tag_ids),
+        person_ids: normalize_hidden_ids(filters.person_ids),
+        smart_album_ids: normalize_hidden_smart_album_ids(filters.smart_album_ids),
+    };
     update_app_config(|config| {
         if let Some(lib) = config.libraries.iter_mut().find(|l| l.id == id) {
-            lib.state.collection_scope = normalized.clone();
+            lib.state.hidden_album_ids = normalized.album_ids.clone();
+            lib.state.hidden_collection_ids = normalized.collection_ids.clone();
+            lib.state.hidden_tag_ids = normalized.tag_ids.clone();
+            lib.state.hidden_person_ids = normalized.person_ids.clone();
+            lib.state.hidden_smart_album_ids = normalized.smart_album_ids.clone();
             Ok(())
         } else {
             Err("Library not found".to_string())
@@ -1149,7 +1145,7 @@ pub fn get_library_state(id: &str) -> Result<LibraryState, String> {
 
     if let Some(lib) = config.libraries.iter().find(|l| l.id == id) {
         let mut state = lib.state.clone();
-        state.collection_scope = state.collection_scope.normalized();
+        normalize_library_hidden_state(&mut state);
         Ok(state)
     } else {
         Err("Library not found".to_string())
@@ -1165,7 +1161,7 @@ pub fn get_current_library_state() -> Result<LibraryState, String> {
         .find(|lib| lib.id == config.current_library_id)
         .map(|lib| {
             let mut state = lib.state.clone();
-            state.collection_scope = state.collection_scope.normalized();
+            normalize_library_hidden_state(&mut state);
             state
         })
         .ok_or_else(|| "Library not found".to_string())
@@ -1221,6 +1217,36 @@ pub fn reorder_libraries(ids: Vec<String>) -> Result<(), String> {
 #[cfg(test)]
 mod config_update_tests {
     use super::*;
+
+    #[test]
+    fn selection_updates_during_a_write_coalesce_to_the_latest_index() {
+        let writes = Mutex::new(SelectionWrites {
+            flushing: false,
+            pending: None,
+        });
+        let (first, mut first_result) = tokio::sync::oneshot::channel();
+        assert!(writes.lock().unwrap().enqueue(1, first));
+        let mut persisted = Vec::new();
+        let mut results = Vec::new();
+        flush_selection_writes(&writes, |index| {
+            persisted.push(index);
+            if index == 1 {
+                for index in [2, 3, 4] {
+                    let (done, result) = tokio::sync::oneshot::channel();
+                    assert!(!writes.lock().unwrap().enqueue(index, done));
+                    results.push(result);
+                }
+            }
+            Ok(())
+        });
+        assert_eq!(persisted, [1, 4]);
+        assert_eq!(first_result.try_recv(), Ok(Ok(())));
+        for mut result in results {
+            assert_eq!(result.try_recv(), Ok(Ok(())));
+        }
+        let (next, _) = tokio::sync::oneshot::channel();
+        assert!(writes.lock().unwrap().enqueue(5, next));
+    }
 
     #[test]
     fn tag_state_preserves_tree_folding_and_accepts_legacy_groups() {
@@ -1332,42 +1358,24 @@ mod config_update_tests {
     }
 
     #[test]
-    fn collection_scope_defaults_and_normalizes() {
-        let default_state = CollectionScopeState::default();
-        assert_eq!(default_state.active_id, SCOPE_EVERYTHING);
-        assert_eq!(default_state.active_album_ids(), None);
-        assert_eq!(default_state.scopes.len(), 2);
-        assert_eq!(default_state.scopes[0].id, SCOPE_EVERYDAY);
-        assert_eq!(default_state.scopes[1].id, SCOPE_FAMILY);
-
-        let normalized = CollectionScopeState {
-            active_id: SCOPE_EVERYDAY.to_string(),
-            scopes: vec![CollectionScopeItem {
-                id: SCOPE_EVERYDAY.to_string(),
-                name: "Everyday".to_string(),
-                album_ids: vec![5, 2, 5, 0, -1],
-            }],
-        }
-        .normalized();
-        assert_eq!(normalized.active_id, SCOPE_EVERYDAY);
-        assert_eq!(normalized.scopes.len(), 2);
-        assert_eq!(normalized.scopes[0].album_ids, vec![2, 5]);
-        assert_eq!(normalized.scopes[1].id, SCOPE_FAMILY);
-        assert!(normalized.scopes[1].album_ids.is_empty());
-        assert_eq!(normalized.active_album_ids(), Some(vec![2, 5]));
-
-        let invalid_active = CollectionScopeState {
-            active_id: "missing-scope".to_string(),
-            scopes: Vec::new(),
-        }
-        .normalized();
-        assert_eq!(invalid_active.active_id, SCOPE_EVERYTHING);
-        assert_eq!(invalid_active.active_album_ids(), None);
+    fn hidden_filter_ids_normalize_cleanly() {
+        assert_eq!(normalize_hidden_ids(vec![5, 2, 5, 0, -1]), vec![2, 5]);
+        assert!(normalize_hidden_ids(vec![0, -3]).is_empty());
+        assert_eq!(
+            normalize_hidden_smart_album_ids(vec![
+                " b ".to_string(),
+                "".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+            ]),
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]
-    fn legacy_library_state_without_collection_scope_deserializes() {
+    fn legacy_library_state_with_collection_scope_deserializes() {
         let legacy: LibraryState = serde_json::from_value(serde_json::json!({
+            "collectionScope": { "activeId": "everyday", "scopes": [] },
             "album": { "id": 0, "folderId": null, "folderPath": "", "selected": false },
             "tag": { "id": null },
             "calendar": { "year": null, "month": null, "date": null },
@@ -1378,7 +1386,29 @@ mod config_update_tests {
             "index": { "status": 0, "albumQueue": [], "albumName": "", "indexed": 0, "total": 0 }
         }))
         .unwrap();
-        assert_eq!(legacy.collection_scope.active_id, SCOPE_EVERYTHING);
-        assert_eq!(legacy.collection_scope.scopes.len(), 2);
+        assert!(legacy.hidden_album_ids.is_empty());
+        assert!(legacy.hidden_person_ids.is_empty());
+    }
+
+    #[test]
+    fn legacy_rating_and_culling_state_is_ignored() {
+        let legacy: LibraryState = serde_json::from_value(serde_json::json!({
+            "library": { "item": "all-files", "ratingsExpanded": false, "cullingExpanded": true, "subjectsExpanded": false },
+            "rating": { "item": 4 },
+            "culling": { "item": "reject" },
+            "album": { "id": 0, "folderId": null, "folderPath": "", "selected": false },
+            "tag": { "id": null },
+            "calendar": { "year": null, "month": null, "date": null },
+            "camera": { "make": null, "model": null, "lensMake": null, "lensModel": null },
+            "location": { "cc": null, "admin1": null, "name": null },
+            "search": { "searchText": "", "searchHistory": [], "searchHistoryIndex": -1, "similarImageHistory": [], "similarImageHistoryIndex": -1, "fileName": "" },
+            "destFolder": { "albumId": null, "folderId": null, "folderPath": null, "selected": false },
+            "index": { "status": 0, "albumQueue": [], "albumName": "", "indexed": 0, "total": 0 }
+        }))
+        .unwrap();
+        assert!(!legacy.library.subjects_expanded);
+        let saved = serde_json::to_value(&legacy).unwrap();
+        assert!(saved.get("rating").is_none() && saved.get("culling").is_none());
+        assert!(saved["library"].get("ratingsExpanded").is_none());
     }
 }

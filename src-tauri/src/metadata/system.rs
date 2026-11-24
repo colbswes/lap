@@ -26,17 +26,8 @@ fn apply(mapping: &Mapping, values: Vec<String>, meta: &mut XmpMetadata) {
                 meta.description = values.into_iter().find(|value| !value.trim().is_empty());
             }
         }
-        Field::Favorite | Field::Culling => {
-            unreachable!("system sources only map tags, description and rating")
-        }
-        Field::Rating => {
-            if meta.rating.is_none() {
-                meta.rating = values
-                    .first()
-                    .and_then(|value| value.trim().parse::<i32>().ok())
-                    .filter(|value| (0..=10).contains(value))
-                    .map(|value| (value + 1) / 2);
-            }
+        Field::Favorite => {
+            unreachable!("system sources only map tags and description")
         }
     }
 }
@@ -97,7 +88,7 @@ fn decode(mapping: &Mapping, bytes: &[u8]) -> Option<Vec<String>> {
                 .map(str::to_owned)
                 .collect(),
         ),
-        Encoding::Utf8 | Encoding::RatingTen => {
+        Encoding::Utf8 => {
             Some(vec![std::str::from_utf8(bytes).ok()?.to_owned()])
         }
         _ => None,
@@ -245,28 +236,20 @@ mod tests {
         for (mapping, bytes) in
             LINUX_FIELDS
                 .iter()
-                .zip([b"Travel,Paris,travel".as_slice(), b"Dolphin comment", b"9"])
+                .zip([b"Travel,Paris,travel".as_slice(), b"Dolphin comment"])
         {
             apply(mapping, decode(mapping, bytes).unwrap(), &mut system);
         }
         assert_eq!(system.tags.as_ref().unwrap(), &["Travel", "Paris"]);
-        assert_eq!(system.rating, Some(5));
         assert_eq!(system.description.as_deref(), Some("Dolphin comment"));
         let mut embedded = XmpMetadata {
             tags: Some(vec!["Paris".into()]),
-            rating: Some(2),
             description: Some("Embedded comment".into()),
             ..Default::default()
         };
         merge_system(&mut embedded, system);
         assert_eq!(embedded.tags.unwrap(), ["Paris", "Travel"]);
-        assert_eq!(embedded.rating, Some(2));
         assert_eq!(embedded.description.as_deref(), Some("Embedded comment"));
-        for value in ["-1", "11", "invalid"] {
-            let mut meta = XmpMetadata::default();
-            apply(&LINUX_FIELDS[2], vec![value.into()], &mut meta);
-            assert!(meta.rating.is_none());
-        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

@@ -50,30 +50,6 @@
           class="min-w-0 overflow-hidden"
           @navigate="handleTitleBreadcrumbNavigate"
         />
-        <div
-          v-if="showHeaderScopeBadge"
-          class="ml-1.5 shrink-0 flex items-center gap-1"
-        >
-          <button
-            type="button"
-            class="h-6 px-2 rounded-full text-[11px] font-medium border transition-colors cursor-pointer flex items-center gap-1"
-            :class="activeScopeId !== SCOPE_EVERYTHING
-              ? 'bg-primary/12 text-primary border-primary/25 hover:bg-primary/20'
-              : 'bg-base-200/80 text-base-content/65 border-base-content/10 hover:text-base-content hover:bg-base-100/70'"
-            :title="$t('scope.configure')"
-            @click="openScopeConfigurator"
-          >
-            <span>{{ activeScopeLabel }}</span>
-          </button>
-          <button
-            v-if="activeScopeId !== SCOPE_EVERYTHING && (config.main.sidebarIndex === SIDEBAR.SEARCH || tempViewMode === 'similar')"
-            type="button"
-            class="h-6 px-2 rounded-full text-[11px] text-base-content/60 hover:text-primary bg-base-200/70 hover:bg-base-100/70 border border-base-content/10 transition-colors cursor-pointer"
-            @click="switchToEverythingScope"
-          >
-            {{ $t('scope.search_everything') }}
-          </button>
-        </div>
       </div>
 
       <!-- toolbar -->
@@ -174,8 +150,8 @@
           />
 
           <TButton
-            :icon="IconMapDefault"
-            :tooltip="$t('sidebar.map')"
+            :icon="useGlobeMap ? IconGlobe : IconMapDefault"
+            :tooltip="useGlobeMap ? $t('map.globe') : $t('sidebar.map')"
             :selected="isMapView"
             @click="toggleMapView"
           />
@@ -219,8 +195,24 @@
     <!-- content view -->
     <div ref="contentViewDiv" class="relative flex-1 flex flex-row overflow-hidden">
       <div class="relative flex-1 flex flex-row overflow-hidden">
+        <PhotoGlobeView
+          v-if="mapViewMounted && useGlobeMap"
+          v-show="isMapContentVisible"
+          class="mt-12 flex-1 min-w-0"
+          :class="config.settings.showStatusBar ? 'mb-8' : 'mb-1'"
+          :active="isMapContentVisible"
+          :query-params="globeQueryParams"
+          :focus-params="globeFocusParams"
+          :restore-view="mapTempViewState"
+          :selected-file="fileList[selectedItemIndex]"
+          @open-cluster="openMapClusterTempView"
+          @select-file="selectMapFile"
+          @preview-file="openMapPreviewFile"
+          @restored="mapTempViewState = null"
+        />
         <PhotoMapView
-          v-if="mapViewMounted"
+          v-else-if="mapViewMounted"
+          :show-globe-toggle="canUseGlobeMap"
           v-show="isMapContentVisible"
           class="mt-12 flex-1 min-w-0"
           :class="config.settings.showStatusBar ? 'mb-8' : 'mb-1'"
@@ -270,35 +262,6 @@
             <!-- grid view -->
             <div ref="gridScrollContainerRef" class="absolute w-full h-full">
               <Welcome v-if="showWelcomeContent" />
-              <div
-                v-else-if="isActiveScopeEmpty"
-                class="w-full h-full flex flex-col items-center justify-center px-8 text-center"
-              >
-                <div class="max-w-sm p-6 rounded-box bg-base-200/70 border border-base-content/10 flex flex-col items-center gap-3">
-                  <h3 class="text-base font-medium text-base-content">
-                    {{ $t('scope.empty_scope_title', { scope: activeScopeLabel }) }}
-                  </h3>
-                  <p class="text-xs text-base-content/60 leading-relaxed">
-                    {{ $t('scope.empty_scope_hint', { scope: activeScopeLabel }) }}
-                  </p>
-                  <div class="flex items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      class="btn btn-sm btn-primary text-xs"
-                      @click="openScopeConfigurator"
-                    >
-                      {{ $t('scope.choose_folders') }}
-                    </button>
-                    <button
-                      type="button"
-                      class="btn btn-sm btn-ghost text-xs"
-                      @click="switchToEverythingScope"
-                    >
-                      {{ $t('scope.show_everything') }}
-                    </button>
-                  </div>
-                </div>
-              </div>
               <GridView v-else ref="gridViewRef"
                 :selected-item-index="selectedItemIndex"
                 :fileList="gridRows"
@@ -383,7 +346,8 @@
                 :mode="1"
                 :isFullScreen="false"
                 :file="fileList[selectedItemIndex]"
-                :nextFilePath="getNextImagePath(selectedItemIndex)"
+                :prefetchFiles="selectedImageNeighbors"
+                :showThumbnailPlaceholder="true"
                 :hasPrevious="selectedItemIndex > 0"
                 :hasNext="selectedItemIndex < fileList.length - 1"
                 :fileIndex="selectedItemIndex"
@@ -439,7 +403,8 @@
               :mode="0"
               :isFullScreen="false"
               :file="fileList[selectedItemIndex]"
-              :nextFilePath="getNextImagePath(selectedItemIndex)"
+              :prefetchFiles="selectedImageNeighbors"
+              :showThumbnailPlaceholder="true"
               :hasPrevious="selectedItemIndex > 0"
               :hasNext="selectedItemIndex < fileList.length - 1"
               :fileIndex="selectedItemIndex"
@@ -542,7 +507,6 @@
             @trash-all-duplicates="handleDedupTrashAllDuplicates"
             @trash-selected-similar="handleDedupTrashSelectedSimilar"
             @compare-selected-photos="handleDedupCompareSelectedPhotos"
-            @culling-status-updated="handleDedupCullingStatusUpdated"
             @dedup-status-updated="dedupStatuses = $event"
           />
           <SelectionPanel
@@ -569,10 +533,9 @@
             @rename="clickRename"
             @favorite-all="selectModeSetFavorites(true)"
             @unfavorite-all="selectModeSetFavorites(false)"
-            @set-rating-all="selectModeSetRatings"
-            @set-culling-all="selectModeSetCullingFlags"
             @tag-all="clickTag"
             @add-to-collection="clickAddToCollection"
+            @add-person-all="clickAddPerson"
             @unselect-file="unselectFileFromSelection"
             @focus-file="focusSelectionPreview"
             @more-action="action => action()"
@@ -594,8 +557,6 @@
             @success="onFileSaved(true, $event)"
             @failed="onFileSaved(false)"
             @toggleFavorite="toggleFavorite"
-            @setRating="setSelectedFileRating"
-            @setCulling="setSelectedFileCullingFlag"
             @rotate="rotateSelected(90, true)"
             @tag-states-changed="handleInlineTagsChanged"
             @quick-edit-collection="clickAddToCollection(true)"
@@ -742,6 +703,14 @@
     @cancel="showAddToCollectionDialog = false"
   />
 
+  <!-- add person or pet (single or bulk) -->
+  <AssignFaceDialog
+    v-if="assignPersonTarget"
+    :face="assignPersonTarget"
+    @cancel="assignPersonTarget = null"
+    @changed="onAssignPersonChanged"
+  />
+
   <!-- comment -->
   <EditMetadataDialog v-if="showCommentMsgbox && metadataFiles.length" :files="metadataFiles" :focus-field="metadataFocus"
     @saved="onMetadataSaved" @cancel="showCommentMsgbox = false" />
@@ -829,6 +798,7 @@ import { externalDragKind, updateExternalDrag, resetExternalDrag, finishExternal
 import { getExternalDropUris, getExternalHttpDropUrls, getExternalFileDropPaths, fileUrlToPath, hasExternalDropIntent } from '@/common/externalDrop';
 
 import PrintImage from '@/components/PrintImage.vue';
+import { clearDecodedImages, getImageNeighbors } from '@/common/viewerImages';
 import { defineAsyncComponent, ref, shallowRef, watch, computed, createVNode, onMounted, onBeforeUnmount, nextTick, render, markRaw } from 'vue';
 import { emit as tauriEmit, listen } from '@tauri-apps/api/event';
 import { personViewContext, PERSONS_CHANGED_EVENT } from '@/common/personContext';
@@ -841,7 +811,7 @@ import { useUIStore } from '@/stores/uiStore';
 import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTimeLine, getQueryFiles, getFilesByIds, getGroupedQueryRows, getGroupedFilePosition, getGroupFileIds, getQueryFileIds, syncAlbumFolderMtimes, reconcileRawJpegPairs,
          getSmartQueryCountAndSum, getSmartQueryTimeLine, getSmartQueryFiles, getSmartGroupedQueryRows, getSmartGroupFileIds, getSmartQueryFileIds, getSmartQueryFilePosition,
          moveFile, moveFileOutsideLibrary, copyFile, withFileTransferBatch, batchDeleteFiles, getFileThumb, getFileThumbById, getFileThumbs, getFileInfo,
-         setFileRotate, setFileFavorite, setFileRating, setFileCullingFlag, batchUpdateFileMetadata, getTagsForFile, searchSimilarImages, generateEmbedding,
+         setFileRotate, setFileFavorite, batchUpdateFileMetadata, getTagsForFile, searchSimilarImages, generateEmbedding,
          getTagName, indexAlbum, listenIndexProgress, listenIndexFinished, setAlbumCover, setDesktopWallpaper,
          updateFileInfo, refreshFileInfo, changeVideoThumbnail, getSupportedFormatExtensions, importFiles, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, isCloudOnlyFile, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, scanFileFaces, removePersonFromFiles, listenFaceIndexProgress,
          openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, setLastSelectedItemIndex,
@@ -860,15 +830,8 @@ import { getSmartTagById } from '@/common/smartTags';
 import { handleVideoPlaybackShortcut, handleVideoEscapeShortcut } from '@/common/video';
 import { clearFolderFileCounts, setFolderFileCount, getCountedFolderPaths } from '@/composables/useAlbumSelection';
 import { createEmptyLibraryCounts } from '@/stores/libraryStore';
-import {
-  SCOPE_EVERYDAY,
-  SCOPE_FAMILY,
-  SCOPE_EVERYTHING,
-  getActiveScopeAlbumIds,
-  normalizeCollectionScopeState,
-} from '@/common/collectionScopes';
 import { getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
-import { CULLING, DATE_SORT, GROUP, LIB_ITEM, RATE, SIDEBAR, RIGHT_PANEL_MIN_WIDTH, PANEL_ANIMATION_MS, MONTAGE_MAX_PHOTOS, LARGE_BATCH_CONFIRM_THRESHOLD, EXTERNAL_OPEN_WARNING_THRESHOLD } from '@/common/constants';
+import { DATE_SORT, GROUP, LIB_ITEM, SIDEBAR, RIGHT_PANEL_MIN_WIDTH, PANEL_ANIMATION_MS, MONTAGE_MAX_PHOTOS, LARGE_BATCH_CONFIRM_THRESHOLD, EXTERNAL_OPEN_WARNING_THRESHOLD } from '@/common/constants';
 import { isWin, isMac, isLinux, separator,
          formatFileSize, formatDate, getCalendarDateRange, formatFolderBreadcrumb, getThumbnailDataUrl, getAssetSrc, getPreviewUrl,
          getCachedThumbnailDataUrl,
@@ -882,6 +845,7 @@ import GridView  from '@/components/GridView.vue';
 import BatchRenameDialog from '@/components/BatchRenameDialog.vue';
 import RenameFileDialog from '@/components/RenameFileDialog.vue';
 const PhotoMapView = defineAsyncComponent(() => import('@/components/PhotoMapView.vue'));
+const PhotoGlobeView = defineAsyncComponent(() => import('@/components/PhotoGlobeView.vue'));
 import ContextMenu from '@/components/ContextMenu.vue';
 import { MAX_NATIVE_DRAG_FILES, createDragPreview, isWindowDragEdge, isNativeFileDragActive, isReturningNativeFileDrag, startNativeFileDrag } from '@/common/nativeDrag';
 import { isOriginalStorageUnavailable, isOriginalUnavailable, setFileAccessibility, setFolderAccessibility, requiresOriginalAction } from '@/common/availability';
@@ -904,6 +868,7 @@ import MoveTo from '@/components/MoveTo.vue';
 import TButton from '@/components/TButton.vue';
 import TaggingDialog from '@/components/TaggingDialog.vue';
 import AddToCollectionDialog from '@/components/AddToCollectionDialog.vue';
+import AssignFaceDialog, { type AssignFaceTarget } from '@/components/AssignFaceDialog.vue';
 import ExternalAppsDialog from '@/components/ExternalAppsDialog.vue';
 import FileInfo from '@/components/FileInfo.vue';
 import Breadcrumb from '@/components/Breadcrumb.vue';
@@ -927,6 +892,7 @@ import {
   IconBolt,
   IconLocation,
   IconCameraAperture,
+  IconCollection,
   IconLeft,
   IconRight,
   IconSeparator,
@@ -935,6 +901,7 @@ import {
   IconJustified,
   IconFilmstrip,
   IconMapDefault,
+  IconGlobe,
   IconMultiSelect,
   IconClose,
   IconInformation,
@@ -950,17 +917,11 @@ import {
   IconDownload,
   IconPrev,
   IconAdd,
-  IconFlag,
-  IconFlagFilled,
-  IconFlagOff,
-  IconStar,
-  IconStarFilled,
   IconSimilar,
   IconCamera,
   IconHeartFilled,
   IconOk,
   IconHistory,
-  IconCollection,
   IconFileSearch,
   IconPerson,
   IconSortingAsc,
@@ -983,35 +944,6 @@ const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
 
 const contentTitle = ref("");
-
-const activeScopeState = computed(() => normalizeCollectionScopeState(libConfig.collectionScope));
-const activeScopeId = computed(() => activeScopeState.value.activeId);
-const activeScopeAlbumIds = computed(() => getActiveScopeAlbumIds(activeScopeState.value));
-const isActiveScopeEmpty = computed(() =>
-  !showWelcomeContent.value &&
-  activeScopeAlbumIds.value !== null &&
-  activeScopeAlbumIds.value.length === 0
-);
-const activeScopeLabel = computed(() => {
-  if (activeScopeId.value === SCOPE_EVERYDAY) return t('scope.everyday');
-  if (activeScopeId.value === SCOPE_FAMILY) return t('scope.family');
-  return t('scope.everything');
-});
-const showHeaderScopeBadge = computed(() =>
-  !showWelcomeContent.value &&
-  (activeScopeId.value !== SCOPE_EVERYTHING ||
-    config.main.sidebarIndex === SIDEBAR.SEARCH ||
-    tempViewMode.value === 'similar')
-);
-
-async function openScopeConfigurator() {
-  await tauriEmit('configure-collection-scopes', { scopeId: activeScopeId.value });
-}
-
-async function switchToEverythingScope() {
-  await libConfig.setActiveScope(SCOPE_EVERYTHING);
-  await tauriEmit('library-total-refreshed', { source: 'collection-scope' });
-}
 
 const titleSegments = computed(() => {
   if (!contentTitle.value) return [];
@@ -1285,6 +1217,7 @@ async function finishSelectedFileRefresh(results: Array<{ file: any; size_delta:
   results = results.filter(result => !result.skipped);
   if (!results.length) return;
   for (const { file } of results) clearCachedThumbnailDataUrl(file.id, config.settings.thumbnailSize);
+  invalidateRefreshedImages(results.map(({ file }) => file.file_path));
   if (selection.requestId !== currentContentRequestId) return;
   const scrollTop = gridViewRef.value?.getScrollTop();
   const loadedFiles = new Map(fileList.value.filter(isRealFileItem).map(file => [Number(file.id), file]));
@@ -1804,11 +1737,13 @@ const isRandomSort = computed(() => {
 const effectiveGroupBy = computed(() => {
   if (isRandomSort.value) return GROUP.NONE;
   const smartAlbum = getActiveCustomSmartAlbum();
-  return Number(
+  const groupBy = Number(
     !isCollectionPane.value && config.main.sidebarIndex === SIDEBAR.SMART_ALBUM && smartAlbum
       ? smartAlbum.group?.type ?? config.search.groupBy ?? GROUP.NONE
       : config.search.groupBy ?? GROUP.NONE
   );
+  // 4 (rating) and 10 (culling) were removed group-by options; older settings may still hold them.
+  return groupBy === 4 || groupBy === 10 ? GROUP.NONE : groupBy;
 });
 
 const isSearchGroupingView = computed(() =>
@@ -1883,35 +1818,6 @@ function formatDateGroupLabel(groupBy: number, label: string) {
   }
 }
 
-function ratingLabelKey(rating: number) {
-  const keyMap: Record<number, string> = {
-    5: 'five_stars',
-    4: 'four_stars',
-    3: 'three_stars',
-    2: 'two_stars',
-    1: 'one_star',
-  };
-  return keyMap[rating] || '';
-}
-
-function formatRatingGroupLabel(label: string) {
-  const rating = Number(label || 0);
-  if (rating === RATE.UNRATED) return localeMsg.value.rating.unrated;
-  const key = ratingLabelKey(rating);
-  return key ? localeMsg.value.rating[key] : label || '';
-}
-
-function formatCullingGroupLabel(label: string) {
-  switch (Number(label || 0)) {
-    case 1:
-      return localeMsg.value.culling.picks;
-    case 2:
-      return localeMsg.value.culling.rejected;
-    default:
-      return localeMsg.value.culling.unreviewed;
-  }
-}
-
 function formatGroupLabel(label: string) {
   const unknownGroupLabels: Record<string, string> = {
     'unknown-location': localeMsg.value.search?.unknown_location || 'Unknown location',
@@ -1923,8 +1829,6 @@ function formatGroupLabel(label: string) {
   const groupBy = Number(effectiveGroupBy.value || 0);
   if (groupBy === GROUP.DAY || groupBy === GROUP.MONTH || groupBy === GROUP.YEAR) return formatDateGroupLabel(groupBy, label);
   if (groupBy === GROUP.FOLDER) return formatFolderGroupLabel(label);
-  if (groupBy === GROUP.RATING) return formatRatingGroupLabel(label);
-  if (groupBy === GROUP.CULLING) return formatCullingGroupLabel(label);
   if (groupBy === GROUP.FILE_TYPE) {
     const labels = localeMsg.value.toolbar.filter?.file_type_options || [];
     const fileTypeLabels: Record<string, string> = {
@@ -1955,7 +1859,7 @@ function getGroupingQueryParams() {
   const baseParams = currentQuerySource.value === 'smart' && currentSmartQueryParams.value
     ? currentSmartQueryParams.value
     : currentQueryParams.value;
-  const calendarSort = config.main.sidebarIndex === SIDEBAR.LIBRARY && libConfig.library.item === LIB_ITEM.TODAY
+  const calendarSort = (config.main.sidebarIndex === SIDEBAR.LIBRARY && libConfig.library.item === LIB_ITEM.TODAY)
     ? DATE_SORT.TAKEN_DESC
     : Number(config.settings.calendarSort || 0);
   return {
@@ -2286,6 +2190,7 @@ const filmStripMediaRef = ref<any>(null);
 const filmStripZoomFit = ref(true);
 
 function closeQuickPreview() {
+  if (selectedItemIndex.value >= 0) gridViewRef.value?.scrollToItem(selectedItemIndex.value);
   showQuickView.value = false;
   stopSlideShow();
 }
@@ -2306,10 +2211,9 @@ const imageMinScale = ref(0);
 const imageMaxScale = ref(10);
 const isSlideShow = ref(false);
 
-function getNextImagePath(index: number): string {
-  const target = fileList.value[index + 1];
-  return target && !target.isPlaceholder && target.file_type === 1 ? target.file_path : '';
-}
+const selectionDirection = ref(1);
+const selectedImageNeighbors = computed(() => getImageNeighbors(fileList.value, selectedItemIndex.value, selectionDirection.value));
+const viewerNavigationRequests = new Map<string, symbol>();
 
 // Request ID tracking to prevent race conditions during async content updates
 let currentContentRequestId = 0;
@@ -2643,7 +2547,7 @@ async function removeFilesFromCurrentPerson(fileIds: number[]) {
       selectedSize.value = Math.max(0, selectedSize.value - removedItems.reduce((total, item) => total + getMediaItemSize(item), 0));
     }
   }
-  void tauriEmit(PERSONS_CHANGED_EVENT, { personId: context.id });
+  void tauriEmit(PERSONS_CHANGED_EVENT, { personId: context.id, source: 'content-remove' });
   toast.success(t('menu.person.removed_from_person', { count: fileIds.length, name: context.name }));
 }
 
@@ -2858,6 +2762,7 @@ const showTaggingDialog = ref(false);
 const fileIdsToTag = ref<number[]>([]);
 const showAddToCollectionDialog = ref(false);
 const fileIdsToAddToCollection = ref<number[]>([]);
+const assignPersonTarget = ref<AssignFaceTarget | null>(null);
 
 // grid view
 const gridScrollContainerRef = ref<HTMLElement | null>(null);
@@ -2978,30 +2883,6 @@ const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 
 const pendingFolderSyncs = new Map<number, Promise<any>>();
 let lastSyncedAlbumFolder = '';
 const shortcut = (actionId: ShortcutActionId) => getShortcutLabel(actionId, shortcutPlatform);
-const ratingActions: Array<{ actionId: ShortcutActionId; rating: number }> = [
-  { actionId: 'meta.rating.clear', rating: 0 },
-  { actionId: 'meta.rating.one', rating: 1 },
-  { actionId: 'meta.rating.two', rating: 2 },
-  { actionId: 'meta.rating.three', rating: 3 },
-  { actionId: 'meta.rating.four', rating: 4 },
-  { actionId: 'meta.rating.five', rating: 5 },
-];
-const cullingActions: Array<{ actionId: ShortcutActionId; cullingFlag: number }> = [
-  { actionId: 'meta.culling.pick', cullingFlag: 1 },
-  { actionId: 'meta.culling.reject', cullingFlag: 2 },
-  { actionId: 'meta.culling.unreviewed', cullingFlag: 0 },
-];
-
-function getMatchedRating(event: KeyboardEvent) {
-  const match = ratingActions.find(({ actionId }) => matchesShortcut(actionId, event, shortcutPlatform));
-  return match ? match.rating : null;
-}
-
-function getMatchedCulling(event: KeyboardEvent) {
-  const match = cullingActions.find(({ actionId }) => matchesShortcut(actionId, event, shortcutPlatform));
-  return match ? match.cullingFlag : null;
-}
-
 function getMatchedViewBackground(event: KeyboardEvent): number | null {
   const match = VIEW_BACKGROUND_SHORTCUTS.find(({ actionId }) => matchesShortcut(actionId, event, shortcutPlatform));
   return match?.value ?? null;
@@ -3904,14 +3785,35 @@ const currentQueryParams = ref({
   locationAdmin1: "",
   locationName: "",
   isFavorite: false,
-  rating: -1,
-  cullingFlag: -1,
   tagId: 0,
   tagFilter: null as { ids: number[]; any: boolean } | null,
   personId: 0,
 });
 const currentQuerySource = ref<'query' | 'smart' | 'collection' | 'search'>('query');
 const isMapView = computed(() => config.settings.grid.viewMode === 'map');
+// The Locations view shows its photos on a 3D globe unless the user picked the flat map.
+const canUseGlobeMap = computed(() => config.main.sidebarIndex === SIDEBAR.LOCATION);
+// The globe always shows every geotagged photo; only the global type and
+// favorites filters apply. The sidebar selection just moves the camera.
+const globeQueryParams = computed(() => ({
+  searchFileName: '', searchFileType: config.search.fileType,
+  sortType: config.search.sortType, sortOrder: config.search.sortOrder, randomSeed: 0,
+  searchAllSubfolders: '', searchFolder: '', startDate: 0, endDate: 0, calendarSort: 0, folderSort: 0, categorySort: 0,
+  make: '', model: '', lensMake: '', lensModel: '',
+  locationCc: null, locationDepth: 0, locationAdmin1: '', locationName: '',
+  isFavorite: activeFavoritesOnly.value, tagId: 0, tagFilter: null, personId: 0,
+  gpsMinLat: null, gpsMaxLat: null, gpsMinLon: null, gpsMaxLon: null,
+}));
+const globeFocusParams = computed(() => {
+  const { cc, admin1, name } = libConfig.location;
+  if (cc === null && admin1 === null) return null;
+  return {
+    ...globeQueryParams.value,
+    locationDepth: name !== null ? 3 : admin1 !== null ? 2 : 1,
+    locationCc: cc, locationAdmin1: admin1 || '', locationName: name || '',
+  };
+});
+const useGlobeMap = computed(() => canUseGlobeMap.value && config.settings.mapGlobe !== false);
 const isGridLayoutView = computed(() => config.settings.grid.viewMode === 'grid');
 const isFilmstripView = computed(() => config.settings.grid.viewMode === 'filmstrip');
 const isMapVisible = computed(() => isMapView.value && !showQuickView.value && tempViewMode.value !== 'map');
@@ -4003,7 +3905,7 @@ async function refreshFolderSidebarCount(path: string) {
       sortType: 0, sortOrder: 0, searchAllSubfolders: showSubfolderFiles ? path : '',
       searchFolder: showSubfolderFiles ? '' : path,
       startDate: 0, endDate: 0, calendarSort: 0, make: '', model: '', lensMake: '', lensModel: '',
-      locationCc: null, locationDepth: 0, locationAdmin1: '', locationName: '', isFavorite: false, rating: -1, cullingFlag: -1, tagId: 0, personId: 0,
+      locationCc: null, locationDepth: 0, locationAdmin1: '', locationName: '', isFavorite: false, tagId: 0, personId: 0,
     });
     if (result && libConfig._libraryId === libraryId
       && config.settings.showSubfolderFiles === showSubfolderFiles) {
@@ -4052,8 +3954,6 @@ function matchesRequestedSidebarCount(request: any) {
       return config.main.sidebarIndex === SIDEBAR.LIBRARY
         && libConfig.activePane === 'main'
         && libConfig.library.item === request.item
-        && (request.item !== LIB_ITEM.RATINGS || Number(libConfig.rating.item) === Number(request.rating))
-        && (request.item !== LIB_ITEM.CULLING || libConfig.culling.item === request.cullingItem)
         && (request.item !== LIB_ITEM.SUBJECTS || libConfig.library.smartId === request.smartId);
     case 'album':
       return config.main.sidebarIndex === SIDEBAR.ALBUM
@@ -4106,19 +4006,10 @@ function commitRequestedSidebarCount(count: number, request = uiStore.countUpdat
         const values = {
           ...defaults,
           ...cachedValues,
-          ratings: { ...defaults.ratings, ...(cachedValues.ratings || {}) },
-          culling: { ...defaults.culling, ...(cachedValues.culling || {}) },
         };
         if (request.item === LIB_ITEM.ALL) values.all = count;
         else if (request.item === LIB_ITEM.FAV) values.favorite = count;
         else if (request.item === LIB_ITEM.TODAY) values.today = count;
-        else if (request.item === LIB_ITEM.RATINGS) {
-          if (Number(request.rating) === RATE.ALL) values.rated = count;
-          else if (Number(request.rating) === RATE.UNRATED) values.unrated = count;
-          else values.ratings = { ...(values.ratings || {}), [Number(request.rating)]: count };
-        } else if (request.item === LIB_ITEM.CULLING) {
-          values.culling = { ...(values.culling || {}), [String(request.cullingItem)]: count };
-        }
         library.counts = values;
       }
       break;
@@ -4224,14 +4115,16 @@ function showLoadingContent(requestId: number) {
 
 // Similar Search Mode State
 const tempViewMode = ref<'none' | 'similar' | 'album' | 'person' | 'camera' | 'lens' | 'location' | 'tag' | 'map'>('none');
+const tempPersonKind = ref<'person' | 'pet'>('person');
 
 // Expose which person's photos the grid shows so file menus can offer "Not <name>".
 watch(
-  () => [config.main.sidebarIndex, libConfig.person.id, libConfig.person.name, tempViewMode.value] as const,
-  ([sidebarIndex, personId, personName, viewMode]) => {
+  () => [config.main.sidebarIndex, config.settings.personKind, libConfig.person.id, libConfig.person.name, tempViewMode.value, tempPersonKind.value] as const,
+  ([sidebarIndex, settingsKind, personId, personName, viewMode, tempKind]) => {
     const showingPerson = viewMode === 'person' || (viewMode === 'none' && sidebarIndex === SIDEBAR.PERSON);
+    const isPet = (viewMode === 'person' ? tempKind : settingsKind) === 'pet';
     personViewContext.value = showingPerson && personId
-      ? { id: Number(personId), name: personName || localeMsg.value.menu.person.unnamed }
+      ? { id: Number(personId), name: personName || t(isPet ? 'menu.person.unnamed_pet' : 'menu.person.unnamed') }
       : null;
   },
   { immediate: true },
@@ -4278,13 +4171,6 @@ const currentTitleIcon = computed(() => {
             switch (libConfig.library.item) {
               case LIB_ITEM.ALL: return IconFiles;
               case LIB_ITEM.FAV: return IconHeartFilled;
-              case LIB_ITEM.RATINGS: return libConfig.rating.item > 0 || libConfig.rating.item === RATE.ALL ? IconStarFilled : IconStar;
-              case LIB_ITEM.CULLING:
-                return libConfig.culling.item === CULLING.PICK
-                  ? IconFlagFilled
-                  : libConfig.culling.item === CULLING.REJECT
-                    ? IconFlagOff
-                    : IconFlag;
               case LIB_ITEM.SUBJECTS: return IconBolt;
               case LIB_ITEM.TODAY: return IconHistory;
               default: return IconFiles;
@@ -4327,6 +4213,7 @@ let unlistenImageEditor: (() => void) | null = null;
 let unlistenMontage: (() => void) | null = null;
 let unlistenFaceIndexProgress: (() => void) | null = null;
 let unlistenLibraryTotalRefreshed: (() => void) | null = null;
+let unlistenPersonsChanged: (() => void) | null = null;
 let unlistenImportFilesAdded: (() => void) | null = null;
 let unlistenImportFilesToFolder: (() => void) | null = null;
 let unlistenPasteClipboard: (() => void) | null = null;
@@ -4335,7 +4222,22 @@ let resizeObserver: ResizeObserver | null = null;
 let contentUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 let contentQueryRefreshPending = false;
 let pendingScopeSelectionChange = false;
+let pendingPersonsContentRefresh = false;
 let sidebarCountRequestId = 0;
+
+function refreshContentForPersonChange(scrollTopOverride: number | null = null) {
+  pendingPersonsContentRefresh = false;
+  pendingInitialSelectedIndex = selectedItemIndex.value;
+  hasRestoredInitialSelection = false;
+  pendingRestoreScrollTop.value = scrollTopOverride ?? (gridViewRef.value?.getScrollTop() ?? null);
+  void updateContent(true, false);
+}
+
+watch(showQuickView, (isOpen, wasOpen) => {
+  if (!isOpen && wasOpen && pendingPersonsContentRefresh && tempViewMode.value === 'none') {
+    refreshContentForPersonChange();
+  }
+});
 
 function scheduleContentRefresh(task: () => void) {
   if (contentUpdateTimer) {
@@ -4405,6 +4307,7 @@ onBeforeUnmount(() => {
   if (unlistenImageViewer) unlistenImageViewer();
   if (unlistenImageEditor) unlistenImageEditor();
   if (unlistenLibraryTotalRefreshed) unlistenLibraryTotalRefreshed();
+  unlistenPersonsChanged?.();
   if (unlistenImportFilesAdded) unlistenImportFilesAdded();
 });
 
@@ -4981,6 +4884,7 @@ function handleItemAction(payload: { action: string, index: number }) {
     'info': toggleInfoPanel,
     'tag': clickTag,
     'add-to-collection': clickAddToCollection,
+    'add-person': clickAddPerson,
     'comment': () => openCommentEditor(),
     'search-similar': () => enterSimilarSearchMode(fileList.value[selectedItemIndex.value]),
     'find-person': () => {
@@ -5006,17 +4910,19 @@ function handleItemAction(payload: { action: string, index: number }) {
           toast.info(t('menu.person.scan_photo_none'));
         }
       } catch (error) {
-        console.error('Failed to scan photo for faces:', error);
-        toast.error(t('menu.person.scan_photo_failed'));
+        console.error('Failed to scan media for faces:', error);
+        toast.error(t(Number(file.file_type) === 2 ? 'menu.person.scan_video_failed' : 'menu.person.scan_photo_failed'));
       }
     },
     'remove-from-person': () => {
       const file = fileList.value[selectedItemIndex.value];
       if (file?.id) void removeFilesFromCurrentPerson([Number(file.id)]);
     },
-    'remove-selected-from-person': () => {
+    'remove-selected-from-person': async () => {
       if (!selectMode.value || selectedCount.value === 0) return;
-      const ids = getActionableSelectedItems().map((item: any) => Number(item.id)).filter((id: number) => id > 0);
+      const items = await getActionableSelectedItemsForAction();
+      if (!items) return;
+      const ids = items.map((item: any) => Number(item.id)).filter((id: number) => id > 0);
       void removeFilesFromCurrentPerson(ids);
     },
     'set-album-cover': clickSetAlbumCover,
@@ -5032,16 +4938,9 @@ function handleItemAction(payload: { action: string, index: number }) {
   };
   dispatchFileAction(action, actionMap as Record<string, () => void | Promise<void>>, {
     run,
-    onRating: (rating) => {
-      void (selectMode.value ? selectModeSetRatings(rating) : setSelectedFileRating(rating));
-    },
-    onCulling: (cullingFlag) => {
-      if (selectMode.value) {
-        void selectModeSetCullingFlags(cullingFlag);
-      } else {
-        void setSelectedFileCullingFlag(cullingFlag);
-      }
-    },
+    // Rating and culling were removed from this fork; ignore those actions.
+    onRating: () => {},
+    onCulling: () => {},
     onExternalApp: (appId) => { void openInExternalApp(appId); },
     onManageExternalApps: () => { showExternalAppsDialog.value = true; },
   });
@@ -5324,30 +5223,6 @@ function handleLocalKeyDown(event: KeyboardEvent) {
     !matchesShortcut('view.cycleBackground', event, shortcutPlatform) &&
     getMatchedViewBackground(event) === null
   ) {
-    return;
-  }
-
-  const ratingShortcut = getMatchedRating(event);
-  if (ratingShortcut !== null) {
-    event.preventDefault();
-    if (selectMode.value && selectedCount.value === 0) return;
-    if (selectMode.value) {
-      void selectModeSetRatings(ratingShortcut);
-    } else {
-      if (!event.repeat) void setSelectedFileRating(ratingShortcut, event.shiftKey);
-    }
-    return;
-  }
-
-  const cullingShortcut = getMatchedCulling(event);
-  if (cullingShortcut !== null) {
-    event.preventDefault();
-    if (selectMode.value && selectedCount.value === 0) return;
-    if (selectMode.value) {
-      void selectModeSetCullingFlags(cullingShortcut);
-    } else {
-      if (!event.repeat) void setSelectedFileCullingFlag(cullingShortcut, event.shiftKey);
-    }
     return;
   }
 
@@ -5975,7 +5850,6 @@ function buildScanStreamQueryParams() {
     locationAdmin1: "",
     locationName: "",
     isFavorite: false,
-    rating: -1,
     tagId: 0,
     tagFilter: null,
     personId: 0,
@@ -6244,7 +6118,7 @@ onMounted( async() => {
 
   unlistenLibraryTotalRefreshed = await listen('library-total-refreshed', (event: any) => {
     if (event?.payload?.source === 'content') return;
-    if (event?.payload?.source === 'collection-scope') {
+    if (event?.payload?.source === 'album-visibility' || event?.payload?.source === 'hidden-filters') {
       pendingInitialSelectedIndex = 0;
       hasRestoredInitialSelection = false;
       updateContent(true, false);
@@ -6256,6 +6130,21 @@ onMounted( async() => {
       hasRestoredInitialSelection = false;
       updateContent(true);
     }
+  });
+  unlistenPersonsChanged = await listen(PERSONS_CHANGED_EVENT, (event: any) => {
+    const hasHiddenPersons = (libConfig.hiddenPersonIds || []).length > 0;
+    const inPersonView = Boolean(personViewContext.value);
+    if (!hasHiddenPersons && !inPersonView) return;
+    if (hasHiddenPersons) {
+      libConfig.clearLazySidebarCounts();
+      void tauriEmit('library-total-refreshed', { source: 'content', origin: 'person' });
+    }
+    if (event?.payload?.source === 'content-remove') return;
+    if (showQuickView.value || tempViewMode.value !== 'none') {
+      pendingPersonsContentRefresh = true;
+      return;
+    }
+    refreshContentForPersonChange();
   });
   unlistenImportFilesAdded = await listen('import-files-added', (event: any) => {
     void handleImportFilesAdded(event);
@@ -6422,46 +6311,70 @@ onMounted( async() => {
   unlistenImageViewer = await listen('message-from-image-viewer', async (event) => {
     const { message } = event.payload as any;
     switch (message) {
-      case 'request-file-at-index':
-        const requestIndex = (event.payload as any).index;
-        const requestedPane = String((event.payload as any).pane || 'left');
+      case 'request-file-at-index': {
+        const { index, pane: eventPane, navigationRequest, expiresAt, direction } = event.payload as any;
+        const requestIndex = Number(index);
+        const requestedPane = String(eventPane || 'left');
         const pane = ['left', 'right', 'bottomLeft', 'bottomRight'].includes(requestedPane)
           ? requestedPane
           : 'left';
         const session = imageViewerSession.value;
-        if (session.mode === 'normal') {
-          if (!isRealFileItem(fileList.value[requestIndex])) {
-            ensureGroupedFileAtIndex(requestIndex);
+        const request = Symbol();
+        const contentRequestId = currentContentRequestId;
+        viewerNavigationRequests.set(pane, request);
+        let loadFailed = false;
+        try {
+          if (session.mode === 'normal' && Number.isInteger(requestIndex)
+            && requestIndex >= 0 && requestIndex < fileList.value.length
+            && !isRealFileItem(fileList.value[requestIndex])) {
+            if (groupedModeActive.value) {
+              if (!ensureGroupedFileAtIndex(requestIndex)) {
+                const rowIndex = getGroupedRowIndexForFileIndex(requestIndex);
+                if (rowIndex >= 0) await fetchGroupedRowsRange(rowIndex, rowIndex + 1, false, true);
+              }
+            } else {
+              await fetchDataRange(requestIndex - 2, requestIndex + 3, false, true);
+            }
           }
-          if (!isRealFileItem(fileList.value[requestIndex])) {
-            await fetchDataRange(requestIndex, requestIndex + 2);
+        } catch (error) {
+          loadFailed = true;
+          console.error('Failed to load viewer navigation target:', error);
+        }
+
+        const isLatestRequest = () => viewerNavigationRequests.get(pane) === request;
+        const isSameSession = () => imageViewerSession.value === session && currentContentRequestId === contentRequestId;
+        try {
+          const imageWindow = await WebviewWindow.getByLabel('imageviewer');
+          if (!imageWindow || !isLatestRequest()) return;
+          if (expiresAt !== undefined && Date.now() >= expiresAt) return;
+          const viewerFiles = session.mode === 'compare' ? session.files : fileList.value;
+          const file = viewerFiles[requestIndex];
+          if (loadFailed || !isSameSession() || !isRealFileItem(file)) {
+            await imageWindow.emit('update-img', { navigationRejected: true, navigationRequest, pane });
+            return;
           }
-          // Reflect the viewer's navigation in the main-window selection so the
-          // grid highlight/scroll follows the image being viewed.
-          if (pane === 'left' && selectedItemIndex.value !== requestIndex) {
+
+          await imageWindow.emit('update-img', {
+            fileId: file.id,
+            fileIndex: requestIndex,
+            fileCount: viewerFiles.length,
+            file,
+            prefetchFiles: getImageNeighbors(viewerFiles, requestIndex, Number(direction)),
+            navigationRequest,
+            pane,
+          });
+          // Reflect successful navigation in the main-window selection.
+          if (session.mode === 'normal' && pane === 'left' && isLatestRequest()
+            && isSameSession() && selectedItemIndex.value !== requestIndex) {
             suppressImageViewerSync = true;
             selectedItemIndex.value = requestIndex;
             void nextTick(() => { suppressImageViewerSync = false; });
           }
-        }
-        const viewerFiles = session.mode === 'compare' ? session.files : fileList.value;
-        const file = viewerFiles[requestIndex];
-        if (isRealFileItem(file)) {
-           const imageWindow = await WebviewWindow.getByLabel('imageviewer');
-           if (imageWindow) {
-             imageWindow.emit('update-img', {
-               fileId: file.id,
-               fileIndex: requestIndex,
-               fileCount: viewerFiles.length,
-               nextFilePath: (() => {
-                 const next = viewerFiles[requestIndex + 1];
-                 return next && !next.isPlaceholder && next.file_type === 1 ? next.file_path : '';
-               })(),
-               pane,
-             });
-           }
+        } catch (error) {
+          console.error('Failed to reply to viewer navigation:', error);
         }
         break;
+      }
       case 'run-file-action': {
         const action = String((event.payload as any).action || '');
         const fileId = Number((event.payload as any).fileId);
@@ -6574,9 +6487,6 @@ onMounted( async() => {
             const previousAspectRatio = getAspectRatio(file);
             Object.assign(file, changes);
             if (!Object.is(previousAspectRatio, getAspectRatio(file))) refreshFileGeometryLayout();
-          }
-          if (changes.culling_flag !== undefined || changes.cullingFlag !== undefined) {
-            void tauriEmit('culling-status-updated', { fileIds: [targetFileId], cullingFlag: changes.culling_flag ?? changes.cullingFlag });
           }
         }
         break;
@@ -7125,8 +7035,6 @@ watch(
     libraryItem: libConfig.library.item,
     smartId: libConfig.library.smartId,
     searchText: libConfig.search.searchText,
-    rating: libConfig.rating.item,
-    culling: libConfig.culling.item,
     album: [libConfig.album.id, libConfig.album.folderId, libConfig.album.folderPath, libConfig.album.selected],
     smartAlbum: [libConfig.smartAlbum.type, libConfig.smartAlbum.id],
     personId: libConfig.person.id,
@@ -7162,8 +7070,6 @@ watch(
     // Count and cover updates are query outputs, not refresh triggers.
     JSON.stringify((libConfig.smartAlbums || []).map(({ count, coverFileId, ...rest }: any) => rest)), // smart album
     libConfig.search.searchText,
-    libConfig.rating.item, // rating
-    libConfig.culling.item, // culling
     config.search.fileType, config.search.favoritesOnly, config.search.sortType, config.search.sortOrder, // search and sort
     config.settings.showSubfolderFiles,                                            // album folder view
     config.settings.folderSort, config.settings.calendarSort, config.settings.locationSort, config.settings.cameraSort, config.search.groupBy, // group sorting and filtering (tag/person sorts only affect their sidebars, not content grouping)
@@ -7252,12 +7158,32 @@ watch(
 // Set while applying an index change that originated from the image viewer, so
 // the push below does not echo the same index back to the viewer.
 let suppressImageViewerSync = false;
+let selectionSaveTimer: ReturnType<typeof setTimeout> | undefined;
+let pendingSelectionIndex: number | undefined;
+
+function flushSelectedIndex() {
+  clearTimeout(selectionSaveTimer);
+  selectionSaveTimer = undefined;
+  if (pendingSelectionIndex === undefined) return;
+  const index = pendingSelectionIndex;
+  pendingSelectionIndex = undefined;
+  void setLastSelectedItemIndex(index);
+}
+
+onMounted(() => window.addEventListener('beforeunload', flushSelectedIndex));
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', flushSelectedIndex);
+  flushSelectedIndex();
+});
 watch(() => selectedItemIndex.value, (newIndex, oldIndex) => {
   if(oldIndex >= 0 && oldIndex !== newIndex && fileList.value[oldIndex]?.rotate >= 360) {
     fileList.value[oldIndex].rotate %= 360;
   }
-  void setLastSelectedItemIndex(Number(newIndex ?? -1));
-  updateSelectedImage(newIndex);
+  if (newIndex >= 0 && newIndex !== oldIndex) selectionDirection.value = newIndex < oldIndex ? -1 : 1;
+  pendingSelectionIndex = Number(newIndex ?? -1);
+  clearTimeout(selectionSaveTimer);
+  selectionSaveTimer = setTimeout(flushSelectedIndex, 400);
+  scheduleSelectedImageUpdate(newIndex);
   // Keep an open image viewer in sync with the main-window selection.
   if (!suppressImageViewerSync) {
     void syncSelectionToImageViewer(newIndex);
@@ -7320,11 +7246,16 @@ function toggleMapView() {
     exitTempViewMode();
     return;
   }
-  // Map is a select-only view: clicking it when already active is a no-op.
-  if (isMapView.value) return;
+  // Clicking the map button again returns to the view the map replaced.
+  if (isMapView.value) {
+    config.settings.grid.viewMode = viewModeBeforeMap === 'filmstrip' ? 'filmstrip' : 'grid';
+    return;
+  }
   if (selectMode.value) handleSelectMode(false);
+  viewModeBeforeMap = config.settings.grid.viewMode;
   config.settings.grid.viewMode = 'map';
 }
+let viewModeBeforeMap = 'grid';
 
 function openMapClusterTempView(payload: { fileIds?: number[]; minLat: number; maxLat: number; minLon: number; maxLon: number; count: number; view: { lat: number; lon: number; zoom: number } }) {
   const selectionRequestId = ++mapSelectionRequestId;
@@ -7388,19 +7319,27 @@ function enterMapClusterTempView(payload: { fileIds?: number[]; minLat: number; 
 
 let mapPreviewRequestId = 0;
 let mapSelectionRequestId = 0;
-async function selectMapFile(fileId: number) {
+async function selectMapFile(fileId: number, openOutsideList?: () => void) {
   const requestId = ++mapSelectionRequestId;
   const index = await resolveFileIndexForDedup(fileId);
-  if (requestId !== mapSelectionRequestId || index < 0) return;
+  if (requestId !== mapSelectionRequestId) return;
+  if (index < 0) {
+    openOutsideList?.();
+    return;
+  }
   // Map selections are independent of the grid viewport used by thumbnail scheduling.
   void getFileListThumb([fileList.value[index]], { viewportBound: false });
   handleItemClicked(index);
 }
 
-async function openMapPreviewFile(fileId: number) {
+async function openMapPreviewFile(fileId: number, openOutsideList?: () => void) {
   const requestId = ++mapPreviewRequestId;
   const index = await resolveFileIndexForDedup(fileId);
-  if (requestId !== mapPreviewRequestId || index < 0) return;
+  if (requestId !== mapPreviewRequestId) return;
+  if (index < 0) {
+    if (isMapContentVisible.value) openOutsideList?.();
+    return;
+  }
   void getFileListThumb([fileList.value[index]], { viewportBound: false });
   handleItemDblClicked(index);
 }
@@ -7419,7 +7358,7 @@ function cycleGridStyle() {
 }
 
 // Track pending requests to avoid duplicates
-const pendingRequests = new Set();
+const pendingRequests = new Map<string, Promise<void>>();
 
 // Sidebar totals describe the category, independently of the browser media filter.
 const getSidebarQueryCountAndSum = () => {
@@ -7561,7 +7500,7 @@ const getCurrentQueryFilePosition = async (fileId: number) => {
   return getQueryFilePosition(currentQueryParams.value, fileId);
 };
 
-async function fetchDataRange(start: number, end: number, reverse = false) {
+async function fetchDataRange(start: number, end: number, reverse = false, waitForPending = false) {
   if (groupedModeActive.value) {
     return fetchGroupedRowsRange(start, end, reverse);
   }
@@ -7603,11 +7542,12 @@ async function fetchDataRange(start: number, end: number, reverse = false) {
 
     if (chunkNeedsLoad) {
       const key = `${requestId}:${chunkStart}-${chunkSize}`;
-      if (pendingRequests.has(key)) {
+      const pending = pendingRequests.get(key);
+      if (pending) {
+        if (waitForPending) chunkPromises.push(pending);
         continue;
       }
-      
-      pendingRequests.add(key);
+
       
       const promise = getCurrentQueryFiles(chunkStart, chunkSize)
         .then(async (newFiles) => {
@@ -7675,6 +7615,7 @@ async function fetchDataRange(start: number, end: number, reverse = false) {
           pendingRequests.delete(key);
         });
 
+      pendingRequests.set(key, promise);
       chunkPromises.push(promise);
     } else {
         // console.log(`Chunk already loaded or invalid: ${chunkStart}`);
@@ -7686,7 +7627,7 @@ async function fetchDataRange(start: number, end: number, reverse = false) {
   }
 }
 
-async function fetchGroupedRowsRange(start: number, end: number, reverse = false) {
+async function fetchGroupedRowsRange(start: number, end: number, reverse = false, waitForPending = false) {
   const requestId = currentContentRequestId;
 
   start = Math.max(0, start);
@@ -7713,9 +7654,11 @@ async function fetchGroupedRowsRange(start: number, end: number, reverse = false
     if (!chunkNeedsLoad) continue;
 
     const key = `${requestId}:grouped:${chunkStart}-${chunkSize}`;
-    if (pendingRequests.has(key)) continue;
-    pendingRequests.add(key);
-
+    const pending = pendingRequests.get(key);
+    if (pending) {
+      if (waitForPending) chunkPromises.push(pending);
+      continue;
+    }
     const promise = getCurrentGroupedQueryRows(chunkStart, chunkEnd - chunkStart)
       .then(async (result) => {
         if (requestId !== currentContentRequestId) return;
@@ -7735,6 +7678,7 @@ async function fetchGroupedRowsRange(start: number, end: number, reverse = false
         pendingRequests.delete(key);
       });
 
+    pendingRequests.set(key, promise);
     chunkPromises.push(promise);
   }
 
@@ -8143,8 +8087,6 @@ async function getFileList(
     locationAdmin1 = '', 
     locationName = '', 
     isFavorite = activeFavoritesOnly.value,
-    rating = -1,
-    cullingFlag = -1,
     tagId = 0,
     tagFilter = null as { ids: number[]; any: boolean } | null,
     personId = 0,
@@ -8187,8 +8129,6 @@ async function getFileList(
     locationAdmin1,
     locationName,
     isFavorite,
-    rating,
-    cullingFlag,
     tagId,
     tagFilter,
     personId,
@@ -8347,7 +8287,6 @@ async function getCollectionFileList(collectionId: number, requestId: number) {
     locationCc: null, locationDepth: 0, locationAdmin1: '',
     locationName: '',
     isFavorite: Boolean(config.search.favoritesOnly),
-    rating: -1,
     tagId: 0,
     personId: 0,
   };
@@ -8414,6 +8353,7 @@ async function getSmartFileList(smartAlbum: any, requestId: number) {
   currentSearchFileIds.value = [];
   dedupSmartFileIds.value = null;
   currentSmartQueryParams.value = {
+    smartAlbumId: smartAlbum?.id ? String(smartAlbum.id) : null,
     version: Number(query.version || 1),
     match: query.match === 'any' ? 'any' : 'all',
     rules,
@@ -8609,7 +8549,6 @@ async function getUnifiedSearchFileList(searchText: string, requestId: number) {
     locationCc: null, locationDepth: 0, locationAdmin1: '',
     locationName: '',
     isFavorite: Boolean(config.search.favoritesOnly),
-    rating: -1,
     tagId: 0,
     personId: 0,
     groupBy: 0,
@@ -8756,6 +8695,7 @@ let contentUpdateSeq = 0;
 
 async function updateContent(force = false, preserveMultiSelection = selectMode.value) {
   pendingScopeSelectionChange = false;
+  pendingPersonsContentRefresh = false;
   const updateSeq = ++contentUpdateSeq;
   const newIndex = config.main.sidebarIndex;
   const nextAlbumId = newIndex === SIDEBAR.ALBUM ? Number(libConfig.album.id || 0) : 0;
@@ -8851,39 +8791,6 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
         contentTitle.value = localeMsg.value.library.on_this_day;
         getFileList({ startDate: -1, endDate: -1, calendarSort: DATE_SORT.TAKEN_DESC }, requestId);
         break;
-      case LIB_ITEM.RATINGS:
-        if (libConfig.rating.item === RATE.ALL) {
-          contentTitle.value = `${localeMsg.value.rating.title} > ${localeMsg.value.rating.rated}`;
-          getFileList({ rating: RATE.ALL }, requestId);
-        } else if (libConfig.rating.item === RATE.UNRATED) {
-          contentTitle.value = `${localeMsg.value.rating.title} > ${localeMsg.value.rating.unrated}`;
-          getFileList({ rating: RATE.UNRATED }, requestId);
-        } else if ((libConfig.rating.item || 0) > 0) {
-          const rating = Number(libConfig.rating.item || 0);
-          const key = ratingLabelKey(rating);
-          contentTitle.value = `${localeMsg.value.rating.title} > ${key ? localeMsg.value.rating[key] : `${rating}★`}`;
-          getFileList({ rating }, requestId);
-        } else {
-          contentTitle.value = localeMsg.value.rating.title;
-          showEmptyContent(requestId);
-        }
-        break;
-      case LIB_ITEM.CULLING: {
-        const cullingItem = libConfig.culling.item;
-        const label = cullingItem === CULLING.PICK
-          ? localeMsg.value.culling.picks
-          : cullingItem === CULLING.REJECT
-            ? localeMsg.value.culling.rejected
-            : localeMsg.value.culling.unreviewed;
-        contentTitle.value = `${localeMsg.value.culling.title} > ${label}`;
-        const cullingFlag = cullingItem === CULLING.PICK
-          ? 1
-          : cullingItem === CULLING.REJECT
-            ? 2
-            : 0;
-        getFileList({ cullingFlag }, requestId);
-        break;
-      }
       case LIB_ITEM.SUBJECTS: {
         const smartId = libConfig.library.smartId;
         if (!smartId) {
@@ -9077,7 +8984,7 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
       contentTitle.value = "";
       showEmptyContent(requestId);
     } else {
-      contentTitle.value = libConfig.person.name || `${localeMsg.value.sidebar.people}`;
+      contentTitle.value = libConfig.person.name || t(config.settings.personKind === 'pet' ? 'menu.person.kind_pets' : 'sidebar.people');
       getFileList({ personId: libConfig.person.id }, requestId);
     }
   }
@@ -9184,12 +9091,12 @@ async function enterPersonSearchMode(file: any) {
      return;
   }
 
-  await enterPersonTempView(Number(face.person_id), face.person_name || '');
+  await enterPersonTempView(Number(face.person_id), face.person_name || '', face.kind === 'pet' ? 'pet' : 'person');
 }
 
 // Open a temporary view of all photos of a specific person. Used by both
 // "find this person" and clicking a person name in the file info panel.
-async function enterPersonTempView(personId: number, personName: string) {
+async function enterPersonTempView(personId: number, personName: string, personKind: 'person' | 'pet' = 'person') {
   if (!config.settings.face.enabled || !personId || personId <= 0) return;
 
   // Increment request ID to cancel any previous thumbnail generation and reset queue
@@ -9201,6 +9108,7 @@ async function enterPersonTempView(personId: number, personName: string) {
 
   // 2. Set mode
   tempViewMode.value = 'person';
+  tempPersonKind.value = personKind === 'pet' ? 'pet' : 'person';
   showQuickView.value = false;
 
   // 3. Update libConfig.person to reflect the selected person
@@ -9211,7 +9119,7 @@ async function enterPersonTempView(personId: number, personName: string) {
   suppressPersonContextRefresh = false;
 
   // 4. Update Title to indicate context
-  contentTitle.value = personName || localeMsg.value.sidebar.people;
+  contentTitle.value = personName || t(tempPersonKind.value === 'pet' ? 'menu.person.kind_pets' : 'sidebar.people');
 
   // 5. Perform Search
   const requestId = ++currentContentRequestId;
@@ -9228,8 +9136,12 @@ async function enterPersonTempView(personId: number, personName: string) {
 }
 
 // Click a person name in the file info panel → "find this person".
-function handleNavigatePerson(payload: { personId: number; personName: string }) {
-  void enterPersonTempView(Number(payload?.personId || 0), payload?.personName || '');
+function handleNavigatePerson(payload: { personId: number; personName: string; personKind?: 'person' | 'pet' }) {
+  void enterPersonTempView(
+    Number(payload?.personId || 0),
+    payload?.personName || '',
+    payload?.personKind === 'pet' ? 'pet' : 'person',
+  );
 }
 
 function enterAlbumPreviewMode(file: any, targetFolderPath?: string) {
@@ -9328,6 +9240,11 @@ function exitTempViewMode() {
   tempViewMode.value = 'none';
   showQuickView.value = false;
   backupState.value = null;
+
+  if (pendingPersonsContentRefresh) {
+    refreshContentForPersonChange(state.scrollTop);
+    return;
+  }
 
   // 3. Restore Scroll Position (need to wait for Vue to re-render the list)
   // Using nextTick or a small timeout
@@ -10411,6 +10328,18 @@ const changeVideoThumbnailFromPanel = async (file: any) => {
   target.thumbnail = getThumbnailDataUrl(thumb, thumbnailPlaceholder, true, config.settings.thumbnailSize, Number(file.modified_at || 0));
 };
 
+function invalidateRefreshedImages(filePaths: string[]) {
+  filePaths = filePaths.filter(Boolean);
+  if (!filePaths.length) return;
+  for (const path of filePaths) {
+    clearDecodedImages(path);
+    uiStore.updateFileVersion(path);
+  }
+  void tauriEmit('message-from-content', {
+    message: 'refresh-images', libraryId: libConfig._libraryId, filePaths,
+  });
+}
+
 // Refresh panel data without reloading whichever image is selected after the await.
 const refreshFileInfoFromPanel = async (file: any) => {
   const libraryId = libConfig._libraryId;
@@ -10425,7 +10354,10 @@ const refreshFileInfoFromPanel = async (file: any) => {
   else if (result.warning) toast.warning(message);
   fileInfoRevision.value++;
   void tauriEmit('tags-changed');
-  if (!result.skipped) await getFileListThumb([file], { bustCache: true, viewportBound: false });
+  if (!result.skipped) {
+    invalidateRefreshedImages([file.file_path]);
+    await getFileListThumb([file], { bustCache: true, viewportBound: false });
+  }
 };
 
 // update the file info from the file; isRefresh = "Refresh file info" menu action
@@ -10451,8 +10383,12 @@ const updateFile = async (file: any, isRefresh = false) => {
       Object.assign(file, updatedFile);
       refreshFileGeometryLayout();
       if (isRefresh) { fileInfoRevision.value++; void tauriEmit('tags-changed'); }
-      if (isRefresh) await getFileListThumb([file], { bustCache: true, viewportBound: false });
-      else await updateThumbForFile(file);
+      if (isRefresh) {
+        invalidateRefreshedImages([file.file_path]);
+        await getFileListThumb([file], { bustCache: true, viewportBound: false });
+      } else {
+        await updateThumbForFile(file);
+      }
       await updateSelectedImage(selectedItemIndex.value);
 
       // Force Image.vue to reload the saved image by briefly nullifying file_path
@@ -10532,13 +10468,6 @@ const syncFileMetaToImageViewer = async (fileId: number, changes: Record<string,
     changes,
   });
 };
-
-function handleDedupCullingStatusUpdated(fileId: number, cullingFlag: number) {
-  const file = fileList.value.find(item => Number(item.id) === Number(fileId));
-  if (file) file.culling_flag = cullingFlag;
-  void syncFileMetaToImageViewer(fileId, { culling_flag: cullingFlag });
-  void tauriEmit('culling-status-updated', { fileIds: [fileId], cullingFlag });
-}
 
 type SavedFilePayload = {
   saveAsNew?: boolean;
@@ -10635,8 +10564,6 @@ function advanceAfterMetadataShortcut(fileId: number, requestId: number) {
 
 // toggle the selected file's favorite status (selectMode = false)
 const metadataWriters = {
-  culling_flag: { tracker: createMetadataSyncTracker(), persist: setFileCullingFlag },
-  rating: { tracker: createMetadataSyncTracker('rating'), persist: setFileRating },
   is_favorite: { tracker: createMetadataSyncTracker('is_favorite'), persist: (id: number, value: number) => setFileFavorite(id, Boolean(value)) },
 };
 watch(() => libConfig._libraryId, () => {
@@ -10664,7 +10591,6 @@ async function setSelectedMetadata(field: keyof typeof metadataWriters, value: n
       if (libraryId !== libConfig._libraryId) return;
       if (settled) applyCurrent(id, flag);
       syncFileMetaToImageViewer(id, patch(flag));
-      if (field === 'culling_flag') void tauriEmit('culling-status-updated', { fileIds: [id], cullingFlag: flag });
       if (intent?.advance && intent.requestId !== undefined) advanceAfterMetadataShortcut(id, intent.requestId);
     },
     onError: (id, confirmed) => {
@@ -10706,52 +10632,6 @@ const toggleSelectModeFavorite = async () => {
   if (!selectedItems || selectedItems.length === 0) return;
   const shouldFavorite = !Boolean(selectedItems[0].is_favorite);
   await selectModeSetFavorites(shouldFavorite);
-};
-
-const setSelectedFileRating = (rating: number, advance = false) => setSelectedMetadata('rating', rating, advance);
-
-const selectModeSetRatings = async (rating: number) => {
-  if (selectMode.value && selectedCount.value > 0) {
-    const normalized = Math.max(0, Math.min(5, rating));
-    const items = await getActionableSelectedItemsForAction();
-    if (!items) return;
-    if (!await confirmLargeBatch(items.length)) return;
-    const result = await batchUpdateFileMetadata({
-      fileIds: items.map(item => item.id),
-      rating: normalized,
-    });
-    if (result === null) return;
-    items.forEach(item => {
-      item.rating = normalized;
-    });
-    const activeItem = fileList.value[selectedItemIndex.value];
-    if (activeItem?.isSelected) {
-      syncFileMetaToImageViewer(activeItem.id, { rating: normalized });
-    }
-  }
-}
-
-const setSelectedFileCullingFlag = (flag: number, advance = false) => setSelectedMetadata('culling_flag', flag, advance);
-
-const selectModeSetCullingFlags = async (cullingFlag: number) => {
-  if (!selectMode.value || selectedCount.value === 0) return;
-  const items = await getActionableSelectedItemsForAction();
-  if (!items) return;
-  if (!await confirmLargeBatch(items.length)) return;
-  const normalized = Math.max(0, Math.min(2, cullingFlag));
-  const result = await batchUpdateFileMetadata({
-    fileIds: items.map(item => item.id),
-    cullingFlag: normalized,
-  });
-  if (result === null) return;
-  items.forEach(item => {
-    item.culling_flag = normalized;
-  });
-  const activeItem = fileList.value[selectedItemIndex.value];
-  if (activeItem?.isSelected) {
-    syncFileMetaToImageViewer(activeItem.id, { culling_flag: normalized });
-  }
-  void tauriEmit('culling-status-updated', { fileIds: items.map(item => item.id), cullingFlag: normalized });
 };
 
 // slide show
@@ -10909,6 +10789,47 @@ const clickAddToCollection = async (singleFile = false) => {
   }
   showAddToCollectionDialog.value = fileIdsToAddToCollection.value.length > 0;
 };
+
+const clickAddPerson = async (singleFile = false) => {
+  if (!config.settings.face.enabled) return;
+  if (singleFile !== true && selectMode.value && selectedCount.value === 0) return;
+  let fileIds: number[] = [];
+  if (singleFile !== true && selectMode.value) {
+    const items = await getActionableSelectedItemsForAction();
+    if (!items) return;
+    fileIds = items
+      .filter((file: any) => [1, 2, 3].includes(Number(file?.file_type)))
+      .map((file: any) => Number(file.id))
+      .filter((id: number) => id > 0);
+    if (fileIds.length === 0) return;
+    if (!await confirmLargeBatch(fileIds.length)) return;
+  } else if (selectedItemIndex.value >= 0) {
+    const file = fileList.value[selectedItemIndex.value];
+    if (file?.id && [1, 2, 3].includes(Number(file?.file_type))) {
+      fileIds = [Number(file.id)];
+    }
+  }
+  if (fileIds.length === 0) return;
+  const defaultKind = config.main.sidebarIndex === SIDEBAR.PERSON && config.settings.personKind === 'pet'
+    ? 'pet'
+    : 'person';
+  assignPersonTarget.value = {
+    id: null,
+    file_id: fileIds[0],
+    file_ids: fileIds,
+    person_id: null,
+    person_name: null,
+    thumbnail: '',
+    kind: defaultKind,
+    manual: true,
+    norm_bbox: null,
+  };
+};
+
+function onAssignPersonChanged(payload: { personId: number | null; message: string }) {
+  assignPersonTarget.value = null;
+  toast.success(payload.message);
+}
 
 function onMetadataSaved(files: any[], changes: Record<string, string>) {
   const byId = new Set(files.map(file => file.id));
@@ -11367,7 +11288,7 @@ const groupOptions = computed(() => {
 
   return [
     ...options,
-    ...[GROUP.FOLDER, GROUP.FILE_TYPE, GROUP.DAY, GROUP.MONTH, GROUP.YEAR, GROUP.RATING, GROUP.CULLING, GROUP.LOCATION, GROUP.CAMERA, GROUP.LENS]
+    ...[GROUP.FOLDER, GROUP.FILE_TYPE, GROUP.DAY, GROUP.MONTH, GROUP.YEAR, GROUP.LOCATION, GROUP.CAMERA, GROUP.LENS]
       .map(value => ({ label: groupTypeLabels.value[value], value }))
       .filter(option => option.label),
   ];
@@ -11459,6 +11380,15 @@ const isSmartAlbumGroupOverride = computed(() => {
 });
 
 // update image when the select file is changed
+let selectionTagTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleSelectedImageUpdate(index: number) {
+  clearTimeout(selectionTagTimer);
+  selectionTagTimer = setTimeout(() => {
+    if (selectedItemIndex.value === index) void updateSelectedImage(index);
+  }, 120);
+}
+onBeforeUnmount(() => clearTimeout(selectionTagTimer));
+
 async function updateSelectedImage(index: number) {
   if(index < 0 || index >= fileList.value.length) return;
 
@@ -11823,11 +11753,6 @@ async function openImageViewer(
     const file = viewerFiles[targetIndex];
     return isRealFile(file) ? file : null;
   };
-  const getNextImageFilePath = (targetIndex: number) => {
-    const file = getRealFileAt(targetIndex + 1);
-    return file?.file_type === 1 ? file.file_path : '';
-  };
-
   let leftIndex = index;
   let rightIndex = -1;
 
@@ -11858,8 +11783,8 @@ async function openImageViewer(
   const rightFile = getRealFileAt(rightIndex);
   const leftFileId = leftFile ? leftFile.id : 0;
   const rightFileId = rightFile ? rightFile.id : 0;
-  const leftNextFilePath = getNextImageFilePath(leftIndex);
-  const rightNextFilePath = getNextImageFilePath(rightIndex);
+  const leftPrefetchFiles = getImageNeighbors(viewerFiles, leftIndex, selectionDirection.value);
+  const rightPrefetchFiles = getImageNeighbors(viewerFiles, rightIndex, 1);
   
   // create a new window if it doesn't exist
   let imageWindow = await WebviewWindow.getByLabel(webViewLabel);
@@ -11868,7 +11793,7 @@ async function openImageViewer(
       const forceSplitParam = compareSplitCount || 0;
       const compareModeParam = compareMode ? 1 : 0;
       imageWindow = new WebviewWindow(webViewLabel, {
-        url: `/image-viewer?fileId=${leftFileId}&fileIndex=${leftIndex}&fileCount=${fileCount}&rightFileId=${rightFileId}&rightFileIndex=${rightIndex}&forceSplitCount=${forceSplitParam}&compareFileCount=${compareMode ? fileCount : 0}&compareMode=${compareModeParam}&nextFilePath=${encodeURIComponent(leftNextFilePath)}&rightNextFilePath=${encodeURIComponent(rightNextFilePath)}`,
+        url: `/image-viewer?fileId=${leftFileId}&fileIndex=${leftIndex}&fileCount=${fileCount}&rightFileId=${rightFileId}&rightFileIndex=${rightIndex}&forceSplitCount=${forceSplitParam}&compareFileCount=${compareMode ? fileCount : 0}&compareMode=${compareModeParam}&prefetchFiles=${encodeURIComponent(JSON.stringify(leftPrefetchFiles))}&rightPrefetchFiles=${encodeURIComponent(JSON.stringify(rightPrefetchFiles))}`,
         title: 'Image Viewer',
         width: 1200,
         height: 800,
@@ -11907,14 +11832,13 @@ async function openImageViewer(
       fileId: leftFileId, 
       fileIndex: leftIndex,   // selected file index
       fileCount: fileCount, // total files length
-      nextFilePath: leftNextFilePath,
+      file: leftFile,
+      prefetchFiles: leftPrefetchFiles,
       pane: 'left',
       resetSplit: newViewer,
       compareMode: newViewer ? compareMode : undefined,
       compareFileCount: compareMode ? fileCount : undefined,
       forceSplitCount: compareSplitCount,
-      // filePath: encodedFilePath, 
-      // nextFilePath: nextEncodedFilePath,
     });
 
     if (syncFromFileListChange || rightIndex >= 0) {
@@ -11922,7 +11846,8 @@ async function openImageViewer(
         fileId: rightFileId,
         fileIndex: rightIndex,
         fileCount: fileCount,
-        nextFilePath: rightNextFilePath,
+        file: rightFile,
+        prefetchFiles: rightPrefetchFiles,
         pane: 'right',
       });
     }
@@ -11934,7 +11859,8 @@ async function openImageViewer(
           fileId: paneFile?.id || 0,
           fileIndex: paneFile ? paneIndex : -1,
           fileCount,
-          nextFilePath: paneFile ? getNextImageFilePath(paneIndex) : '',
+          file: paneFile,
+          prefetchFiles: paneFile ? getImageNeighbors(viewerFiles, paneIndex, 1) : [],
           pane,
         });
       };
@@ -11960,15 +11886,17 @@ async function syncSelectionToImageViewer(index: number) {
   if (!isImageViewerWindowOpen.value) return;
   if (imageViewerSession.value.mode !== 'normal') return;
   if (!isRealFileItem(fileList.value[index])) return;
+  const navigation = viewerNavigationRequests.get('left');
   const imageWindow = await WebviewWindow.getByLabel('imageviewer');
-  if (!imageWindow || selectedItemIndex.value !== index) return;
+  if (!imageWindow || selectedItemIndex.value !== index || viewerNavigationRequests.get('left') !== navigation) return;
   const file = fileList.value[index];
-  const next = fileList.value[index + 1];
+  if (!isRealFileItem(file) || imageViewerSession.value.mode !== 'normal') return;
   imageWindow.emit('update-img', {
     fileId: file.id,
     fileIndex: index,
     fileCount: fileList.value.length,
-    nextFilePath: next && !next.isPlaceholder && next.file_type === 1 ? next.file_path : '',
+    file,
+    prefetchFiles: getImageNeighbors(fileList.value, index, selectionDirection.value),
     pane: 'left',
   });
 }

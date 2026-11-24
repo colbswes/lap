@@ -73,6 +73,7 @@
             :class="[
               'sidebar-item sidebar-item-media group transition-colors',
               libConfig.smartAlbum.type === 'custom' && libConfig.smartAlbum.id === smartAlbum.id ? 'sidebar-item-selected' : 'sidebar-item-hover',
+              isSmartAlbumHidden(smartAlbum.id) ? 'opacity-50' : '',
             ]"
             @click="clickCustomSmartAlbum(smartAlbum)"
             @contextmenu.prevent.stop="(event: MouseEvent) => handleSmartAlbumContextMenu(smartAlbum, event)"
@@ -100,6 +101,19 @@
                 v-if="hasSmartAlbumCount(smartAlbum)"
                 class="sidebar-item-count shrink-0"
               >{{ getSmartAlbumCount(smartAlbum).toLocaleString() }}</span>
+              <button
+                type="button"
+                :title="isSmartAlbumHidden(smartAlbum.id) ? $t('album.smart_edit.show') : $t('album.smart_edit.hide')"
+                :aria-label="isSmartAlbumHidden(smartAlbum.id) ? $t('album.smart_edit.show') : $t('album.smart_edit.hide')"
+                :aria-pressed="isSmartAlbumHidden(smartAlbum.id)"
+                :class="[
+                  'p-1 rounded-box text-base-content/45 hover:text-base-content hover:bg-base-100/40 cursor-pointer shrink-0 transition-colors',
+                  isSmartAlbumHidden(smartAlbum.id) ? 'flex' : 'hidden group-hover:flex',
+                ]"
+                @click.stop="toggleSmartAlbumHidden(smartAlbum)"
+              >
+                <component :is="isSmartAlbumHidden(smartAlbum.id) ? IconHide : IconUnhide" class="w-4 h-4" />
+              </button>
               <div :class="[isSmartAlbumSelected(smartAlbum) ? '' : 'hidden group-hover:flex']">
                 <ContextMenu
                   :ref="(element: any) => { if (element) smartAlbumContextMenus[smartAlbum.id] = element }"
@@ -142,21 +156,34 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { listen } from '@tauri-apps/api/event';
+import { emit as tauriEmit, listen } from '@tauri-apps/api/event';
 import { VueDraggable, type DraggableEvent } from 'vue-draggable-plus';
 import { config, libConfig } from '@/common/config';
 import { useUIStore } from '@/stores/uiStore';
+import { useToast } from '@/common/toast';
 import { getThumbUrl, getThumbnailDataUrl, getThumbnailDataUrlInflight, isWin, setThumbnailDataUrlInflight } from '@/common/utils';
-import { getFileThumbById, getSmartQueryCountAndSum } from '@/common/api';
+import { getFileThumbById, getSmartQueryCountAndSum, getSmartQueryFileIds } from '@/common/api';
+import { isHiddenStringId } from '@/common/hiddenAlbums';
+import { buildSmartDuplicateDraft, saveFilesAsNewCollection } from '@/common/collectionActions';
 import { useLibraryChangeRefresh } from '@/composables/useLibraryChangeRefresh';
-import { IconAdd, IconClose, IconDragHandle, IconEdit, IconMore, IconError, IconOrder, IconSearch, IconTrash } from '@/common/icons';
+import { IconAdd, IconClose, IconCollection, IconCopy, IconDragHandle, IconEdit, IconHide, IconMore, IconError, IconOrder, IconSearch, IconTrash, IconUnhide } from '@/common/icons';
 import TButton from '@/components/TButton.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import SmartAlbumEdit from '@/components/SmartAlbumEdit.vue';
 import MessageBox from '@/components/MessageBox.vue';
 
+const props = defineProps<{
+  titlebar?: string;
+  initialDraft?: any;
+}>();
+
+const emit = defineEmits<{
+  (e: 'draft-consumed'): void;
+}>();
+
 const customSmartAlbums = ref<any[]>([]);
 const uiStore = useUIStore();
+const toast = useToast();
 const { t } = useI18n();
 const showEditDialog = ref(false);
 const editingSmartAlbum = ref<any | null>(null);
@@ -168,13 +195,39 @@ const smartAlbumCoverUrls = ref<Record<string, string>>({});
 const isReorderingSmartAlbums = ref(false);
 const smartAlbumPanelMenuOpen = ref(false);
 const smartAlbumSearch = ref('');
+const isSmartAlbumHidden = (smartAlbumId: string) =>
+  isHiddenStringId(libConfig.hiddenSmartAlbumIds, String(smartAlbumId || ''));
+
+const hiddenSmartAlbumCount = computed(() =>
+  customSmartAlbums.value.filter(album => isSmartAlbumHidden(album.id)).length
+);
+
+async function toggleSmartAlbumHidden(smartAlbum: any) {
+  await libConfig.toggleSmartAlbumHidden(String(smartAlbum.id));
+  await tauriEmit('library-total-refreshed', { source: 'hidden-filters' });
+}
+
+async function showAllSmartAlbums() {
+  await libConfig.showAllSmartAlbums();
+  await tauriEmit('library-total-refreshed', { source: 'hidden-filters' });
+}
+
 const canReorderSmartAlbums = computed(() => customSmartAlbums.value.length > 1 && !smartAlbumSearch.value.trim());
-const smartAlbumPanelMenuItems = computed(() => [{
-  label: t('album.smart_edit.reorder'),
-  icon: IconOrder,
-  disabled: !canReorderSmartAlbums.value,
-  action: () => { isReorderingSmartAlbums.value = !isReorderingSmartAlbums.value; },
-}]);
+const smartAlbumPanelMenuItems = computed(() => [
+  {
+    label: t('album.smart_edit.reorder'),
+    icon: IconOrder,
+    disabled: !canReorderSmartAlbums.value,
+    action: () => { isReorderingSmartAlbums.value = !isReorderingSmartAlbums.value; },
+  },
+  ...(hiddenSmartAlbumCount.value > 0 ? [
+    {
+      label: t('album.smart_edit.show_all'),
+      icon: IconUnhide,
+      action: () => { void showAllSmartAlbums(); },
+    },
+  ] : []),
+]);
 const isSmartAlbumSearchFocused = ref(false);
 let smartAlbumCoverLoadToken = 0;
 let smartCountRequest = 0;
@@ -211,6 +264,7 @@ async function refreshSmartAlbumCounts() {
     const query = album.query;
     try {
       const params = {
+        smartAlbumId: String(album.id),
         version: Number(query.version || 1),
         match: query.match === 'any' ? 'any' : 'all',
         rules: query.rules,
@@ -301,27 +355,102 @@ function clickAddSmartAlbum() {
   showEditDialog.value = true;
 }
 
+function openNewSmartAlbumDraft(draft: any) {
+  if (!draft) return;
+  editingSmartAlbum.value = draft;
+  showEditDialog.value = true;
+  emit('draft-consumed');
+}
+
+defineExpose({ openNewSmartAlbumDraft });
+
+watch(
+  () => props.initialDraft,
+  (draft) => {
+    if (draft) openNewSmartAlbumDraft(draft);
+  },
+  { immediate: true },
+);
+
+async function saveSmartAlbumAsCollection(smartAlbum: any) {
+  const query = smartAlbum?.query;
+  const rules = Array.isArray(query?.rules) ? query.rules : [];
+  if (!rules.length) return;
+  try {
+    const fileIds = await getSmartQueryFileIds({
+      smartAlbumId: String(smartAlbum.id),
+      version: Number(query.version || 1),
+      match: query.match === 'any' ? 'any' : 'all',
+      rules,
+      favoritesOnly: false,
+      fileType: 0,
+      sortType: Number(smartAlbum?.sort?.type ?? 0),
+      sortOrder: Number(smartAlbum?.sort?.order ?? 1),
+      randomSeed: 0,
+      folderSort: Number(config.settings.folderSort || 0),
+      calendarSort: Number(config.settings.calendarSort || 0),
+      categorySort: 0,
+      groupBy: 0,
+    });
+    const created = await saveFilesAsNewCollection(smartAlbum.name, fileIds || []);
+    if (created) {
+      toast.success(t('collection.saved_as_collection_toast', {
+        name: created.collection.name,
+        count: created.addedCount.toLocaleString(),
+      }));
+    }
+  } catch (error) {
+    console.error('Failed to save smart collection as collection:', error);
+  }
+}
+
+function duplicateSmartAlbum(smartAlbum: any) {
+  openNewSmartAlbumDraft(buildSmartDuplicateDraft(smartAlbum, t('album.smart_edit.copy_suffix')));
+}
+
 function handleSmartAlbumContextMenu(smartAlbum: any, event: MouseEvent) {
   clickCustomSmartAlbum(smartAlbum);
   smartAlbumContextMenus.value[smartAlbum.id]?.open?.(event.clientX, event.clientY);
 }
 
-const getMoreMenuItems = (smartAlbum: any) => [
-  {
-    label: t('album.smart_edit.title_edit'),
-    icon: IconEdit,
-    action: () => clickEditSmartAlbum(smartAlbum),
-  },
-  {
-    label: "-",
-    action: null
-  },
-  {
-    label: t('album.smart_edit.delete'),
-    icon: IconTrash,
-    action: () => clickDeleteSmartAlbum(smartAlbum),
-  },
-];
+const getMoreMenuItems = (smartAlbum: any) => {
+  const hidden = isSmartAlbumHidden(smartAlbum.id);
+  return [
+    {
+      label: t('album.smart_edit.title_edit'),
+      icon: IconEdit,
+      action: () => clickEditSmartAlbum(smartAlbum),
+    },
+    {
+      label: hidden ? t('album.smart_edit.show') : t('album.smart_edit.hide'),
+      icon: hidden ? IconUnhide : IconHide,
+      action: () => { void toggleSmartAlbumHidden(smartAlbum); },
+    },
+    {
+      label: "-",
+      action: null
+    },
+    {
+      label: t('collection.save_as_collection'),
+      icon: IconCollection,
+      action: () => { void saveSmartAlbumAsCollection(smartAlbum); },
+    },
+    {
+      label: t('album.smart_edit.duplicate'),
+      icon: IconCopy,
+      action: () => duplicateSmartAlbum(smartAlbum),
+    },
+    {
+      label: "-",
+      action: null
+    },
+    {
+      label: t('album.smart_edit.delete'),
+      icon: IconTrash,
+      action: () => clickDeleteSmartAlbum(smartAlbum),
+    },
+  ];
+};
 
 function handleReorderOutsidePointerDown(event: PointerEvent) {
   if (event.button !== 0 || !isReorderingSmartAlbums.value || smartAlbumPanelMenuOpen.value) return;
@@ -370,7 +499,7 @@ function closeEditDialog() {
   editingSmartAlbum.value = null;
 }
 
-function saveSmartAlbum(smartAlbum: any) {
+async function saveSmartAlbum(smartAlbum: any) {
   const albums = [...(libConfig.smartAlbums || [])];
   const index = albums.findIndex((item: any) => item.id === smartAlbum.id);
   if (index >= 0) {
@@ -382,6 +511,10 @@ function saveSmartAlbum(smartAlbum: any) {
   libConfig.smartAlbum.type = 'custom';
   libConfig.smartAlbum.id = smartAlbum.id;
   closeEditDialog();
+  if (isSmartAlbumHidden(smartAlbum.id)) {
+    await libConfig.save();
+    await tauriEmit('library-total-refreshed', { source: 'hidden-filters' });
+  }
 }
 
 function clickDeleteSmartAlbum(smartAlbum: any) {
@@ -394,10 +527,15 @@ function closeDeleteDialog() {
   deletingSmartAlbum.value = null;
 }
 
-function confirmDeleteSmartAlbum() {
+async function confirmDeleteSmartAlbum() {
   const smartAlbum = deletingSmartAlbum.value;
   if (!smartAlbum) return;
+  const wasHidden = isSmartAlbumHidden(smartAlbum.id);
   libConfig.smartAlbums = (libConfig.smartAlbums || []).filter((item: any) => item.id !== smartAlbum.id);
+  if (wasHidden) {
+    await libConfig.removeHiddenSmartAlbum(String(smartAlbum.id));
+    await tauriEmit('library-total-refreshed', { source: 'hidden-filters' });
+  }
   if (libConfig.smartAlbum.type === 'custom' && libConfig.smartAlbum.id === smartAlbum.id) {
     libConfig.smartAlbum.type = 'system';
     libConfig.smartAlbum.id = null;

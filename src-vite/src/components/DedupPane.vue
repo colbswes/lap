@@ -250,35 +250,6 @@
                     >
                       {{ $t('info_panel.dedup.keep_label') }}
                     </PanelActionButton>
-                    <div class="flex items-center gap-0.5" @click.stop>
-                      <button
-                        class="btn btn-ghost btn-xs min-h-0 h-5 w-5 p-0"
-                        :class="getSimilarCullingIconClass(item.file, 1)"
-                        :title="$t('culling.picks')"
-                        :aria-label="$t('culling.picks')"
-                        @click.stop="setSimilarCullingFlag(item, 1)"
-                      >
-                        <IconFlagFilled class="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        class="btn btn-ghost btn-xs min-h-0 h-5 w-5 p-0"
-                        :class="getSimilarCullingIconClass(item.file, 2)"
-                        :title="$t('culling.rejected')"
-                        :aria-label="$t('culling.rejected')"
-                        @click.stop="setSimilarCullingFlag(item, 2)"
-                      >
-                        <IconFlagOff class="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        class="btn btn-ghost btn-xs min-h-0 h-5 w-5 p-0"
-                        :class="getSimilarCullingIconClass(item.file, 0)"
-                        :title="$t('culling.unreviewed')"
-                        :aria-label="$t('culling.unreviewed')"
-                        @click.stop="setSimilarCullingFlag(item, 0)"
-                      >
-                        <IconFlag class="w-3.5 h-3.5" />
-                      </button>
-                    </div>
                   </div>
                 </div>
               </div>
@@ -545,7 +516,7 @@ import DedupSettings from './DedupSettings.vue';
 import TButton from '@/components/TButton.vue';
 import PanelActionButton from '@/components/PanelActionButton.vue';
 import MessageBox from '@/components/MessageBox.vue';
-import { IconAdjustments, IconSelectAll, IconExclamation, IconDeselect, IconClose, IconFlag, IconFlagFilled, IconFlagOff, IconLivePhoto, IconShield, IconRefresh, IconSplitOn, IconSplitOn4, IconTrash } from '@/common/icons';
+import { IconAdjustments, IconSelectAll, IconExclamation, IconDeselect, IconClose, IconLivePhoto, IconShield, IconRefresh, IconSplitOn, IconSplitOn4, IconTrash } from '@/common/icons';
 import {
   dedupStartScan,
   dedupCancelScan,
@@ -568,7 +539,6 @@ import {
   similarSetKeep,
   similarHasScan,
   listenSimilarScanProgress,
-  setFileCullingFlag,
 } from '@/common/api';
 import { config, libConfig } from '@/common/config';
 import { isOriginalUnavailable, setFileAccessibility } from '@/common/availability';
@@ -623,7 +593,6 @@ const emit = defineEmits<{
   'trash-all-duplicates': [];
   'trash-selected-similar': [groupId: string, fileIds: number[]];
   'compare-selected-photos': [files: any[]];
-  'culling-status-updated': [fileId: number, cullingFlag: number];
   'dedup-status-updated': [statuses: Record<number, 'keep' | 'dup'>];
 }>();
 
@@ -667,7 +636,6 @@ const canRequestSimilarAnalysis = computed(() =>
   && !noEligibleSimilarPhotos.value
 );
 const unlistenSimilarProgress = ref<null | (() => void)>(null);
-const unlistenCullingStatus = ref<null | (() => void)>(null);
 const dedupScanError = ref(false);
 const unlistenDedupProgress = ref<null | (() => void)>(null);
 const queuedDedupScan = ref(false);
@@ -807,31 +775,6 @@ function selectSimilarDuplicatesByDefault(group: any) {
         .map((item: any) => Number(item.file_id)),
     ),
   );
-}
-
-function getSimilarCullingIconClass(file: any, cullingFlag: number) {
-  const current = Number(file?.culling_flag ?? file?.cullingFlag ?? 0);
-  if (current === cullingFlag) return cullingFlag === 2 ? 'text-error' : 'text-primary';
-  return cullingFlag === 2
-    ? 'text-base-content/30 hover:text-error/70'
-    : 'text-base-content/30 hover:text-primary/70';
-}
-
-async function setSimilarCullingFlag(item: any, cullingFlag: number) {
-  const file = item?.file;
-  const fileId = Number(file?.id || item?.file_id || 0);
-  if (!file || fileId <= 0) return;
-  const normalized = Math.max(0, Math.min(2, cullingFlag));
-  const previous = Number(file.culling_flag ?? file.cullingFlag ?? 0);
-  file.culling_flag = normalized;
-  file.cullingFlag = normalized;
-  const result = await setFileCullingFlag(fileId, normalized);
-  if (result === null) {
-    file.culling_flag = previous;
-    file.cullingFlag = previous;
-    return;
-  }
-  emit('culling-status-updated', fileId, normalized);
 }
 
 function toggleSimilarSelected(groupId: number, fileId: number) {
@@ -1845,16 +1788,6 @@ onMounted(async () => {
       similarLoading.value = false;
     }
   });
-  unlistenCullingStatus.value = await listen('culling-status-updated', (event) => {
-    const payload = event.payload as { fileIds?: number[]; cullingFlag?: number } | null;
-    if (!payload?.fileIds || payload.cullingFlag === undefined) return;
-    const fileIds = new Set(payload.fileIds.map(Number));
-    for (const item of activeSimilarGroup.value?.items || []) {
-      if (!fileIds.has(Number(item.file_id)) || !item.file) continue;
-      item.file.culling_flag = payload.cullingFlag;
-      item.file.cullingFlag = payload.cullingFlag;
-    }
-  });
 
   if (!props.dedupScanKey) {
     isDedupLoading.value = false;
@@ -1879,7 +1812,6 @@ onUnmounted(() => {
     unlistenDedupProgress.value = null;
   }
   if (unlistenSimilarProgress.value) unlistenSimilarProgress.value();
-  if (unlistenCullingStatus.value) unlistenCullingStatus.value();
 });
 
 defineExpose({

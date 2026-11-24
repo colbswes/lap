@@ -62,16 +62,28 @@ const loaderSource = ts.transpile(imageSource.slice(imageSource.indexOf('async f
 test('a superseded RAW response cannot replace the latest source or leak a blob URL', async () => {
   const requests = [];
   const urls = new Set();
-  const load = new Function('fetch', 'props', 'getPreviewUrl', 'appendRawDisplayParams', 'requestedRawOptions', 'Image', 'rawObjectUrls', `let rawAbortController = null; const rawViewerId = 'test-viewer'; ${loaderSource}; return loadRawImage;`)(
-    (_url, options) => new Promise(resolve => requests.push({ resolve, signal: options.signal })),
-    { fileId: 42, fileVersion: 1 }, () => 'http://preview.localhost/test/42', appendRawDisplayParams,
+  const urlApi = class extends URL {
+    static createObjectURL(blob) {
+      const src = URL.createObjectURL(blob);
+      urls.add(src);
+      return src;
+    }
+    static revokeObjectURL(src) {
+      urls.delete(src);
+      URL.revokeObjectURL(src);
+    }
+  };
+  const load = new Function('fetch', 'props', 'previewRequestUrl', 'appendRawDisplayParams', 'requestedRawOptions', 'Image', 'URL', `let rawAbortController = null; const rawViewerId = 'test-viewer'; ${loaderSource}; return loadRawImage;`)(
+    (url, options) => new Promise(resolve => requests.push({ url, resolve, signal: options.signal })),
+    { fileId: 42, fileVersion: 1 }, () => new URL('http://preview.localhost/test/42'), appendRawDisplayParams,
     { value: { mode: 'rendered', autoBright: true, preferPair: false } },
-    class { naturalWidth = 100; naturalHeight = 100; async decode() {} }, urls,
+    class { naturalWidth = 100; naturalHeight = 100; async decode() {} }, urlApi,
   );
   const older = load('photo.dng');
   const rejected = assert.rejects(older, /cancelled/);
   const newer = load('photo.dng');
   assert.equal(requests[0].signal.aborted, true);
+  assert.equal(new URL(requests[1].url).searchParams.get('rawViewerId'), 'test-viewer');
   const response = () => ({ ok: true, blob: async () => new Blob(['image']), headers: new Headers({ 'X-Raw-Source': 'brightened', 'X-Raw-Embedded-Unavailable': 'true', 'X-Raw-Pair': 'JPEG' }) });
   requests[1].resolve(response());
   const latest = await newer;
@@ -84,7 +96,7 @@ test('a superseded RAW response cannot replace the latest source or leak a blob 
 });
 
 const utilsSource = fs.readFileSync(new URL('../src/common/utils.ts', import.meta.url), 'utf8');
-const previewUrlSource = ts.transpile(utilsSource.slice(utilsSource.indexOf('export function getPreviewUrl('), utilsSource.indexOf('export function shouldUseBackendPreview(')).replace('export ', ''), { target: ts.ScriptTarget.ES2022 });
+const previewUrlSource = ts.transpile(utilsSource.slice(utilsSource.indexOf('export function getPreviewUrl('), utilsSource.indexOf('export function shouldUseBackendPreview(')).replaceAll('export ', ''), { target: ts.ScriptTarget.ES2022 });
 
 test('editor URL selects the export pipeline regardless of RAW browsing settings', () => {
   const getPreviewUrl = new Function('isWin', '_thumbLibraryId', 'useUIStore', 'appendRawDisplayParams', previewUrlSource + '; return getPreviewUrl;')(

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import ts from 'typescript';
-const source = fs.readFileSync(new URL('../src/common/nativeJxl.ts', import.meta.url), 'utf8');
+const source = fs.readFileSync(new URL('../src/common/nativeJxl.ts', import.meta.url), 'utf8').replace(/^import type .*;$/m, '');
 function fixture() {
   const js = ts.transpile(source.replace(/export /g, ''), { target: ts.ScriptTarget.ES2022 });
   return new Function(`${js}; return loadNativeJxl;`)();
@@ -45,32 +45,21 @@ test('a decode rejection after load falls back to a decoded preview', async () =
 });
 
 
-test('a late thumbnail cannot replace a completed native or fallback image', async () => {
-  const imageSource = fs.readFileSync(new URL('../src/components/Image.vue', import.meta.url), 'utf8');
-  const start = imageSource.indexOf('watch(displayThumbnailSrc, async');
-  const end = imageSource.indexOf('\n});', start) + 4;
-  const js = ts.transpile(imageSource.slice(start, end), { target: ts.ScriptTarget.ES2022 });
-  for (const completed of ['original', 'preview']) {
-    const src = { value: ['thumbnail', ''] };
-    let finish;
-    let callback;
-    const globals = {
-      watch: (_source, fn) => { callback = fn; }, displayThumbnailSrc: {},
-      props: { originalUnavailable: false, fileType: 1, filePath: 'test.jxl', fileId: 1, fileVersion: 1 },
-      offlinePreview: { value: false }, currentLoadingId: { value: 1 },
-      shouldUseBackendPreview: () => true, getFfmpegBackedPreviewExtensions: async () => new Set(),
-      getFileExtension: () => 'jxl', activeImage: { value: 0 }, imageSrc: src,
-      getPreviewUrl: () => 'preview', getAssetSrc: () => 'original',
-      loadPlaceholderResource: () => new Promise(resolve => { finish = resolve; }),
-      getCompatibleLayout: () => { throw Error('must not downgrade'); },
-      console: { error: error => { throw error; } },
-    };
-    new Function(...Object.keys(globals), js)(...Object.values(globals));
-    const pending = callback('new-thumbnail');
-    await Promise.resolve();
-    src.value[0] = completed;
-    finish({ naturalWidth: 150, naturalHeight: 100 });
-    await pending;
-    assert.equal(src.value[0], completed);
-  }
+test('cancelling a native decode does not fall back or mark the file as unsupported', async () => {
+  const load = fixture();
+  const controller = new AbortController();
+  await assert.rejects(load('original', () => assert.fail('unexpected fallback'), async () => {
+    controller.abort();
+    throw controller.signal.reason;
+  }, controller.signal), { name: 'AbortError' });
+  assert.deepEqual(await load('original', () => assert.fail('unexpected fallback'), async src => image(src)), image('original'));
+});
+
+test('late thumbnail load events cannot change the completed image layout', () => {
+  const source = fs.readFileSync(new URL('../src/components/Image.vue', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function updateThumbnailLayout('), source.indexOf('async function showOfflinePreview('));
+  const fixture = new Function('placeholderLoadId', 'currentLoadingId', 'activeImage', 'getCompatibleLayout',
+    ts.transpile(code) + '; return updateThumbnailLayout;');
+  const update = fixture(-1, { value: 2 }, { value: 0 }, () => assert.fail('completed image was replaced'));
+  update(0, { target: { naturalWidth: 150, naturalHeight: 100 } });
 });

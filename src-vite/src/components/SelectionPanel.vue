@@ -97,18 +97,12 @@
         <div class="text-[10px] uppercase tracking-widest font-bold text-base-content/30">
           {{ $t('info_panel.organize') }}
         </div>
-        <FavoriteRatingControl
+        <FavoriteControl
           :favorite="multiSelectFavorite"
-          :rating="multiSelectRating"
-          :culling="multiSelectCulling"
           :disabled="selectedCount === 0"
           :favorite-label="$t('info_panel.favorite_all')"
           :unfavorite-label="$t('info_panel.unfavorite_all')"
-          label-class="text-base-content/30"
-          inactive-rating-class="text-base-content/70"
           @favorite="(favorite) => $emit(favorite ? 'favoriteAll' : 'unfavoriteAll')"
-          @rating="(rating) => $emit('setRatingAll', rating)"
-          @culling="(cullingFlag) => $emit('setCullingAll', cullingFlag)"
         />
         <div class="flex flex-wrap items-center gap-1">
           <PanelActionButton
@@ -124,6 +118,14 @@
             @click="$emit('addToCollection')"
           >
             {{ $t('menu.meta.collection') }}
+          </PanelActionButton>
+          <PanelActionButton
+            v-if="config.settings.face.enabled"
+            :icon="IconPerson"
+            :disabled="selectedCount === 0"
+            @click="$emit('addPersonAll')"
+          >
+            {{ $t('menu.person.add_person_or_pet') }}
           </PanelActionButton>
         </div>
       </div>
@@ -223,9 +225,10 @@ import {
   IconTrash,
   IconRename,
   IconCollection,
+  IconPerson,
 } from '@/common/icons';
 import TButton from '@/components/TButton.vue';
-import FavoriteRatingControl from '@/components/FavoriteRatingControl.vue';
+import FavoriteControl from '@/components/FavoriteControl.vue';
 import PanelActionButton from '@/components/PanelActionButton.vue';
 
 const props = defineProps({
@@ -270,10 +273,9 @@ const emit = defineEmits([
   'rename',
   'favoriteAll',
   'unfavoriteAll',
-  'setRatingAll',
-  'setCullingAll',
   'tagAll',
   'addToCollection',
+  'addPersonAll',
   'copyToClipboard',
   'removeFromCollection',
   'unselectFile',
@@ -335,25 +337,11 @@ const multiSelectTypeBreakdown = computed(() => {
   return parts.join(' · ');
 });
 
-const multiSelectRating = computed(() => {
-  if (!props.selectedFiles.length) return 0;
-  const ratings = props.selectedFiles.map((f: any) => Number(f.rating || 0));
-  const first = ratings[0];
-  return ratings.every((rating: number) => rating === first) ? first : null;
-});
-
 const multiSelectFavorite = computed(() => {
   if (!props.selectedFiles.length) return false;
   const favorites = props.selectedFiles.map((f: any) => Boolean(f.is_favorite));
   const first = favorites[0];
   return favorites.every((favorite: boolean) => favorite === first) ? first : null;
-});
-
-const multiSelectCulling = computed(() => {
-  if (!props.selectedFiles.length) return 0;
-  const cullingFlags = props.selectedFiles.map((file: any) => Number(file.culling_flag ?? file.cullingFlag ?? 0));
-  const first = cullingFlags[0];
-  return cullingFlags.every((cullingFlag: number) => cullingFlag === first) ? first : null;
 });
 
 const visibleMoreActions = computed(() =>

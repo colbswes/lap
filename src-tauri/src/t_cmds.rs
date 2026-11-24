@@ -271,11 +271,8 @@ fn gstreamer_element_missing(exit_code: Option<i32>, stderr: &[u8]) -> bool {
 
 /// set last selected item index
 #[tauri::command]
-pub fn set_last_selected_item_index(index: i64) -> Result<(), String> {
-    t_config::update_app_config(|config| {
-        config.last_selected_item_index = index;
-        Ok(())
-    })
+pub async fn set_last_selected_item_index(index: i64) -> Result<(), String> {
+    t_config::persist_last_selected_item_index(index).await
 }
 
 #[tauri::command]
@@ -493,13 +490,13 @@ pub fn save_library_state(id: &str, state: LibraryState) -> Result<(), String> {
     t_config::save_library_state(id, state)
 }
 
-/// update and persist a library's collection scope
+/// update and persist a library's hidden filters (folders, collections, tags, people/pets, smart collections)
 #[tauri::command]
-pub fn set_collection_scope(
+pub fn set_hidden_filters(
     id: &str,
-    scope: t_config::CollectionScopeState,
-) -> Result<t_config::CollectionScopeState, String> {
-    t_config::set_collection_scope(id, scope)
+    filters: t_config::HiddenFiltersPayload,
+) -> Result<t_config::HiddenFiltersPayload, String> {
+    t_config::set_hidden_filters(id, filters)
 }
 
 #[tauri::command]
@@ -3960,6 +3957,26 @@ pub fn edit_file_metadata(
     })
 }
 
+/// Set (or clear, with both coordinates empty) the location of files.
+#[tauri::command]
+pub fn set_file_location(
+    library_id: String,
+    file_ids: Vec<i64>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+) -> Result<crate::t_sqlite::FileLocation, String> {
+    with_current_library(&library_id, || {
+        let mut conn = crate::t_sqlite::open_conn()?;
+        AFile::set_location(&mut conn, &file_ids, latitude, longitude)
+    })
+}
+
+/// Search the bundled place list by name for the location editor.
+#[tauri::command]
+pub fn search_places(query: String, limit: Option<usize>) -> Vec<&'static t_utils::GeoRecord> {
+    t_utils::GEOCODER.search_name(&query, limit.unwrap_or(20).min(100))
+}
+
 /// Remove unreferenced thumbnail cache files. When `library_id` is provided,
 /// cleans that library's cache; otherwise falls back to the current library.
 /// Runs on a blocking thread because it walks the cache directory and issues
@@ -4543,29 +4560,11 @@ pub fn set_file_favorite(file_id: i64, is_favorite: bool) -> Result<usize, Strin
         .map_err(|e| format!("Error while setting file favorite: {}", e))
 }
 
-/// set a file's rating (0-5)
-#[tauri::command]
-pub fn set_file_rating(file_id: i64, rating: i32) -> Result<usize, String> {
-    let clamped = rating.clamp(0, 5);
-    update_file_metadata_column(file_id, "rating", &clamped)
-        .map_err(|e| format!("Error while setting file rating: {}", e))
-}
-
-/// Set a file's culling status (0: unreviewed, 1: pick, 2: reject).
-#[tauri::command]
-pub fn set_file_culling_flag(file_id: i64, culling_flag: i32) -> Result<usize, String> {
-    let clamped = culling_flag.clamp(0, 2);
-    update_file_metadata_column(file_id, "culling_flag", &clamped)
-        .map_err(|e| format!("Error while setting file culling flag: {}", e))
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchFileMetadataUpdate {
     pub file_ids: Vec<i64>,
     pub is_favorite: Option<bool>,
-    pub rating: Option<i32>,
-    pub culling_flag: Option<i32>,
     pub rotate_delta: Option<i32>,
     pub comment: Option<String>,
 }
@@ -4575,8 +4574,6 @@ pub fn batch_update_file_metadata(params: BatchFileMetadataUpdate) -> Result<usi
     AFile::batch_update_metadata(
         &params.file_ids,
         params.is_favorite,
-        params.rating,
-        params.culling_flag,
         params.rotate_delta,
         params.comment.as_deref(),
     )
@@ -5115,11 +5112,17 @@ pub async fn assign_face_to_person(
     let switching_kind = target_kind != current_kind;
     if switching_kind {
         let new_embedding = if target_kind == t_sqlite::PersonKind::Pet {
-            if let Some((file_id, file_path, width, height, (bx, by, bw, bh))) =
+            if let Some((file_id, file_path, width, height, (bx, by, bw, bh), rotate)) =
                 t_sqlite::Face::file_and_bbox_with_conn(&conn, face_id)?
             {
-                let norm_box = (bx / width, by / height, bw / width, bh / height);
-                if let Some(image_bytes) = t_face::decode_image_for_faces(file_id, &file_path) {
+                let norm_box = t_face::rotate_box(
+                    (bx / width, by / height, bw / width, bh / height),
+                    (1.0, 1.0),
+                    t_face::quarter_turns(rotate),
+                );
+                if let Some(image_bytes) =
+                    t_face::decode_image_for_faces_rotated(file_id, &file_path, rotate)
+                {
                     let mut engine = face_state.0.lock().map_err(|_| "Face engine lock poisoned".to_string())?;
                     if !engine.is_loaded() {
                         let _ = engine.load_models(&app_handle);
@@ -5246,7 +5249,7 @@ pub struct ScanFileFacesResult {
     pub total: usize,
 }
 
-/// Manually add a person or pet tag to a photo, with an optional drawn bounding box
+/// Manually add a person or pet tag to a photo or video, with an optional drawn bounding box
 /// (normalized 0..1 coordinates). Confirmed immediately; embeds pets (DINOv2) and
 /// landmarked human faces (MobileFaceNet) so manual tags also teach recognition.
 #[tauri::command]
@@ -5262,11 +5265,11 @@ pub async fn add_manual_face(
     let face_state = (*face_state).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut conn = t_sqlite::open_conn()?;
-        let (file_path, width, height, file_type) =
+        let (file_path, width, height, file_type, rotate) =
             t_sqlite::Face::file_info_for_scan_with_conn(&conn, file_id)?
                 .ok_or_else(|| format!("File {} not found", file_id))?;
-        if file_type != 1 && file_type != 3 {
-            return Err("Manual face/pet tags are only supported for image files".to_string());
+        if !matches!(file_type, 1 | 2 | 3) {
+            return Err("Manual face/pet tags are only supported for image and video files".to_string());
         }
 
         let target_kind = match (person_id, kind.as_deref()) {
@@ -5301,7 +5304,8 @@ pub async fn add_manual_face(
             })
             .to_string();
 
-            let emb = if let Some(image_bytes) = t_face::decode_image_for_faces(file_id, &file_path)
+            let emb = if let Some(image_bytes) =
+                t_face::decode_image_for_faces_rotated(file_id, &file_path, rotate)
             {
                 let mut engine = face_state
                     .0
@@ -5310,7 +5314,8 @@ pub async fn add_manual_face(
                 if !engine.is_loaded() {
                     let _ = engine.load_models(&app_handle);
                 }
-                let norm = (nx, ny, nw, nh);
+                // The decode is turned like the photo on screen; turn the box with it.
+                let norm = t_face::rotate_box((nx, ny, nw, nh), (1.0, 1.0), t_face::quarter_turns(rotate));
                 match target_kind {
                     t_sqlite::PersonKind::Pet => engine.embed_pet_box_from_bytes(&image_bytes, norm).ok(),
                     t_sqlite::PersonKind::Person => engine
@@ -5355,6 +5360,68 @@ pub async fn add_manual_face(
     .map_err(|e| format!("Manual face task failed: {e}"))?
 }
 
+/// Bulk-add a manual person or pet tag to multiple image or video files.
+/// Existing tags for the same person on any selected file are confirmed without overwriting
+/// their bounding box or embedding.
+#[tauri::command]
+pub async fn add_manual_faces_batch(
+    file_ids: Vec<i64>,
+    person_id: Option<i64>,
+    name: Option<String>,
+    kind: Option<String>,
+) -> Result<AssignFaceResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = t_sqlite::open_conn()?;
+        let mut seen = std::collections::HashSet::new();
+        let mut valid_ids = Vec::with_capacity(file_ids.len());
+        for file_id in file_ids {
+            if file_id <= 0 || !seen.insert(file_id) {
+                continue;
+            }
+            if let Some((_, _, _, file_type, _)) =
+                t_sqlite::Face::file_info_for_scan_with_conn(&conn, file_id)?
+            {
+                if matches!(file_type, 1 | 2 | 3) {
+                    valid_ids.push(file_id);
+                }
+            }
+        }
+        if valid_ids.is_empty() {
+            return Err("Manual face/pet tags are only supported for image and video files".to_string());
+        }
+
+        let target_kind = match (person_id, kind.as_deref()) {
+            (Some(id), _) => Person::kind_of(id)?,
+            (None, k) => t_sqlite::PersonKind::parse(k),
+        };
+        let trimmed_name = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let existing_target = match (person_id, trimmed_name) {
+            (Some(id), _) => Some(id),
+            (None, Some(n)) => Person::find_by_name(n, None, Some(target_kind))?.map(|p| p.id),
+            (None, None) => return Err("A person id or name is required".to_string()),
+        };
+
+        let target_id = match existing_target {
+            Some(id) => id,
+            None => Person::create_of_kind(trimmed_name, target_kind)?,
+        };
+
+        let added = t_sqlite::Face::add_manual_batch_with_conn(
+            &mut conn,
+            &valid_ids,
+            target_kind.face_kind(),
+            target_id,
+        )?;
+        refresh_person_thumbnails(&[Some(target_id)]);
+        Ok(AssignFaceResult {
+            person_id: target_id,
+            added,
+        })
+    })
+    .await
+    .map_err(|e| format!("Batch manual face task failed: {e}"))?
+}
+
 /// Delete a face/pet detection or manual tag. Returns its previous person id if any.
 #[tauri::command]
 pub async fn delete_face(face_id: i64) -> Result<Option<i64>, String> {
@@ -5365,7 +5432,7 @@ pub async fn delete_face(face_id: i64) -> Result<Option<i64>, String> {
     Ok(old_person)
 }
 
-/// Run face and pet detection on a single photo on demand, preserving existing tags and
+/// Run face and pet detection on a single photo or video on demand, preserving existing tags and
 /// matching newly found detections against known people and pets right away.
 #[tauri::command]
 pub async fn scan_file_faces(
@@ -5376,17 +5443,19 @@ pub async fn scan_file_faces(
     let face_state = (*face_state).clone();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = t_sqlite::open_conn()?;
-        let (file_path, width, height, file_type) =
+        let (file_path, width, height, file_type, rotate) =
             t_sqlite::Face::file_info_for_scan_with_conn(&conn, file_id)?
                 .ok_or_else(|| format!("File {} not found", file_id))?;
-        if file_type != 1 && file_type != 3 {
-            return Err("Face and pet scanning is only supported for image files".to_string());
+        if !matches!(file_type, 1 | 2 | 3) {
+            return Err("Face and pet scanning is only supported for image and video files".to_string());
         }
 
         let image_bytes = t_face::decode_image_for_faces(file_id, &file_path)
-            .ok_or_else(|| "Unable to decode photo for scanning".to_string())?;
+            .ok_or_else(|| "Unable to decode media for scanning".to_string())?;
 
-        let (mut detections, (proc_w, proc_h)) = {
+        // An explicit per-photo scan also tries sideways orientations when the photo's
+        // own orientation finds no faces (e.g. a wrong camera orientation tag).
+        let mut detections = {
             let mut engine = face_state
                 .0
                 .lock()
@@ -5394,19 +5463,14 @@ pub async fn scan_file_faces(
             if !engine.is_loaded() {
                 engine.load_models(&app_handle)?;
             }
-            engine.detect_all_from_bytes(&image_bytes)?
+            t_face::detect_in_upright_frame(
+                &mut engine,
+                &image_bytes,
+                (width.max(0) as u32, height.max(0) as u32),
+                rotate,
+                true,
+            )?
         };
-
-        let target_w = if width > 0 { width as f32 } else { proc_w as f32 };
-        let target_h = if height > 0 { height as f32 } else { proc_h as f32 };
-        let scale_x = target_w / proc_w as f32;
-        let scale_y = target_h / proc_h as f32;
-        for det in &mut detections {
-            det.bbox.x *= scale_x;
-            det.bbox.y *= scale_y;
-            det.bbox.width *= scale_x;
-            det.bbox.height *= scale_y;
-        }
 
         let existing = t_sqlite::Face::bboxes_for_file_with_conn(&conn, file_id)?;
         let dismissed = t_sqlite::Face::dismissed_bboxes_for_file_with_conn(&conn, file_id)?;
@@ -5740,8 +5804,8 @@ mod raw_display_library_tests {
 }
 
 #[cfg(test)]
-mod culling_persistence_tests {
-    use super::{set_file_culling_flag, set_file_rating, set_file_favorite};
+mod favorite_persistence_tests {
+    use super::{BatchFileMetadataUpdate, set_file_favorite};
     use crate::t_sqlite::{TEST_DB_PATH, clear_conn_pool, open_conn};
 
     struct TestDbDir(std::path::PathBuf);
@@ -5754,12 +5818,12 @@ mod culling_persistence_tests {
     }
 
     #[test]
-    fn set_file_culling_flag_rejects_missing_id_and_persists_valid_updates() {
+    fn set_file_favorite_rejects_missing_id_and_persists_valid_updates() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = TestDbDir(std::env::temp_dir().join(format!("lap-culling-test-{unique}")));
+        let dir = TestDbDir(std::env::temp_dir().join(format!("lap-favorite-test-{unique}")));
         std::fs::create_dir(&dir.0).unwrap();
         let db_path = dir.0.join("catalog.db");
         TEST_DB_PATH.with(|path| path.replace(Some(db_path.to_str().unwrap().into())));
@@ -5767,29 +5831,30 @@ mod culling_persistence_tests {
         {
             let conn = open_conn().unwrap();
             conn.execute_batch(
-                "CREATE TABLE afiles(id INTEGER PRIMARY KEY, culling_flag INTEGER NOT NULL DEFAULT 0, rating INTEGER NOT NULL DEFAULT 0, is_favorite INTEGER NOT NULL DEFAULT 0);
-                 INSERT INTO afiles(id, culling_flag) VALUES (42, 0);",
+                "CREATE TABLE afiles(id INTEGER PRIMARY KEY, is_favorite INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO afiles(id) VALUES (42);",
             )
             .unwrap();
         }
 
-        assert!(set_file_culling_flag(999, 2).is_err());
-        assert!(set_file_rating(999, 5).is_err());
         assert!(set_file_favorite(999, true).is_err());
-        assert_eq!(set_file_rating(42, 99).unwrap(), 1);
         assert_eq!(set_file_favorite(42, true).unwrap(), 1);
-        assert_eq!(set_file_culling_flag(42, 2).unwrap(), 1);
-        assert_eq!(set_file_culling_flag(42, 99).unwrap(), 1);
 
         let verify_conn = rusqlite::Connection::open(&db_path).unwrap();
-        let persisted: i32 = verify_conn
-            .query_row("SELECT culling_flag FROM afiles WHERE id = 42", [], |row| row.get(0))
+        let favorite: bool = verify_conn
+            .query_row("SELECT is_favorite FROM afiles WHERE id = 42", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(persisted, 2);
-        let (rating, favorite): (i32, bool) = verify_conn
-            .query_row("SELECT rating, is_favorite FROM afiles WHERE id = 42", [], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap();
-        assert_eq!(rating, 5);
         assert!(favorite);
+    }
+
+    #[test]
+    fn batch_update_ignores_removed_rating_and_culling_fields() {
+        let params: BatchFileMetadataUpdate = serde_json::from_value(serde_json::json!({
+            "fileIds": [1, 2], "isFavorite": true, "rating": 5, "cullingFlag": 2
+        }))
+        .unwrap();
+        assert_eq!(params.file_ids, vec![1, 2]);
+        assert_eq!(params.is_favorite, Some(true));
+        assert!(params.rotate_delta.is_none() && params.comment.is_none());
     }
 }

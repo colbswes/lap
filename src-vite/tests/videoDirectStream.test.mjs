@@ -34,12 +34,12 @@ function setup(filePath) {
     videoWidth: () => 1920,
     videoHeight: () => 1080,
   };
-  const create = new Function('filePath', 'getAssetSrc', 'player', 'resetCompatibilityProcessing', 'loadPrepared', 'handleSuccessfulLoad', 'loadAttemptCleanups', 'setTimeout', 'clearTimeout', 'DIRECT_PLAYBACK_TIMEOUT_MS', `
+  const create = new Function('filePath', 'props', 'getAssetSrc', 'loadPlayer', 'resetCompatibilityProcessing', 'loadPrepared', 'handleSuccessfulLoad', 'loadAttemptCleanups', 'setTimeout', 'clearTimeout', 'DIRECT_PLAYBACK_TIMEOUT_MS', `
     let currentLoadId = 1, currentLoadingId = 1, nextUpIndex = 0;
     ${code}
     return { load: loadDirect };
   `);
-  const controls = create(filePath, media.getAssetSrc, player, () => {}, mode => calls.push(['prepare', mode]), () => calls.push('success'), [], fn => { timers.push(fn); return timers.length; }, () => {}, 8000);
+  const controls = create(filePath, { fileVersion: 3 }, media.getAssetSrc, player, () => {}, mode => calls.push(['prepare', mode]), () => calls.push('success'), [], fn => { timers.push(fn); return timers.length; }, () => {}, 8000);
   return { ...controls, calls, listeners, timers };
 }
 
@@ -47,7 +47,7 @@ test('direct playback uses the local media transport and retains fallback', asyn
   for (const path of ['/nas/clip.mp4', '/Volumes/clip.mov', 'C:\\Videos\\clip.webm']) {
     const t = setup(path);
     await t.load(null);
-    assert.deepEqual(t.calls[1], { src: `${mediaBase}${encodeURIComponent(path)}?u=2` });
+    assert.deepEqual(t.calls[0], { src: `${mediaBase}${encodeURIComponent(path)}?v=3&u=2` });
     assert.ok(!t.calls.some(c => c?.[0] === 'prepare'));
     t.listeners.error();
     t.timers[0]();
@@ -75,4 +75,103 @@ test('direct timeout retains compatibility fallback while a loaded frame settles
   loaded.timers[0]();
   assert.equal(loaded.calls.at(-1), 'success');
   assert.ok(!loaded.calls.some(c => c?.[0] === 'prepare'));
+});
+
+function videoLoadFixture(cloudOnly = false) {
+  const start = source.indexOf('function cancelVideoLoad()');
+  const body = ts.transpile(source.slice(start, source.indexOf('function getFallbackErrorMessage()', start)), {
+    target: ts.ScriptTarget.ES2022,
+  });
+  const calls = [];
+  const mockPlayer = index => {
+    const listeners = new Map();
+    return {
+      listeners,
+      isDisposed: () => false, pause: () => calls.push([index, 'pause']),
+      reset: () => calls.push([index, 'reset']), muted: value => calls.push([index, 'mute', value]),
+      volume() {}, src: value => calls.push([index, 'source', value.src]), load() {},
+      one: (name, fn) => listeners.set(name, fn),
+      off: (name, fn) => { if (listeners.get(name) === fn) listeners.delete(name); },
+      videoWidth: () => 1920, videoHeight: () => 1080, play: async () => { calls.push([index, 'play']); },
+    };
+  };
+  const ref = value => ({ value });
+  const timers = new Map();
+  let timerId = 0;
+  const deps = {
+    players: ref([mockPlayer(0), mockPlayer(1)]), activeVideo: ref(0), frameReady: ref(false),
+    hasPlaybackInteraction: ref(false), isSeeking: ref(false), isPlaying: ref(false), isReplaying: ref(false),
+    hasError: ref(false), errorMessage: ref(''), failedPoster: ref(''), isLoading: ref(false), showSpinner: ref(false),
+    noTransition: ref(false), isFit: ref(true), rotate: ref(0), viewportOffset: ref({}),
+    config: { video: { muted: false, volume: 1 }, settings: { autoPlayVideo: true } },
+    props: { filePath: '/start.mp4', isActive: true, fileVersion: 1 },
+    clearPlaybackFeedback() {}, clearPlaybackDeadlineTimer() {}, getPlayerId: index => String(index),
+    resetCompatibilityProcessing() {}, startCompatibilityProcessing() {},
+    resetLoadingUi() {}, shouldBypassDirectPlayback: () => false, isWebViewVideoPlaybackDisabled: () => false,
+    applyViewportState() {}, updateTransform() {}, getDirectPlaybackType: () => null,
+    getAssetSrc: media.getAssetSrc, $t: key => key,
+    recreatePlayer: () => { calls.push(['recreate']); },
+    isCloudOnlyFile: async path => { calls.push(['cloud', path]); return cloudOnly; },
+    prepareVideo: async path => { calls.push(['prepare', path]); return { url: media.getAssetSrc(path) }; },
+    cancelVideoPrepare: async (...args) => calls.push(['cancel', ...args]),
+    PLAYBACK_DEADLINE_MS: 10000, LOADING_OVERLAY_DELAY_MS: 500, DIRECT_PLAYBACK_TIMEOUT_MS: 5000,
+    setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
+    clearTimeout: id => timers.delete(id),
+  };
+  const schedule = new Function(...Object.keys(deps), `
+    let currentLoadingId = 0, nextBackendRequestId = 0, playbackDeadlineTimer, loadingOverlayTimer, videoLoadTimer;
+    const activeBackendRequestIds = [null, null], loadAttemptCleanups = [null, null];
+    ${body}
+    return scheduleVideoLoad;
+  `)(...Object.values(deps));
+  return { schedule, calls, timers, ...deps };
+}
+
+test('rapid video switches cancel pending listeners and reuse the same player when the final frame arrives', () => {
+  const f = videoLoadFixture();
+  const [, next] = f.players.value;
+  f.schedule('/first.mp4');
+  const staleFrame = next.listeners.get('loadeddata');
+  f.schedule('/second.mp4', 70);
+  assert.equal(f.frameReady.value, false);
+  assert.equal(next.listeners.size, 0);
+  assert.ok(f.calls.some(call => call[0] === 0 && call[1] === 'mute' && call[2] === true));
+  f.schedule('/third.mp4', 70);
+  const scrubTimers = [...f.timers.values()].filter(timer => timer.delay === 70);
+  assert.equal(scrubTimers.length, 1);
+  scrubTimers[0].fn();
+  assert.deepEqual(f.calls.filter(call => call[1] === 'source').map(call => decodeURIComponent(call[2])), [
+    `${mediaBase}/first.mp4?v=1&u=2`, `${mediaBase}/third.mp4?v=1&u=2`,
+  ]);
+  staleFrame();
+  assert.equal(f.frameReady.value, false);
+  next.listeners.get('loadeddata')();
+  assert.equal(f.frameReady.value, true);
+  assert.equal(f.activeVideo.value, 1);
+  assert.ok(f.calls.some(call => call[0] === 1 && call[1] === 'play'));
+  assert.ok(!f.calls.some(call => ['cloud', 'prepare', 'recreate'].includes(call[0])));
+});
+
+test('a Live Photo activated during loading plays when its first frame arrives', () => {
+  const f = videoLoadFixture();
+  f.config.settings.autoPlayVideo = false;
+  f.props.isActive = false;
+  f.props.playOnActivate = true;
+  f.schedule('/live.mov');
+  assert.ok(!f.calls.some(call => call[1] === 'play'));
+  f.props.isActive = true;
+  f.players.value[1].listeners.get('loadeddata')();
+  assert.ok(f.calls.some(call => call[0] === 1 && call[1] === 'play'));
+});
+
+test('failed direct playback checks for cloud-only storage before preparing the video', async () => {
+  const f = videoLoadFixture(true);
+  f.schedule('/cloud.mp4');
+  assert.ok(!f.calls.some(call => call[0] === 'cloud'));
+  f.players.value[1].listeners.get('error')();
+  await Promise.resolve();
+  assert.deepEqual(f.calls.filter(call => call[0] === 'cloud'), [['cloud', '/cloud.mp4']]);
+  assert.ok(!f.calls.some(call => call[0] === 'prepare'));
+  assert.equal(f.hasError.value, true);
+  assert.equal(f.errorMessage.value, 'offline.requires_original');
 });

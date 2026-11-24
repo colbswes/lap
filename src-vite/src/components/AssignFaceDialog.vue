@@ -6,17 +6,21 @@
   >
     <div class="flex flex-col gap-3">
       <div class="flex items-center gap-3">
-        <div class="w-14 h-14 rounded-box overflow-hidden bg-base-300 ring-1 ring-base-content/10 shrink-0 flex items-center justify-center">
+        <div class="w-14 h-14 rounded-box overflow-hidden bg-base-300 ring-1 ring-base-content/10 shrink-0 flex flex-col items-center justify-center">
           <img
             v-if="face.thumbnail"
             :src="thumbnailSrc"
             class="w-full h-full object-cover"
             draggable="false"
           />
+          <template v-else-if="isBatchManual">
+            <IconPerson class="w-5 h-5 text-base-content/40" />
+            <span class="text-[11px] font-semibold tabular-nums text-base-content/60">{{ batchFileIds.length.toLocaleString() }}</span>
+          </template>
           <IconPerson v-else class="w-6 h-6 text-base-content/30" />
         </div>
         <p class="text-xs text-base-content/60 leading-relaxed">
-          {{ isNewManual ? $t(face.norm_bbox ? 'menu.person.add_box_dialog_hint' : 'menu.person.add_dialog_hint') : $t('menu.person.assign_dialog_hint') }}
+          {{ dialogHint }}
         </p>
       </div>
 
@@ -118,7 +122,7 @@
 
       <label v-if="isAutoGroup" class="flex items-center gap-2 text-xs text-base-content/70 cursor-pointer select-none">
         <input v-model="applyToGroup" type="checkbox" class="checkbox checkbox-xs checkbox-primary" />
-        {{ $t('menu.person.assign_whole_group', { name: currentName }) }}
+        {{ $t(targetKind === 'pet' ? 'menu.person.assign_whole_group_pet' : 'menu.person.assign_whole_group', { name: currentName }) }}
       </label>
 
       <p v-if="errorMessage" class="text-xs text-error">{{ errorMessage }}</p>
@@ -178,7 +182,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { emit as tauriEmit } from '@tauri-apps/api/event';
 import { config } from '@/common/config';
-import { getPersonsPage, assignFaceToPerson, addManualFace, deleteFace, removeFaceFromPerson } from '@/common/api';
+import { getPersonsPage, assignFaceToPerson, addManualFace, addManualFacesBatch, deleteFace, removeFaceFromPerson } from '@/common/api';
 import { PERSON_PAGE_SIZE } from '@/common/constants';
 import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
 import { useUIStore } from '@/stores/uiStore';
@@ -189,6 +193,8 @@ export interface AssignFaceTarget {
   /** Existing face id, or null when adding a new manual person/pet tag. */
   id: number | null;
   file_id?: number;
+  /** Multiple file ids when bulk-adding a person/pet tag to a selection. */
+  file_ids?: number[];
   person_id?: number | null;
   person_name?: string | null;
   thumbnail?: string | null;
@@ -240,6 +246,21 @@ const KIND_OPTIONS = [
 ] as const;
 
 const isNewManual = computed(() => props.face.id === null);
+const batchFileIds = computed(() =>
+  Array.isArray(props.face.file_ids)
+    ? props.face.file_ids.map(Number).filter(id => Number.isFinite(id) && id > 0)
+    : [],
+);
+const isBatchManual = computed(() => isNewManual.value && batchFileIds.value.length > 1);
+const dialogHint = computed(() => {
+  if (isBatchManual.value) {
+    return t('menu.person.add_batch_dialog_hint', { count: batchFileIds.value.length.toLocaleString() });
+  }
+  if (isNewManual.value) {
+    return t(props.face.norm_bbox ? 'menu.person.add_box_dialog_hint' : 'menu.person.add_dialog_hint');
+  }
+  return t(targetKind.value === 'pet' ? 'menu.person.assign_dialog_hint_pet' : 'menu.person.assign_dialog_hint');
+});
 const thumbnailSrc = computed(() => {
   const thumb = props.face.thumbnail || '';
   if (!thumb) return '';
@@ -256,7 +277,7 @@ function setTargetKind(kind: 'person' | 'pet') {
   void loadPersons(true);
 }
 
-const currentName = computed(() => props.face.person_name?.trim() || t('menu.person.unnamed'));
+const currentName = computed(() => props.face.person_name?.trim() || t(initialKind === 'pet' ? 'menu.person.unnamed_pet' : 'menu.person.unnamed'));
 
 // Faces in an automatic group ("Person 54", or unnamed) are named as a group by default:
 // "Person 54" is a placeholder, so naming one of its faces names all of them.
@@ -269,7 +290,7 @@ const isAutoGroup = computed(() => {
 const applyToGroup = ref(true);
 
 function displayName(person: PersonSummary) {
-  return person.name?.trim() || t('menu.person.unnamed');
+  return person.name?.trim() || t(targetKind.value === 'pet' ? 'menu.person.unnamed_pet' : 'menu.person.unnamed');
 }
 
 // Offer to create the typed name unless a listed person already has it.
@@ -339,8 +360,23 @@ async function handleConfirm() {
     const target = selected.value;
     const name = target ? displayName(target) : createName.value;
     let result: any;
-    if (isNewManual.value) {
-      result = await addManualFace(Number(props.face.file_id), {
+    let message: string;
+    if (isBatchManual.value) {
+      result = await addManualFacesBatch(batchFileIds.value, {
+        ...(target ? { personId: target.id } : { name }),
+        kind: targetKind.value,
+      });
+      const personId = Number(result?.person_id);
+      const added = Number(result?.added || 0);
+      void tauriEmit(PERSONS_CHANGED_EVENT, { personId, fileIds: batchFileIds.value });
+      message = added > 0
+        ? t('menu.person.assign_batch_success', { count: added.toLocaleString(), name })
+        : t('menu.person.assign_batch_already_tagged', { name });
+      emit('changed', { personId, message });
+      return;
+    } else if (isNewManual.value) {
+      const targetFileId = batchFileIds.value[0] ?? Number(props.face.file_id);
+      result = await addManualFace(targetFileId, {
         bbox: props.face.norm_bbox || null,
         ...(target ? { personId: target.id } : { name }),
         kind: targetKind.value,
@@ -355,7 +391,7 @@ async function handleConfirm() {
     const personId = Number(result?.person_id);
     const added = Number(result?.added || 0);
     void tauriEmit(PERSONS_CHANGED_EVENT, { personId, fileId: props.face.file_id ?? null });
-    const message = t('menu.person.assign_success', { name })
+    message = t('menu.person.assign_success', { name })
       + (added > 0 ? ` · ${t('menu.person.assign_added', { count: added })}` : '');
     emit('changed', { personId, message });
   } catch (error) {

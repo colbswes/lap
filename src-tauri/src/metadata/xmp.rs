@@ -8,17 +8,14 @@
 //!
 //! | Lap Field | Canonical Namespace URI | XMP Property / Element | Mapping Rules |
 //! | :--- | :--- | :--- | :--- |
-//! | `afiles.is_favorite` | `https://github.com/julyx10/lap/ns/1.0/` | `lap:Favorite` | Boolean; missing remains `None`; independent of rating, picks and labels. Lap-specific interoperability. |
-//! | `afiles.rating` | `http://ns.adobe.com/xap/1.0/` | `xmp:Rating` (`xap:Rating`) | `0..=5` → `Some(0..=5)`; `""` → `Some(0)`; `-1` → `Some(0)` (and sets reject flag if unflagged); missing → `None` |
-//! | `afiles.culling_flag` | `http://ns.adobe.com/xmp/1.0/DynamicMedia/`<br>`http://darktable.sf.net/`<br>`http://ns.adobe.com/xap/1.0/` | `xmpDM:pick` / `xmpDM:good`<br>`darktable:rejected`<br>`xmp:Rating="-1"` / `xmp:Label` | `xmpDM:pick="1"` or `xmp:Label="Pick"\|"Select"` → `Some(1)` (Pick)<br>`xmpDM:pick="-1"` or `darktable:rejected="1"` or `xmp:Rating="-1"` or `xmp:Label="Reject"\|"Rejected"` → `Some(2)` (Reject)<br>`xmpDM:pick="0"` or `darktable:rejected="0"` → `Some(0)` (Unflagged)<br>missing → `None` |
+//! | `afiles.is_favorite` | `https://github.com/julyx10/lap/ns/1.0/` | `lap:Favorite` | Boolean; missing remains `None`; Lap-specific interoperability. |
 //! | `atags` / `afile_tags` | See `schema` | Registered keyword formats | Shared import, path normalization and explicit write capabilities |
 //! | `afiles.comments` | `http://purl.org/dc/elements/1.1/`<br>`http://ns.adobe.com/exif/1.0/`<br>`http://ns.adobe.com/photoshop/1.0/` | `dc:description` (`rdf:Alt`)<br>`photoshop:Caption`<br>`exif:UserComment` (`rdf:Alt`) | Priority: `dc:description` (`xml:lang="x-default"` preferred) → `photoshop:Caption` → `exif:UserComment`; empty element/attr → `Some("")`; missing → `None` |
 
 //! Keyword source rules live in `schema`; XML and catalog operations stay here.
-//! digiKam PickLabel: 0/2 -> Unflagged, 1 -> Reject, 3 -> Pick. Explicit
-//! xmpDM/darktable flags take precedence; text labels/negative ratings are fallback.
-//! Existing PickLabel fields follow manual culling export; pending (2) is retained
-//! while Lap remains unflagged. No digiKam field is created when it was absent.
+//! Lap no longer catalogs star ratings or pick/reject flags. Writeback leaves any
+//! existing `xmp:Rating`, `xmpDM:pick`/`good`, `darktable:rejected`,
+//! `digiKam:PickLabel` or `xmp:Label` properties untouched.
 
 use super::schema::{self, CatalogField};
 use super::merge::apply_with_state;
@@ -378,37 +375,6 @@ fn metadata_from_properties(properties: &[&XmlNode]) -> XmpMetadata {
     meta.favorite = value(schema::FAVORITE.uri, schema::FAVORITE.name)
         .as_deref()
         .and_then(parse_favorite);
-    let mut rejected = false;
-    if let Some(v) = value(schema::RATING.uri, schema::RATING.name) {
-        if v.trim().is_empty() {
-            meta.rating = Some(0);
-        } else if let Ok(n) = v.trim().parse::<i32>() {
-            if (-1..=5).contains(&n) {
-                meta.rating = Some(n.max(0));
-                rejected = n == -1;
-            }
-        }
-    }
-    let pick = value(schema::PICK.uri, schema::PICK.name);
-    let good = value(schema::GOOD.uri, schema::GOOD.name);
-    let rejected_value = value(schema::REJECTED.uri, schema::REJECTED.name);
-    let digikam_pick = value(schema::DIGIKAM_PICK.uri, schema::DIGIKAM_PICK.name);
-    let label = value(schema::LABEL.uri, schema::LABEL.name);
-    // Explicit app flags outrank text labels and legacy negative ratings.
-    let digikam_flag = digikam_pick.as_deref().and_then(|v| match v.trim() {
-        "0" | "2" => Some(0), // Pending validation has no equivalent in Lap.
-        "1" => Some(2),
-        "3" => Some(1),
-        _ => None,
-    });
-    meta.culling_flag = culling_from_values(
-        pick.as_deref(),
-        good.as_deref(),
-        rejected_value.as_deref(),
-        None,
-        None,
-    ).or(digikam_flag).or_else(|| culling_from_values(None, None, None,
-        label.as_deref(), if rejected { Some(-1) } else { meta.rating }));
     keywords::import_properties(properties, &mut meta);
     meta.description = schema::DESCRIPTION.iter().find_map(|property| value(property.uri, property.name));
     meta
@@ -442,9 +408,8 @@ pub(crate) fn metadata_and_source_text_from_packets(packets: &[String], standard
 }
 
 #[cfg(test)]
-pub(crate) fn flags_from_packets(packets: &[String]) -> (Option<i32>, Option<bool>) {
-    let meta = metadata_from_packets(packets);
-    (meta.culling_flag, meta.favorite)
+pub(crate) fn favorite_from_packets(packets: &[String]) -> Option<bool> {
+    metadata_from_packets(packets).favorite
 }
 
 fn parse_favorite(value: &str) -> Option<bool> {
@@ -453,88 +418,6 @@ fn parse_favorite(value: &str) -> Option<bool> {
         "false" | "0" => Some(false),
         _ => None,
     }
-}
-
-#[cfg(test)]
-fn culling_from_packets(packets: &[String]) -> Option<i32> {
-    flags_from_packets(packets).0
-}
-
-#[cfg(test)]
-mod digikam_pick_tests {
-    use super::*;
-    #[test]
-    fn import_pick_labels_and_adobe_precedence() {
-        for (properties, expected) in [
-            ("k:PickLabel=\"3\"", 1),
-            ("k:PickLabel=\"1\"", 2),
-            ("k:PickLabel=\"2\"", 0),
-            ("k:PickLabel=\"1\" dm:pick=\"1\"", 1),
-            ("k:PickLabel=\"3\" dm:pick=\"0\"", 0),
-        ] {
-            let xml = format!("<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:k=\"{}\" xmlns:dm=\"{}\" {properties}/></rdf:RDF>", schema::NS_DIGIKAM, schema::PICK.uri);
-            assert_eq!(parse_xmp_str(&xml).unwrap().culling_flag, Some(expected), "{properties}");
-        }
-    }
-
-    #[test]
-    fn existing_pick_fields_follow_export_and_pending_is_preserved() {
-        for source in 0..=3 {
-            for attribute in [true, false] {
-                let property = if attribute { format!("k:PickLabel=\"{source}\"") } else { String::new() };
-                let child = if attribute { String::new() } else { format!("<k:PickLabel>{source}</k:PickLabel>") };
-                let xml = format!("<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:k=\"{}\" {property}>{child}</rdf:Description></rdf:RDF>", schema::NS_DIGIKAM);
-                for flag in 0..=2 {
-                    let output = merge_with_culling(&xml, 0, flag, &[], "", 2).unwrap();
-                    assert_eq!(parse_xmp_str(&output).unwrap().culling_flag, Some(flag));
-                    let expected = match flag { 1 => 3, 2 => 1, _ if source == 2 => 2, _ => 0 };
-                    assert!(output.contains(&format!(">{expected}</digiKam:PickLabel>")));
-                    assert!(merge_with_culling(&xml, 4, flag, &[], "", 1).unwrap().contains("PickLabel"));
-                }
-            }
-        }
-        let xml = format!("<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description/></rdf:RDF>");
-        assert!(!merge_with_culling(&xml, 0, 1, &[], "", 2).unwrap().contains("PickLabel"));
-    }
-}
-
-/// Shared precedence for sidecar and embedded XMP. Explicit unflagged wins
-/// over legacy reject markers. Good=false means Reject, never Unflagged.
-pub(crate) fn culling_from_values(
-    pick: Option<&str>,
-    good: Option<&str>,
-    rejected: Option<&str>,
-    label: Option<&str>,
-    rating: Option<i32>,
-) -> Option<i32> {
-    pick.and_then(|v| match v.trim() {
-        "1" => Some(1),
-        "-1" => Some(2),
-        "0" | "" => Some(0),
-        _ => None,
-    })
-    .or_else(|| {
-        good.and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" => Some(1),
-            "false" | "0" => Some(2),
-            _ => None,
-        })
-    })
-    .or_else(|| {
-        rejected.and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" => Some(2),
-            "false" | "0" | "" => Some(0),
-            _ => None,
-        })
-    })
-    .or_else(|| {
-        label.and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
-            "pick" | "select" => Some(1),
-            "reject" | "rejected" => Some(2),
-            _ => None,
-        })
-    })
-    .or(if rating == Some(-1) { Some(2) } else { None })
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,8 +910,7 @@ pub(crate) fn parse_xml(content: &str) -> Result<XmlNode, String> {
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
-const ALL: i32 = CatalogField::Rating.mask() | CatalogField::Culling.mask()
-    | CatalogField::Description.mask() | CatalogField::Tags.mask() | CatalogField::Favorite.mask();
+const ALL: i32 = CatalogField::Description.mask() | CatalogField::Tags.mask() | CatalogField::Favorite.mask();
 
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1082,79 +964,40 @@ fn escape(s: &str) -> String {
     quick_xml::escape::escape(s).into_owned()
 }
 
-/// Patch owned properties while preserving unrelated elements and language variants.
-fn culling_property(uri: &str, name: &[u8], value: &str) -> bool {
-    let name = String::from_utf8_lossy(name);
-    (schema::PICK.matches(uri, &name) || schema::GOOD.matches(uri, &name))
-        || (schema::REJECTED.matches(uri, &name))
-        || schema::DIGIKAM_PICK.matches(uri, &name)
-        || (schema::LABEL.matches(uri, &name)
-            && matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "pick" | "select" | "reject" | "rejected"
-            ))
-}
-
-fn property_text(xml: &str, node: &Node) -> Result<String, String> {
-    // Text/CDATA scalar properties only. Other managed properties do not need
-    // this value, and their nested XML must not be interpreted as a flag.
-    if !schema::LABEL.matches(&node.uri, &node.name) && !schema::DIGIKAM_PICK.matches(&node.uri, &node.name) {
-        return Ok(String::new());
-    }
-    let mut reader = quick_xml::Reader::from_str(&xml[node.start..node.end]);
-    let mut text = String::new();
-    loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
-            Event::Text(e) => text.push_str(&e.unescape().map_err(|e| e.to_string())?),
-            Event::CData(e) => text.push_str(&e.decode().map_err(|e| e.to_string())?),
-            Event::Eof => break,
-            _ => {}
-        }
-    }
-    Ok(text)
-}
-
 #[cfg(test)]
-fn merge_with_culling(
+fn merge_without_favorite(
     xml: &str,
-    rating: i32,
-    culling: i32,
     tags: &[String],
     description: &str,
     mask: i32,
 ) -> Result<String, String> {
-    merge_with_favorite(xml, rating, culling, false, tags, description, mask & !16)
+    merge_with_favorite(xml, false, tags, description, mask & !CatalogField::Favorite.mask())
 }
 
 #[cfg(test)]
 fn merge_with_favorite(
     xml: &str,
-    rating: i32,
-    culling: i32,
     favorite: bool,
     tags: &[String],
     description: &str,
     mask: i32,
 ) -> Result<String, String> {
-    merge_with_paths(xml,rating,culling,favorite,tags,None,description,mask,&[])
+    merge_with_paths(xml, favorite, tags, None, description, mask, &[])
 }
 
+/// Patch owned properties while preserving unrelated elements and language variants.
+/// Properties Lap does not own (ratings, pick/reject flags, labels, ...) are never touched.
 fn merge_with_paths(
-    xml: &str, rating: i32, culling: i32, favorite: bool,
+    xml: &str, favorite: bool,
     tags: &[String], paths: Option<&[String]>, description: &str, mask: i32,
     text: &[(schema::XmpProperty, &str)],
 ) -> Result<String,String> {
     parse_xmp_str(xml)?; // reuse bounded, DTD-free validation
-    // Rating and culling are one export unit: normalize legacy Rating=-1
-    // while preserving the independent Lap star rating and current flag.
-    let mask = if mask & 3 != 0 { mask | 3 } else { mask };
     let mut reader = NsReader::from_str(xml);
     let mut nodes: Vec<Node> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     let mut patches: Vec<(usize, usize, String)> = Vec::new();
     let mut tag_writer = keywords::TagWriter::default();
-    let mut had_darktable_rejected = false;
-    let mut digikam_pick = None;
     loop {
         let start = reader.buffer_position() as usize;
         let event = reader.read_event().map_err(|e| e.to_string())?;
@@ -1211,25 +1054,12 @@ fn merge_with_paths(
                         let uri = namespace(ns)?;
                         let own = (schema::FAVORITE.matches(&uri, &String::from_utf8_lossy(local.as_ref()))
                             && mask & CatalogField::Favorite.mask() != 0)
-                            || (schema::RATING.matches(&uri, &String::from_utf8_lossy(local.as_ref())) && mask & CatalogField::Rating.mask() != 0)
                             || (keywords::writable_property(&uri, local.as_ref()) && mask & CatalogField::Tags.mask() != 0)
-                            || (schema::DESCRIPTION[0].matches(&uri, &String::from_utf8_lossy(local.as_ref())) && mask & CatalogField::Description.mask() != 0)
-                            || (mask & CatalogField::Culling.mask() != 0
-                                && culling_property(
-                                    &uri,
-                                    local.as_ref(),
-                                    &a.decode_and_unescape_value(reader.decoder())
-                                        .map_err(|e| e.to_string())?,
-                                ));
+                            || (schema::DESCRIPTION[0].matches(&uri, &String::from_utf8_lossy(local.as_ref())) && mask & CatalogField::Description.mask() != 0);
                         let own = own || text.iter().any(|(property, _)|
                             property.matches(&uri, &String::from_utf8_lossy(local.as_ref())));
                         if own {
                             tag_writer.observe(&uri, &String::from_utf8_lossy(local.as_ref()));
-                            had_darktable_rejected |=
-                                schema::REJECTED.matches(&uri, &String::from_utf8_lossy(local.as_ref()));
-                            if schema::DIGIKAM_PICK.matches(&uri, &String::from_utf8_lossy(local.as_ref())) {
-                                digikam_pick = Some(a.decode_and_unescape_value(reader.decoder()).map_err(|e| e.to_string())?.trim() == "2");
-                            }
                             changed = true;
                         } else {
                             // Attribute already contains validated, escaped source bytes.
@@ -1319,15 +1149,8 @@ fn merge_with_paths(
             continue;
         }
         if (mask & CatalogField::Favorite.mask() != 0 && schema::FAVORITE.matches(&n.uri, &n.name))
-            || (mask & CatalogField::Rating.mask() != 0 && schema::RATING.matches(&n.uri, &n.name))
             || (mask & CatalogField::Tags.mask() != 0 && keywords::writable_property(&n.uri, n.name.as_bytes()))
-            || (mask & CatalogField::Culling.mask() != 0
-                && culling_property(&n.uri, n.name.as_bytes(), &property_text(xml, n)?))
         {
-            had_darktable_rejected |= schema::REJECTED.matches(&n.uri, &n.name);
-            if schema::DIGIKAM_PICK.matches(&n.uri, &n.name) {
-                digikam_pick = Some(property_text(xml, n)?.trim() == "2");
-            }
             tag_writer.observe(&n.uri, &n.name);
             patches.push((n.start, n.end, String::new()));
         }
@@ -1390,27 +1213,6 @@ fn merge_with_paths(
         let name = property.qualified_name();
         properties += &format!("<{name} xmlns:{}=\"{}\">{}</{name}>",
             property.prefix, property.uri, if favorite { "True" } else { "False" });
-    }
-    if mask & CatalogField::Rating.mask() != 0 {
-        properties += &schema::RATING.text_xml(&rating.clamp(0, 5).to_string());
-    }
-    if mask & CatalogField::Culling.mask() != 0 {
-        let pick = match culling {
-            1 => 1,
-            2 => -1,
-            _ => 0,
-        };
-        properties += &schema::PICK.text_xml(&pick.to_string());
-        if culling == 1 || culling == 2 {
-            properties += &schema::GOOD.text_xml(if culling == 1 { "True" } else { "False" });
-        }
-        if had_darktable_rejected {
-            properties += &schema::REJECTED.text_xml(if culling == 2 { "1" } else { "0" });
-        }
-        if let Some(pending) = digikam_pick {
-            let value = match culling { 1 => 3, 2 => 1, _ if pending => 2, _ => 0 };
-            properties += &format!("<digiKam:PickLabel xmlns:digiKam=\"{}\">{value}</digiKam:PickLabel>", schema::NS_DIGIKAM);
-        }
     }
     if mask & CatalogField::Tags.mask() != 0 {
         properties += &tag_writer.render(tags, paths);
@@ -1627,9 +1429,9 @@ fn encode_xmp_text<'a>(text: &'a str, original: Option<&[u8]>) -> std::borrow::C
 fn write_one(conn: &Connection, file_id: i64, cache: &mut ExportIndex) -> Result<(), String> {
     // A consistent catalog snapshot for this explicit manual export.
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    let (folder, name, rating, culling, description, favorite): (String, String, i32, i32, String, bool) = tx
-        .query_row("SELECT f.path,a.name,COALESCE(a.rating,0),COALESCE(a.culling_flag,0),COALESCE(a.comments,''),COALESCE(a.is_favorite,0) FROM afiles a JOIN afolders f ON f.id=a.folder_id WHERE a.id=?1",
-            [file_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))
+    let (folder, name, description, favorite): (String, String, String, bool) = tx
+        .query_row("SELECT f.path,a.name,COALESCE(a.comments,''),COALESCE(a.is_favorite,0) FROM afiles a JOIN afolders f ON f.id=a.folder_id WHERE a.id=?1",
+            [file_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
         .map_err(|e|e.to_string())?;
     let (values, dirty) = tx.query_row(
         "SELECT a.e_title,a.e_headline,a.e_artist,a.e_copyright,COALESCE(x.dirty,0)
@@ -1669,7 +1471,7 @@ fn write_one(conn: &Connection, file_id: i64, cache: &mut ExportIndex) -> Result
             let property = schema::DETAIL_FIELDS.iter().find(|field| field.key == *key)?.xmp?;
             Some((property, value.as_deref()?))
         }).collect();
-    let output = merge_with_paths(&xml, rating, culling, favorite, &tags, Some(&paths), &description, ALL, &text)?;
+    let output = merge_with_paths(&xml, favorite, &tags, Some(&paths), &description, ALL, &text)?;
     let temp = dest.with_file_name(format!(
         ".lap-xmp-{}-{}.tmp",
         std::process::id(),
@@ -1825,8 +1627,6 @@ mod import_tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 e_title TEXT, e_headline TEXT, e_artist TEXT, e_copyright TEXT, e_software TEXT,
-                rating INTEGER NOT NULL DEFAULT 0,
-                culling_flag INTEGER NOT NULL DEFAULT 0,
                 is_favorite INTEGER DEFAULT 0,
                 comments TEXT,
                 has_tags INTEGER DEFAULT 0
@@ -1899,31 +1699,32 @@ mod import_tests {
         fs::write(&image, crate::metadata::embedded::tests::jpeg_with_xmp()).unwrap();
         let path = image.to_str().unwrap();
         import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::InitialScan).unwrap();
-        let rating = || {
-            conn.query_row("SELECT rating FROM afiles WHERE id=1", [], |r| {
+        let favorite = || {
+            conn.query_row("SELECT is_favorite FROM afiles WHERE id=1", [], |r| {
                 r.get::<_, i32>(0)
             })
             .unwrap()
         };
-        assert_eq!(rating(), 4);
+        // The embedded xmp:Rating is no longer imported.
+        assert_eq!(favorite(), 0);
         let tags: i64 = conn
             .query_row("SELECT COUNT(*) FROM afile_tags WHERE file_id=1", [], |r| {
                 r.get(0)
             })
             .unwrap();
         assert_eq!(tags, 2);
-        fs::write(dir.join("photo.jpg.xmp"), format!(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="{NS_RDF}" xmlns:xmp="{NS_XMP}"><rdf:RDF><rdf:Description xmp:Rating="5"/></rdf:RDF></x:xmpmeta>"#)).unwrap();
+        fs::write(dir.join("photo.jpg.xmp"), format!(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="{NS_RDF}" xmlns:lap="{NS_LAP}"><rdf:RDF><rdf:Description lap:Favorite="True"/></rdf:RDF></x:xmpmeta>"#)).unwrap();
         import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::InitialScan).unwrap();
-        assert_eq!(rating(), 5);
+        assert_eq!(favorite(), 1);
         // Local clears remain protected when a sidecar appears later.
-        conn.execute("UPDATE afiles SET rating=0 WHERE id=1", [])
+        conn.execute("UPDATE afiles SET is_favorite=0 WHERE id=1", [])
             .unwrap();
-        fs::write(dir.join("photo.jpg.xmp"), format!(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="{NS_RDF}" xmlns:xmp="{NS_XMP}"><rdf:RDF><rdf:Description xmp:Rating="5"/></rdf:RDF></x:xmpmeta>"#)).unwrap();
+        fs::write(dir.join("photo.jpg.xmp"), format!(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="{NS_RDF}" xmlns:lap="{NS_LAP}"><rdf:RDF><rdf:Description lap:Favorite="True"/></rdf:RDF></x:xmpmeta>"#)).unwrap();
         import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::RescanNonDestructive).unwrap();
-        assert_eq!(rating(), 0);
+        assert_eq!(favorite(), 0);
         // Manual import is explicitly sidecar-only and may overwrite a clear.
         import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::ManualOverwrite).unwrap();
-        assert_eq!(rating(), 5);
+        assert_eq!(favorite(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1985,8 +1786,6 @@ mod import_tests {
 </x:xmpmeta>"#;
 
         let meta = parse_xmp_str(xmp).unwrap();
-        assert_eq!(meta.rating, Some(4));
-        assert_eq!(meta.culling_flag, None);
         assert_eq!(
             meta.tags,
             Some(vec![
@@ -2011,8 +1810,7 @@ mod import_tests {
 </x:xmpmeta>"#;
 
         let missing_meta = parse_xmp_str(missing_xmp).unwrap();
-        assert_eq!(missing_meta.rating, None);
-        assert_eq!(missing_meta.culling_flag, None);
+        assert_eq!(missing_meta.favorite, None);
         assert_eq!(missing_meta.tags, None);
         assert_eq!(missing_meta.description, None);
 
@@ -2039,14 +1837,12 @@ mod import_tests {
 </x:xmpmeta>"#;
 
         let empty_meta = parse_xmp_str(empty_xmp).unwrap();
-        assert_eq!(empty_meta.rating, Some(0));
-        assert_eq!(empty_meta.culling_flag, Some(0));
         assert_eq!(empty_meta.tags, Some(vec![]));
         assert_eq!(empty_meta.description, Some(String::new()));
     }
 
     #[test]
-    fn test_namespace_prefix_resolution_and_culling_flags() {
+    fn test_namespace_prefix_resolution_ignores_ratings_and_flags() {
         // Custom prefixes bound to canonical Adobe/Darktable URIs
         let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
@@ -2067,32 +1863,15 @@ mod import_tests {
 </x:xmpmeta>"#;
 
         let meta = parse_xmp_str(xmp).unwrap();
-        assert_eq!(meta.rating, Some(3));
-        assert_eq!(meta.culling_flag, Some(2)); // Rejected via dt:rejected
-        assert_eq!(meta.description.as_deref(), Some("Default English caption"));
-    }
-
-    #[test]
-    fn digikam_pending_rescan_preserves_local_culling() {
-        let conn = setup_in_memory_db();
-        conn.execute("INSERT INTO afiles(id,name) VALUES(1,'photo.jpg')", []).unwrap();
-        let parse = |value| parse_xmp_str(&format!(
-            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:k=\"{}\" k:PickLabel=\"{value}\"/></rdf:RDF>",
-            schema::NS_DIGIKAM,
-        )).unwrap();
-        apply_xmp_metadata_to_db(1, &parse(3), &conn, XmpImportMode::InitialScan).unwrap();
-        conn.execute("UPDATE afiles SET culling_flag=2 WHERE id=1", []).unwrap();
-        let pending = parse(2);
-        assert_eq!(pending.culling_flag, Some(0));
-        apply_xmp_metadata_to_db(1, &pending, &conn, XmpImportMode::RescanNonDestructive).unwrap();
-        assert_eq!(conn.query_row("SELECT culling_flag FROM afiles WHERE id=1", [], |r| r.get::<_, i32>(0)).unwrap(), 2);
+        // Ratings and darktable rejections are not catalog fields.
+        assert_eq!(meta, XmpMetadata { description: Some("Default English caption".into()), ..Default::default() });
     }
 
     #[test]
     fn test_rescan_preserves_local_edits_in_lap() {
         let conn = setup_in_memory_db();
         conn.execute(
-            "INSERT INTO afiles (id, name, rating, culling_flag, comments, has_tags) VALUES (1, 'DSC0001.RAF', 0, 0, NULL, 0)",
+            "INSERT INTO afiles (id, name, is_favorite, comments, has_tags) VALUES (1, 'DSC0001.RAF', 0, NULL, 0)",
             [],
         )
         .unwrap();
@@ -2100,28 +1879,25 @@ mod import_tests {
         // 1. Initial scan imports metadata from XMP
         let initial_xmp = XmpMetadata {
             hierarchical_tags: None,
-            favorite: None,
-            rating: Some(2),
-            culling_flag: Some(1), // Pick
+            favorite: Some(true),
             tags: Some(vec!["Landscape".to_string()]),
             description: Some("Initial XMP caption".to_string()),
         };
         apply_xmp_metadata_to_db(1, &initial_xmp, &conn, XmpImportMode::InitialScan).unwrap();
 
-        let (rating, flag, comments): (i32, i32, Option<String>) = conn
+        let (favorite, comments): (bool, Option<String>) = conn
             .query_row(
-                "SELECT rating, culling_flag, comments FROM afiles WHERE id = 1",
+                "SELECT is_favorite, comments FROM afiles WHERE id = 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(rating, 2);
-        assert_eq!(flag, 1);
+        assert!(favorite);
         assert_eq!(comments.as_deref(), Some("Initial XMP caption"));
 
-        // 2. User edits metadata locally in Lap (changes rating to 5, flag to Reject (2), comment to "Local Lap edit", and adds "Favorite" tag)
+        // 2. User edits metadata locally in Lap (clears favorite, changes comment to "Local Lap edit", and adds "Favorite" tag)
         conn.execute(
-            "UPDATE afiles SET rating = 5, culling_flag = 2, comments = 'Local Lap edit' WHERE id = 1",
+            "UPDATE afiles SET is_favorite = 0, comments = 'Local Lap edit' WHERE id = 1",
             [],
         )
         .unwrap();
@@ -2136,12 +1912,10 @@ mod import_tests {
         )
         .unwrap();
 
-        // 3. Background rescan runs on an updated sidecar (e.g. darktable saved exposure history with old Rating=2, Flag=1, and added "Mountains" tag)
+        // 3. Background rescan runs on an updated sidecar (e.g. old Favorite=True and an added "Mountains" tag)
         let rescan_xmp = XmpMetadata {
             hierarchical_tags: None,
-            favorite: None,
-            rating: Some(2),
-            culling_flag: Some(1),
+            favorite: Some(true),
             tags: Some(vec!["Landscape".to_string(), "Mountains".to_string()]),
             description: Some("Initial XMP caption".to_string()),
         };
@@ -2149,15 +1923,14 @@ mod import_tests {
             .unwrap();
 
         // Verify local edits in Lap were NOT overwritten by the rescan
-        let (rating_after, flag_after, comments_after): (i32, i32, Option<String>) = conn
+        let (favorite_after, comments_after): (bool, Option<String>) = conn
             .query_row(
-                "SELECT rating, culling_flag, comments FROM afiles WHERE id = 1",
+                "SELECT is_favorite, comments FROM afiles WHERE id = 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(rating_after, 5);
-        assert_eq!(flag_after, 2);
+        assert!(!favorite_after);
         assert_eq!(comments_after.as_deref(), Some("Local Lap edit"));
 
         // Local edits to the tag set prevent automatic additions, including restoring deleted tags.
@@ -2178,37 +1951,35 @@ mod import_tests {
 
         // 5. Explicit manual "Import from XMP" overwrites present values from sidecar
         apply_xmp_metadata_to_db(1, &rescan_xmp, &conn, XmpImportMode::ManualOverwrite).unwrap();
-        let (manual_rating, manual_flag, manual_comments): (i32, i32, Option<String>) = conn
+        let (manual_favorite, manual_comments): (bool, Option<String>) = conn
             .query_row(
-                "SELECT rating, culling_flag, comments FROM afiles WHERE id = 1",
+                "SELECT is_favorite, comments FROM afiles WHERE id = 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(manual_rating, 2);
-        assert_eq!(manual_flag, 1);
+        assert!(manual_favorite);
         assert_eq!(manual_comments.as_deref(), Some("Local Lap edit"));
     }
     fn xml(body: &str) -> String {
         format!(
-            r#"<rdf:RDF xmlns:rdf="{NS_RDF}"><rdf:Description xmlns:xmp="{NS_XMP}" xmlns:dc="{NS_DC}">{body}</rdf:Description></rdf:RDF>"#
+            r#"<rdf:RDF xmlns:rdf="{NS_RDF}"><rdf:Description xmlns:xmp="{NS_XMP}" xmlns:dc="{NS_DC}" xmlns:lap="{NS_LAP}">{body}</rdf:Description></rdf:RDF>"#
         )
     }
     #[test]
     fn parses_xml_text_and_ignores_comments() {
-        let meta = parse_xmp_str(&xml(r#"<!-- xmp:Rating="5" --><xmp:Rating>2</xmp:Rating><dc:description><![CDATA[A < B]]> &amp; caf&#233;</dc:description>"#)).unwrap();
-        assert_eq!(meta.rating, Some(2));
+        let meta = parse_xmp_str(&xml(r#"<!-- <dc:description>commented</dc:description> --><dc:description><![CDATA[A < B]]> &amp; caf&#233;</dc:description>"#)).unwrap();
         assert_eq!(meta.description.as_deref(), Some("A < B & café"));
         let meta = parse_xmp_str(&format!(
-            r#"<rdf:Description xmlns:rdf="{NS_RDF}" xmlns:xmp="{NS_XMP}" xmp:Rating = "5"/>"#
+            r#"<rdf:Description xmlns:rdf="{NS_RDF}" xmlns:lap="{NS_LAP}" lap:Favorite = "True"/>"#
         ))
         .unwrap();
-        assert_eq!(meta.rating, Some(5));
+        assert_eq!(meta.favorite, Some(true));
     }
     #[test]
     fn namespaces_are_scoped_and_language_is_exact() {
-        let meta = parse_xmp_str(&xml(r#"<dc:description><rdf:Alt><rdf:li note="x-default" xml:lang="fr">French</rdf:li><rdf:li xml:lang="x-default">Default</rdf:li></rdf:Alt></dc:description><other xmlns:xmp="urn:other" xmp:Rating="5"/><xmp:Rating>3</xmp:Rating>"#)).unwrap();
-        assert_eq!(meta.rating, Some(3));
+        let meta = parse_xmp_str(&xml(r#"<dc:description><rdf:Alt><rdf:li note="x-default" xml:lang="fr">French</rdf:li><rdf:li xml:lang="x-default">Default</rdf:li></rdf:Alt></dc:description><other xmlns:lap="urn:other" lap:Favorite="True"/>"#)).unwrap();
+        assert_eq!(meta.favorite, None);
         assert_eq!(meta.description.as_deref(), Some("Default"));
     }
     #[test]
@@ -2233,29 +2004,27 @@ mod import_tests {
         file(&conn);
         let meta = XmpMetadata {
             hierarchical_tags: None,
-            favorite: None,
-            rating: Some(4),
-            culling_flag: Some(1),
+            favorite: Some(true),
             description: Some("caption".into()),
             tags: Some(vec!["tag".into()]),
         };
         apply_xmp_metadata_to_db(1, &meta, &conn, XmpImportMode::InitialScan).unwrap();
         conn.execute(
-            "UPDATE afiles SET rating=0,culling_flag=0,comments=NULL WHERE id=1",
+            "UPDATE afiles SET is_favorite=0,comments=NULL WHERE id=1",
             [],
         )
         .unwrap();
         conn.execute("DELETE FROM afile_tags WHERE file_id=1", [])
             .unwrap();
         apply_xmp_metadata_to_db(1, &meta, &conn, XmpImportMode::RescanNonDestructive).unwrap();
-        let state: (i32, i32, Option<String>) = conn
+        let state: (i32, Option<String>) = conn
             .query_row(
-                "SELECT rating,culling_flag,comments FROM afiles WHERE id=1",
+                "SELECT is_favorite,comments FROM afiles WHERE id=1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(state, (0, 0, None));
+        assert_eq!(state, (0, None));
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM afile_tags", [], |r| r
                 .get::<_, i32>(0))
@@ -2316,13 +2085,13 @@ mod import_tests {
         file(&conn);
         conn.execute_batch("CREATE TRIGGER fail_tag BEFORE INSERT ON atags BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
         let meta = XmpMetadata {
-            rating: Some(5),
+            favorite: Some(true),
             tags: Some(vec!["fail".into()]),
             ..Default::default()
         };
         assert!(apply_xmp_metadata_to_db(1, &meta, &conn, XmpImportMode::ManualOverwrite).is_err());
         assert_eq!(
-            conn.query_row("SELECT rating FROM afiles", [], |r| r.get::<_, i32>(0))
+            conn.query_row("SELECT is_favorite FROM afiles", [], |r| r.get::<_, i32>(0))
                 .unwrap(),
             0
         );
@@ -2340,7 +2109,7 @@ mod import_tests {
         let dir = create_temp_test_dir("state");
         let image = dir.join("photo.RAF");
         let sidecar = dir.join("photo.RAF.xmp");
-        fs::write(&sidecar, xml("<xmp:Rating>4</xmp:Rating>")).unwrap();
+        fs::write(&sidecar, xml("<lap:Favorite>True</lap:Favorite>")).unwrap();
         let path = image.to_str().unwrap();
         assert!(
             import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::RescanNonDestructive)
@@ -2350,15 +2119,15 @@ mod import_tests {
             !import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::RescanNonDestructive)
                 .unwrap()
         );
-        conn.execute("UPDATE afiles SET rating=0 WHERE id=1", [])
+        conn.execute("UPDATE afiles SET is_favorite=0 WHERE id=1", [])
             .unwrap();
-        fs::write(&sidecar, xml("<xmp:Rating>5</xmp:Rating><!-- changed -->")).unwrap();
+        fs::write(&sidecar, xml("<lap:Favorite>True</lap:Favorite><!-- changed -->")).unwrap();
         assert!(
             import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::RescanNonDestructive)
                 .unwrap()
         );
         assert_eq!(
-            conn.query_row("SELECT rating FROM afiles", [], |r| r.get::<_, i32>(0))
+            conn.query_row("SELECT is_favorite FROM afiles", [], |r| r.get::<_, i32>(0))
                 .unwrap(),
             0
         );
@@ -2452,7 +2221,7 @@ mod import_tests {
                     if id == 2 {
                         "<broken>".into()
                     } else {
-                        xml("<xmp:Rating>5</xmp:Rating>")
+                        xml("<lap:Favorite>True</lap:Favorite>")
                     },
                 )
                 .unwrap();
@@ -2465,7 +2234,7 @@ mod import_tests {
         assert_eq!(result.failures.len(), 1);
         assert_eq!(result.failures[0].file_id, 2);
         assert_eq!(
-            conn.query_row("SELECT rating FROM afiles WHERE id=2", [], |r| r
+            conn.query_row("SELECT is_favorite FROM afiles WHERE id=2", [], |r| r
                 .get::<_, i32>(0))
                 .unwrap(),
             0
@@ -2479,12 +2248,14 @@ mod export_tests {
     use super::*;
     fn merge(
         xml: &str,
-        rating: i32,
         tags: &[String],
         description: &str,
         mask: i32,
     ) -> Result<String, String> {
-        merge_with_culling(xml, rating, 0, tags, description, mask)
+        merge_without_favorite(xml, tags, description, mask)
+    }
+    fn favorite_property(value: &str) -> String {
+        format!("<l:Favorite xmlns:l=\"{NS_LAP}\">{value}</l:Favorite>")
     }
     fn packet(body: &str) -> String {
         format!(
@@ -2557,6 +2328,32 @@ mod export_tests {
         assert!(import());
         assert_eq!(gps(), (-33.5, 151.25, Some(-12.5), "AU".into()));
         assert!(!import());
+
+        // A user edit wins over sidecar GPS on later non-destructive imports.
+        let mut edit_conn = Connection::open_in_memory().unwrap();
+        edit_conn.execute_batch(
+            "CREATE TABLE afiles(id INTEGER PRIMARY KEY, gps_latitude REAL, gps_longitude REAL, gps_altitude REAL,
+                geo_name TEXT, geo_admin1 TEXT, geo_admin2 TEXT, geo_cc TEXT);
+             CREATE TABLE axmp_imports(file_id INTEGER PRIMARY KEY, fingerprint TEXT, dirty INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO afiles(id, gps_latitude, gps_longitude) VALUES(1, 0, 0);",
+        ).unwrap();
+        let edited = crate::t_sqlite::AFile::set_location(&mut edit_conn, &[1], Some(36.16), Some(-86.78)).unwrap();
+        assert_eq!(edited.geo_cc.as_deref(), Some("US"));
+        assert!(crate::t_sqlite::AFile::set_location(&mut edit_conn, &[1], Some(36.16), None).is_err());
+        assert!(crate::t_sqlite::AFile::set_location(&mut edit_conn, &[1], Some(91.0), Some(0.0)).is_err());
+        assert!(crate::t_sqlite::AFile::set_location(&mut edit_conn, &[2], Some(1.0), Some(1.0)).is_err());
+        conn.execute("INSERT INTO axmp_imports(file_id, dirty) VALUES(1, ?1)
+            ON CONFLICT(file_id) DO UPDATE SET dirty = dirty | excluded.dirty", [schema::LOCATION_EDIT_BIT]).unwrap();
+        conn.execute("UPDATE afiles SET gps_latitude=36.16, gps_longitude=-86.78, gps_altitude=NULL, geo_cc='US' WHERE id=1", []).unwrap();
+        write_gps("10,0N", "20,0E", false);
+        import();
+        assert_eq!(gps(), (36.16, -86.78, None, "US".into()));
+        let cleared = crate::t_sqlite::AFile::set_location(&mut edit_conn, &[1], None, None).unwrap();
+        assert!(cleared.gps_latitude.is_none() && cleared.geo_name.is_none());
+        conn.execute("UPDATE axmp_imports SET dirty = dirty & ~?1 WHERE file_id=1", [schema::LOCATION_EDIT_BIT]).unwrap();
+        write_gps("33,30S", "151,15,0E", true);
+        assert!(import());
+        assert_eq!(gps(), (-33.5, 151.25, Some(-12.5), "AU".into()));
 
         write_gps("91,0N", "151,15,0E", true);
         assert!(import());
@@ -2653,9 +2450,9 @@ mod export_tests {
         fs::write(&media, b"unchanged-original").unwrap();
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE afolders(id INTEGER PRIMARY KEY,path TEXT); INSERT INTO afolders(id) VALUES(1);
-            CREATE TABLE afiles(id INTEGER PRIMARY KEY,folder_id INTEGER DEFAULT 1,name TEXT DEFAULT 'photo.jpg',e_title TEXT,e_headline TEXT,e_artist TEXT,e_copyright TEXT,e_software TEXT,is_favorite INTEGER DEFAULT 0,rating INTEGER DEFAULT 0,culling_flag INTEGER DEFAULT 0,comments TEXT,has_tags INTEGER DEFAULT 0);
+            CREATE TABLE afiles(id INTEGER PRIMARY KEY,folder_id INTEGER DEFAULT 1,name TEXT DEFAULT 'photo.jpg',e_title TEXT,e_headline TEXT,e_artist TEXT,e_copyright TEXT,e_software TEXT,is_favorite INTEGER DEFAULT 0,comments TEXT,has_tags INTEGER DEFAULT 0);
             CREATE TABLE atags(id INTEGER PRIMARY KEY,name TEXT,source TEXT,parent_id INTEGER REFERENCES atags(id) ON DELETE CASCADE);CREATE TABLE afile_tags(file_id INTEGER,tag_id INTEGER,UNIQUE(file_id,tag_id));
-            INSERT INTO afiles(id,rating,comments) VALUES(1,4,'local caption'); INSERT INTO atags(id,name) VALUES(1,'旅行, travel & <test>');INSERT INTO afile_tags VALUES(1,1);").unwrap();
+            INSERT INTO afiles(id,comments) VALUES(1,'local caption'); INSERT INTO atags(id,name) VALUES(1,'旅行, travel & <test>');INSERT INTO afile_tags VALUES(1,1);").unwrap();
         conn.execute(
             "UPDATE afolders SET path=?1 WHERE id=1",
             [folder.to_str().unwrap()],
@@ -2890,7 +2687,7 @@ mod export_tests {
         let (conn, dir, media) = fixture();
         fs::write(
             media.with_extension("xmp"),
-            packet("<r:Rating>3</r:Rating>"),
+            packet(&favorite_property("True")),
         )
         .unwrap();
         import_xmp_for_file_with_conn(
@@ -2900,6 +2697,7 @@ mod export_tests {
             XmpImportMode::InitialScan,
         )
         .unwrap();
+        conn.execute("UPDATE afiles SET is_favorite=0 WHERE id=1", []).unwrap();
         let fingerprint = || {
             conn.query_row(
                 "SELECT fingerprint FROM axmp_imports WHERE file_id=1",
@@ -2918,10 +2716,10 @@ mod export_tests {
         .unwrap();
         assert_eq!(fingerprint(), automatic);
         assert_eq!(
-            conn.query_row("SELECT rating FROM afiles WHERE id=1", [], |row| row
+            conn.query_row("SELECT is_favorite FROM afiles WHERE id=1", [], |row| row
                 .get::<_, i32>(0))
                 .unwrap(),
-            3
+            1
         );
         assert!(
             !import_xmp_for_file_with_conn(
@@ -2978,57 +2776,6 @@ mod export_tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn dolphin_rating_attribute_imports_to_catalog_and_protects_local_clear() {
-        let (conn, dir, media) = fixture();
-        conn.execute("UPDATE afiles SET rating=0 WHERE id=1", [])
-            .unwrap();
-        conn.execute("UPDATE axmp_imports SET dirty=0 WHERE file_id=1", [])
-            .unwrap();
-        let original_mtime = fs::metadata(&media).unwrap().modified().unwrap();
-        xattr::set_deref(&media, "user.baloo.rating", b"9").unwrap();
-        let import = || {
-            import_xmp_for_file_with_conn(
-                1,
-                media.to_str().unwrap(),
-                &conn,
-                XmpImportMode::RescanNonDestructive,
-            )
-            .unwrap()
-        };
-        let rating = || {
-            conn.query_row("SELECT rating FROM afiles WHERE id=1", [], |row| {
-                row.get::<_, i32>(0)
-            })
-            .unwrap()
-        };
-        assert!(import());
-        assert_eq!(rating(), 5);
-        assert!(!import());
-        conn.execute("UPDATE afiles SET rating=0 WHERE id=1", [])
-            .unwrap();
-        xattr::set_deref(&media, "user.baloo.rating", b"4").unwrap();
-        assert_eq!(
-            fs::metadata(&media).unwrap().modified().unwrap(),
-            original_mtime
-        );
-        assert!(import());
-        assert_eq!(rating(), 0);
-        // An untouched rating can import the changed source on explicit refresh.
-        conn.execute("UPDATE axmp_imports SET dirty=0 WHERE file_id=1", [])
-            .unwrap();
-        import_xmp_for_file_with_conn(
-            1,
-            media.to_str().unwrap(),
-            &conn,
-            XmpImportMode::RefreshNonDestructive,
-        )
-        .unwrap();
-        assert_eq!(rating(), 2);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn system_comments_import_on_attribute_changes_and_protect_local_edits() {
@@ -3072,12 +2819,13 @@ mod export_tests {
         let xml = packet(&format!(
             "<r:Rating>2</r:Rating><d:subject><rdf:Bag><rdf:li>old</rdf:li></rdf:Bag></d:subject><d:description><rdf:Alt><rdf:li xml:lang=\"fr\">Français &amp; texte</rdf:li><rdf:li xml:lang=\"x-default\">old</rdf:li></rdf:Alt></d:description>{unknown}"
         ));
-        let out = merge(&xml, 5, &["A,B & <C>".into()], "新备注 & <test>", ALL).unwrap();
+        let out = merge(&xml, &["A,B & <C>".into()], "新备注 & <test>", ALL).unwrap();
         assert!(out.contains("<crs:Exposure2012>+0.50</crs:Exposure2012><!--keep-->"));
+        // Ratings are no longer managed, so the existing value is left untouched.
+        assert!(out.contains("<r:Rating>2</r:Rating>"));
         assert!(!out.contains("Places|Paris"));
         assert!(out.contains("<rdf:li xml:lang=\"fr\">Français &amp; texte</rdf:li>"));
         let parsed = parse_xmp_str(&out).unwrap();
-        assert_eq!(parsed.rating, Some(5));
         assert_eq!(parsed.description.as_deref(), Some("新备注 & <test>"));
         assert!(parsed.tags.unwrap().contains(&"A,B & <C>".into()));
     }
@@ -3086,34 +2834,32 @@ mod export_tests {
         let xml = format!(
             "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:d=\"{NS_DC}\" xmlns:r=\"{NS_XMP}\" r:Rating=\"5\" d:description=\"old\" d:subject=\"old\" custom=\"untouched\"/></rdf:RDF>"
         );
-        let out = merge(&xml, 0, &[], "", ALL).unwrap();
+        let out = merge(&xml, &[], "", ALL).unwrap();
         assert!(out.contains("custom=\"untouched\""));
+        assert!(out.contains("r:Rating=\"5\""));
         let m = parse_xmp_str(&out).unwrap();
-        assert_eq!(m.rating, Some(0));
         assert_eq!(m.tags, Some(vec![]));
         assert_eq!(m.description, Some(String::new()));
     }
     #[test]
     fn empty_rdf_and_partial_update() {
-        let out = merge(&format!("<rdf:RDF xmlns:rdf=\"{NS_RDF}\"/>"), 3, &[], "", 1).unwrap();
-        assert_eq!(parse_xmp_str(&out).unwrap().rating, Some(3));
+        let out = merge_with_favorite(&format!("<rdf:RDF xmlns:rdf=\"{NS_RDF}\"/>"), true, &[], "", 16).unwrap();
+        assert_eq!(parse_xmp_str(&out).unwrap().favorite, Some(true));
         let out = merge(
             &packet("<r:Rating>4</r:Rating><d:description>original</d:description>"),
-            0,
             &["new".into()],
             "",
             8,
         )
         .unwrap();
         let m = parse_xmp_str(&out).unwrap();
-        assert_eq!(m.rating, Some(4));
+        assert!(out.contains("<r:Rating>4</r:Rating>"));
         assert_eq!(m.description.as_deref(), Some("original"));
-        assert!(merge("<!DOCTYPE x><x/>", 0, &[], "", ALL).is_err());
+        assert!(merge("<!DOCTYPE x><x/>", &[], "", ALL).is_err());
         assert!(
             merge(
                 &packet("<r:Rating>2</r:Rating>")
                     .replace("rdf:about=\"\"", "rdf:about=\"file:///photo.jpg\""),
-                3,
                 &[],
                 "",
                 ALL
@@ -3129,7 +2875,7 @@ mod export_tests {
         assert_eq!(result.failures.len(), 1);
         let sidecar = folder.join("photo.jpg.xmp");
         let m = read_xmp_file(&sidecar).unwrap();
-        assert_eq!(m.rating, Some(4));
+        assert_eq!(m.favorite, Some(false));
         assert_eq!(m.description.as_deref(), Some("local caption"));
         assert_eq!(m.tags.unwrap(), vec!["旅行, travel & <test>"]);
         assert_eq!(fs::read(&media).unwrap(), b"unchanged-original");
@@ -3163,7 +2909,7 @@ mod export_tests {
     fn local_edits_and_import_never_write_sidecars() {
         let (conn, folder, media) = fixture();
         conn.execute(
-            "UPDATE afiles SET rating=0,culling_flag=2,comments='local edit' WHERE id=1",
+            "UPDATE afiles SET is_favorite=1,comments='local edit' WHERE id=1",
             [],
         )
         .unwrap();
@@ -3185,8 +2931,9 @@ mod export_tests {
         );
         assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
         let saved = read_xmp_file(&folder.join("photo.jpg.xmp")).unwrap();
-        assert_eq!(saved.rating, Some(0));
-        assert_eq!(saved.culling_flag, Some(2));
+        assert_eq!(saved.favorite, Some(true));
+        // The externally written rating is preserved by writeback.
+        assert!(fs::read_to_string(folder.join("photo.jpg.xmp")).unwrap().contains("<r:Rating>2</r:Rating>"));
         assert_eq!(saved.description.as_deref(), Some("local edit"));
         assert_eq!(saved.tags, Some(vec!["renamed".into()]));
         fs::remove_dir_all(folder).unwrap();
@@ -3209,11 +2956,9 @@ mod export_tests {
     #[test]
     fn forced_refresh_bypasses_fingerprint_but_protects_local_clear() {
         let (conn, folder, media) = fixture();
-        conn.execute("UPDATE afiles SET rating=0 WHERE id=1", [])
-            .unwrap();
         fs::write(
             folder.join("photo.jpg.xmp"),
-            packet("<r:Rating>5</r:Rating>"),
+            packet(&favorite_property("True")),
         )
         .unwrap();
         import_xmp_for_file_with_conn(
@@ -3243,7 +2988,7 @@ mod export_tests {
             )
             .unwrap()
         );
-        conn.execute("UPDATE afiles SET rating=0 WHERE id=1", [])
+        conn.execute("UPDATE afiles SET is_favorite=0 WHERE id=1", [])
             .unwrap();
         import_xmp_for_file_with_conn(
             1,
@@ -3253,7 +2998,7 @@ mod export_tests {
         )
         .unwrap();
         assert_eq!(
-            conn.query_row("SELECT rating FROM afiles WHERE id=1", [], |r| r
+            conn.query_row("SELECT is_favorite FROM afiles WHERE id=1", [], |r| r
                 .get::<_, i32>(0))
                 .unwrap(),
             0
@@ -3315,27 +3060,27 @@ mod export_tests {
         let (conn, folder, _) = fixture();
         conn.execute_batch("CREATE TABLE axmp_write_control(id INTEGER PRIMARY KEY,enabled INTEGER);INSERT INTO axmp_write_control VALUES(1,1);
             CREATE TABLE axmp_writes(file_id INTEGER PRIMARY KEY,mask INTEGER,revision INTEGER,error TEXT);INSERT INTO axmp_writes VALUES(1,15,1,NULL);
-            CREATE TRIGGER axmp_write_rating AFTER UPDATE OF rating ON afiles BEGIN INSERT OR REPLACE INTO axmp_writes VALUES(NEW.id,1,1,NULL);END;").unwrap();
+            CREATE TRIGGER axmp_write_rating AFTER UPDATE OF comments ON afiles BEGIN INSERT OR REPLACE INTO axmp_writes VALUES(NEW.id,1,1,NULL);END;").unwrap();
         initialize(&conn).unwrap();
         initialize(&conn).unwrap();
         let legacy:i64=conn.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('axmp_write_control','axmp_writes','axmp_write_rating')",[],|r|r.get(0)).unwrap();
         assert_eq!(legacy, 0);
-        conn.execute("UPDATE afiles SET rating=5 WHERE id=1", [])
+        conn.execute("UPDATE afiles SET is_favorite=1 WHERE id=1", [])
             .unwrap();
         assert_eq!(
             conn.query_row(
-                "SELECT dirty & 1 FROM axmp_imports WHERE file_id=1",
+                "SELECT dirty & 16 FROM axmp_imports WHERE file_id=1",
                 [],
                 |r| r.get::<_, i32>(0)
             )
             .unwrap(),
-            1
+            16
         );
         assert!(!folder.join("photo.jpg.xmp").exists());
         assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
         assert_eq!(
-            read_xmp_file(&folder.join("photo.jpg.xmp")).unwrap().rating,
-            Some(5)
+            read_xmp_file(&folder.join("photo.jpg.xmp")).unwrap().favorite,
+            Some(true)
         );
         fs::remove_dir_all(folder).unwrap();
     }
@@ -3348,7 +3093,7 @@ mod export_tests {
         let (conn, folder, _) = fixture();
         assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
         let result = std::process::Command::new("exiftool")
-            .args(["-s3", "-Rating", "-Subject", "-Description"])
+            .args(["-s3", "-Subject", "-Description"])
             .arg(folder.join("photo.jpg.xmp"))
             .output()
             .expect("ExifTool required with LAP_TEST_EXIFTOOL=1");
@@ -3362,125 +3107,55 @@ mod export_tests {
                 .unwrap()
                 .lines()
                 .collect::<Vec<_>>(),
-            vec!["4", "旅行, travel & <test>", "local caption"]
+            vec!["旅行, travel & <test>", "local caption"]
         );
-        for (flag, pick) in [(1, "1"), (2, "-1"), (0, "0")] {
-            conn.execute("UPDATE afiles SET culling_flag=?1 WHERE id=1", [flag])
-                .unwrap();
-            assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
-            let actual = std::process::Command::new("exiftool")
-                .args(["-s3", "-n", "-XMP-xmp:Rating", "-XMP-xmpDM:Pick"])
-                .arg(folder.join("photo.jpg.xmp"))
-                .output()
-                .unwrap();
-            assert!(actual.status.success());
-            assert_eq!(
-                String::from_utf8(actual.stdout)
-                    .unwrap()
-                    .lines()
-                    .collect::<Vec<_>>(),
-                vec!["4", pick]
-            );
-        }
         fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
-    fn culling_and_stars_round_trip_for_every_combination() {
+    fn writeback_preserves_existing_ratings_picks_and_labels() {
+        let shorthand = "r:Rating=\"-1\" r:Label=\"Reject\" m:pick=\"-1\" m:good=\"False\" dt:rejected=\"1\" k:PickLabel=\"1\"";
+        let elements = "<m:good>False</m:good><r:Label>Pick</r:Label><r:Rating>3</r:Rating><m:pick>1</m:pick><dt:rejected>1</dt:rejected><k:PickLabel>3</k:PickLabel>";
         let legacy = format!(
-            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:m=\"{NS_XMP_DM}\" xmlns:r=\"{NS_XMP}\" xmlns:dt=\"{NS_DARKTABLE}\" r:Rating=\"-1\" r:Label=\"Reject\" m:pick=\"-1\" m:good=\"False\" dt:rejected=\"1\"><m:good>False</m:good><r:Label>Pick</r:Label></rdf:Description></rdf:RDF>"
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:m=\"{NS_XMP_DM}\" xmlns:r=\"{NS_XMP}\" xmlns:dt=\"{NS_DARKTABLE}\" xmlns:k=\"{NS_DIGIKAM}\" {shorthand}>{elements}</rdf:Description></rdf:RDF>"
         );
-        for rating in 0..=5 {
-            for flag in 0..=2 {
-                let output = merge_with_culling(&legacy, rating, flag, &[], "", ALL).unwrap();
-                let parsed = parse_xmp_str(&output).unwrap();
-                assert_eq!(parsed.rating, Some(rating));
-                assert_eq!(parsed.culling_flag, Some(flag));
-                assert!(!output.contains("<r:Label>Pick</r:Label>"));
-                assert!(!output.contains("r:Label=\"Reject\""));
-                let bytes = crate::metadata::embedded::tests::jpeg_with_xmp_packet(output.as_bytes());
-                let path = std::env::temp_dir().join(format!(
-                    "lap-culling-roundtrip-{}-{}.jpg",
-                    std::process::id(),
-                    SERIAL.fetch_add(1, Ordering::Relaxed)
-                ));
-                fs::write(&path, bytes).unwrap();
-                let embedded = crate::metadata::embedded::read(&path).organization;
-                assert_eq!(embedded.rating, Some(rating));
-                assert_eq!(embedded.culling_flag, Some(flag));
-                fs::remove_file(path).unwrap();
-                if flag == 0 {
-                    assert!(!output.contains("<xmpDM:good>"));
-                }
-            }
+        for favorite in [true, false] {
+            let output = merge_with_paths(
+                &legacy, favorite, &["tag".into()], None, "caption", ALL, &[],
+            )
+            .unwrap();
+            assert!(output.contains(shorthand), "{output}");
+            assert!(output.contains(elements), "{output}");
+            let parsed = parse_xmp_str(&output).unwrap();
+            assert_eq!(parsed.favorite, Some(favorite));
+            assert_eq!(parsed.description.as_deref(), Some("caption"));
+            assert_eq!(parsed.tags, Some(vec!["tag".to_string()]));
         }
-        // A genuine color label is not a culling property.
-        let output =
-            merge_with_culling(&packet("<r:Label>Red</r:Label>"), 4, 1, &[], "", ALL).unwrap();
-        assert!(output.contains("<r:Label>Red</r:Label>"));
-    }
-    #[test]
-    fn culling_manual_export_and_local_unflag_are_protected() {
-        let (conn, folder, media) = fixture();
-        for flag in [1, 2, 0] {
-            conn.execute("UPDATE afiles SET culling_flag=?1 WHERE id=1", [flag])
-                .unwrap();
-            assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
-            let parsed = read_xmp_file(&folder.join("photo.jpg.xmp")).unwrap();
-            assert_eq!(parsed.culling_flag, Some(flag));
-            assert_eq!(parsed.rating, Some(4));
-            // Even a rating-only edit must retain the current flag.
-            conn.execute("UPDATE afiles SET rating=3 WHERE id=1", [])
-                .unwrap();
-            assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
-            assert_eq!(
-                read_xmp_file(&folder.join("photo.jpg.xmp"))
-                    .unwrap()
-                    .culling_flag,
-                Some(flag)
-            );
-            conn.execute("UPDATE afiles SET rating=4 WHERE id=1", [])
-                .unwrap();
-            save_batch(&conn, &[1]);
-        }
-        fs::write(
-            folder.join("photo.jpg.xmp"),
-            packet("<r:Rating>-1</r:Rating>"),
-        )
-        .unwrap();
-        import_xmp_for_file_with_conn(
-            1,
-            media.to_str().unwrap(),
-            &conn,
-            XmpImportMode::RefreshNonDestructive,
-        )
-        .unwrap();
-        assert_eq!(
-            conn.query_row("SELECT culling_flag FROM afiles WHERE id=1", [], |r| r
-                .get::<_, i32>(0))
-                .unwrap(),
-            0
-        );
-
+        // A full manual export through the catalog also keeps them byte-for-byte.
+        let (conn, folder, _) = fixture();
+        let sidecar = folder.join("photo.jpg.xmp");
+        fs::write(&sidecar, &legacy).unwrap();
+        assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+        let saved = fs::read_to_string(&sidecar).unwrap();
+        assert!(saved.contains(shorthand), "{saved}");
+        assert!(saved.contains(elements), "{saved}");
         fs::remove_dir_all(folder).unwrap();
     }
     #[test]
     fn empty_description_alt_can_be_updated() {
         for alt in ["<rdf:Alt/>", "<rdf:Alt />", "<rdf:Alt></rdf:Alt>"] {
             let xml = packet(&format!("<d:description>{alt}</d:description>"));
-            let output = merge_with_culling(&xml, 4, 1, &[], "new caption", ALL).unwrap();
+            let output = merge(&xml, &[], "new caption", ALL).unwrap();
             let parsed = parse_xmp_str(&output).unwrap();
             assert_eq!(parsed.description.as_deref(), Some("new caption"));
-            assert_eq!(parsed.rating, Some(4));
-            assert_eq!(parsed.culling_flag, Some(1));
         }
     }
 
     #[test]
-    fn previous_import_version_backfills_culling_once() {
+    fn previous_import_version_backfills_once() {
         let (conn, folder, media) = fixture();
         let xml = format!(
-            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:dm=\"{NS_XMP_DM}\" dm:pick=\"1\"/></rdf:RDF>"
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:l=\"{NS_LAP}\" l:Favorite=\"True\"/></rdf:RDF>"
         );
         fs::write(
             &media,
@@ -3509,7 +3184,7 @@ mod export_tests {
             .unwrap()
         );
         assert_eq!(
-            conn.query_row("SELECT culling_flag FROM afiles WHERE id=1", [], |r| r
+            conn.query_row("SELECT is_favorite FROM afiles WHERE id=1", [], |r| r
                 .get::<_, i32>(0))
                 .unwrap(),
             1
@@ -3523,8 +3198,8 @@ mod export_tests {
             )
             .unwrap()
         );
-        // Even an old-version import must preserve an explicit local unflag.
-        conn.execute("UPDATE afiles SET culling_flag=0 WHERE id=1", [])
+        // Even an old-version import must preserve an explicit local unfavorite.
+        conn.execute("UPDATE afiles SET is_favorite=0 WHERE id=1", [])
             .unwrap();
         conn.execute(
             "UPDATE axmp_imports SET fingerprint=?1 WHERE file_id=1",
@@ -3539,7 +3214,7 @@ mod export_tests {
         )
         .unwrap();
         assert_eq!(
-            conn.query_row("SELECT culling_flag FROM afiles WHERE id=1", [], |r| r
+            conn.query_row("SELECT is_favorite FROM afiles WHERE id=1", [], |r| r
                 .get::<_, i32>(0))
                 .unwrap(),
             0
@@ -3570,7 +3245,7 @@ mod export_tests {
     fn sidecar_flag_precedence_and_namespace_aliases() {
         let (conn, folder, media) = fixture();
         let embedded = format!(
-            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:xmpDM=\"{NS_XMP_DM}\" xmpDM:pick=\"1\"/></rdf:RDF>"
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:lap=\"{NS_LAP}\" lap:Favorite=\"True\"/></rdf:RDF>"
         );
         fs::write(
             &media,
@@ -3578,7 +3253,7 @@ mod export_tests {
         )
         .unwrap();
         let sidecar = format!(
-            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:alias=\"{NS_XMP_DM}\" alias:pick=\"-1\"/></rdf:RDF>"
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:alias=\"{NS_LAP}\" alias:Favorite=\"False\"/></rdf:RDF>"
         );
         fs::write(folder.join("photo.jpg.xmp"), sidecar).unwrap();
         import_xmp_for_file_with_conn(
@@ -3588,11 +3263,12 @@ mod export_tests {
             XmpImportMode::InitialScan,
         )
         .unwrap();
+        // The explicit sidecar value outranks the embedded favorite.
         assert_eq!(
-            conn.query_row("SELECT culling_flag FROM afiles WHERE id=1", [], |r| r
+            conn.query_row("SELECT is_favorite FROM afiles WHERE id=1", [], |r| r
                 .get::<_, i32>(0))
                 .unwrap(),
-            2
+            0
         );
 
         fs::remove_dir_all(folder).unwrap();
@@ -3602,7 +3278,7 @@ mod export_tests {
         let xml = format!(
             "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:lr=\"{NS_LR}\"><lr:hierarchicalSubject><rdf:Bag><rdf:li>Places|Paris</rdf:li></rdf:Bag></lr:hierarchicalSubject></rdf:Description></rdf:RDF>"
         );
-        let output = merge_with_culling(&xml, 0, 0, &[], "", ALL).unwrap();
+        let output = merge(&xml, &[], "", ALL).unwrap();
         assert_eq!(parse_xmp_str(&output).unwrap().tags, Some(vec![]));
     }
     #[test]
@@ -3613,10 +3289,10 @@ mod export_tests {
             format!("<rdf:Description xmlns:a=\"{NS_ACDSEE}\"><a:categories>{categories}</a:categories></rdf:Description>"),
         ] {
             let xml = format!("<rdf:RDF xmlns:rdf=\"{NS_RDF}\">{description}</rdf:RDF>");
-            let cleared = merge_with_paths(&xml, 0, 0, false, &[], Some(&[]), "", 8, &[]).unwrap();
+            let cleared = merge_with_paths(&xml, false, &[], Some(&[]), "", 8, &[]).unwrap();
             assert_eq!(parse_xmp_str(&cleared).unwrap().tags, Some(vec![]));
             let paths = vec!["Places|Rome".into()];
-            let replaced = merge_with_paths(&xml, 0, 0, false, &["Rome".into()], Some(&paths), "", 8, &[]).unwrap();
+            let replaced = merge_with_paths(&xml, false, &["Rome".into()], Some(&paths), "", 8, &[]).unwrap();
             assert_eq!(parse_xmp_str(&replaced).unwrap().hierarchical_tags, Some(paths));
             assert!(!replaced.contains("Paris"));
         }
@@ -3626,10 +3302,10 @@ mod export_tests {
         let xml = format!(
             "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:dc=\"{NS_DC}\"><dc:description><![CDATA[end=\"r\"]]></dc:description></rdf:Description></rdf:RDF>"
         );
-        assert!(merge_with_culling(&xml, 3, 0, &[], "", 1).is_ok());
+        assert!(merge(&xml, &[], "", 8).is_ok());
         for ending in ["end='r'", "end = \"r\""] {
             assert!(
-                merge_with_culling(&format!("{xml}<?xpacket {ending}?>"), 3, 0, &[], "", 1)
+                merge(&format!("{xml}<?xpacket {ending}?>"), &[], "", 8)
                     .is_err()
             );
         }
@@ -3651,14 +3327,14 @@ mod export_tests {
                 "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:l=\"{NS_LR}\" xmlns:k=\"{NS_DIGIKAM}\" {properties}>{body}</rdf:Description></rdf:RDF>"
             );
             for tags in [vec!["new & tag".to_string()], vec![]] {
-                let merged = merge_with_culling(&xml, 0, 0, &tags, "", 8).unwrap();
+                let merged = merge(&xml, &tags, "", 8).unwrap();
                 assert!(!merged.contains("old"));
                 assert_eq!(parse_xmp_str(&merged).unwrap().tags, Some(tags));
                 assert!(merged.contains("lr:hierarchicalSubject"));
                 assert!(merged.contains("digiKam:TagsList"));
             }
-            let rating_only = merge_with_culling(&xml, 4, 0, &[], "", 1).unwrap();
-            assert!(rating_only.contains("old"));
+            let description_only = merge(&xml, &[], "", 4).unwrap();
+            assert!(description_only.contains("old"));
         }
     }
     #[test]
@@ -3668,7 +3344,7 @@ mod export_tests {
         );
         let mut merged = xml;
         for _ in 0..3 {
-            merged = merge_with_culling(&merged, 4, 0, &[], "", ALL).unwrap();
+            merged = merge(&merged, &[], "", ALL).unwrap();
             let root = parse_xml(&merged).unwrap();
             let mut props = Vec::new();
             collect_properties(&root, &mut props);
@@ -3681,44 +3357,12 @@ mod export_tests {
         }
     }
     #[test]
-    fn darktable_compatibility_is_updated_only_when_present() {
-        let base = format!("<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description/></rdf:RDF>");
-        assert!(
-            !merge_with_culling(&base, 0, 2, &[], "", ALL)
-                .unwrap()
-                .contains("<darktable:rejected>")
-        );
-        for property in ["d:rejected=\"1\"", ""] {
-            let body = if property.is_empty() {
-                "<d:rejected>1</d:rejected>"
-            } else {
-                ""
-            };
-            let xml = format!(
-                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:d=\"{NS_DARKTABLE}\" {property}>{body}</rdf:Description></rdf:RDF>"
-            );
-            let merged = merge_with_culling(&xml, 0, 0, &[], "", ALL).unwrap();
-            assert!(merged.contains("<darktable:rejected>0</darktable:rejected>"));
-            assert_eq!(parse_xmp_str(&merged).unwrap().culling_flag, Some(0));
-        }
-    }
-    #[test]
-    fn extended_values_override_same_standard_property() {
-        let packet = |pick| {
-            format!(
-                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:d=\"{NS_XMP_DM}\" d:pick=\"{pick}\"/></rdf:RDF>"
-            )
-        };
-        assert_eq!(culling_from_packets(&[packet(-1), packet(1)]), Some(1));
-        assert_eq!(culling_from_packets(&[packet(1), packet(0)]), Some(0));
-    }
-    #[test]
     fn empty_description_is_removed_but_custom_attributes_survive() {
         for (attr, expected) in [("", 1), ("c:x=\"keep\"", 2)] {
             let xml = format!(
-                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:xmp=\"{NS_XMP}\" xmlns:c=\"urn:custom\" xmp:Rating=\"2\" {attr}/></rdf:RDF>"
+                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:d=\"{NS_DC}\" xmlns:c=\"urn:custom\" d:description=\"old\" {attr}/></rdf:RDF>"
             );
-            let merged = merge_with_culling(&xml, 4, 0, &[], "", ALL).unwrap();
+            let merged = merge(&xml, &[], "", ALL).unwrap();
             assert_eq!(merged.matches("<rdf:Description").count(), expected);
             if expected == 2 {
                 assert!(merged.contains("c:x=\"keep\""));
@@ -3763,7 +3407,7 @@ mod export_tests {
         let xml = format!(
             "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:dc=\"{NS_DC}\" xmlns:c=\"urn:custom\"><dc:subject><rdf:Bag><rdf:li>photo</rdf:li></rdf:Bag></dc:subject><c:resource><rdf:Description rdf:about=\"urn:other\"><dc:subject><rdf:Bag><rdf:li>resource</rdf:li></rdf:Bag></dc:subject></rdf:Description></c:resource></rdf:Description></rdf:RDF>"
         );
-        let merged = merge_with_culling(&xml, 0, 0, &[], "", ALL).unwrap();
+        let merged = merge(&xml, &[], "", ALL).unwrap();
         assert!(merged.contains("<rdf:li>resource</rdf:li>"));
         assert_eq!(parse_xmp_str(&merged).unwrap().tags, Some(vec![]));
     }
@@ -3910,7 +3554,7 @@ mod export_tests {
         let extended = packet(&format!(
             "<l:Favorite xmlns:l=\"{NS_LAP}\">False</l:Favorite>"
         ));
-        assert_eq!(flags_from_packets(&[standard, extended]).1, Some(false));
+        assert_eq!(favorite_from_packets(&[standard, extended]), Some(false));
     }
 
     #[test]
@@ -3922,7 +3566,6 @@ mod export_tests {
             assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
             let meta = read_xmp_file(&dir.join("photo.jpg.xmp")).unwrap();
             assert_eq!(meta.favorite, Some(favorite));
-            assert_eq!(meta.rating, Some(4));
             if std::env::var("LAP_TEST_EXIFTOOL").as_deref() == Ok("1") {
                 let output = std::process::Command::new("exiftool")
                     .args(["-s3", "-Favorite"])
@@ -4066,13 +3709,13 @@ mod export_tests {
         let original = packet(&format!(
             "<l:Favorite xmlns:l=\"{NS_LAP}\">True</l:Favorite><crs:Exposure2012>+1</crs:Exposure2012><r:Label>Red</r:Label>"
         ));
-        let updated = merge_with_favorite(&original, 0, 0, false, &[], "", 16).unwrap();
+        let updated = merge_with_favorite(&original, false, &[], "", 16).unwrap();
         assert_eq!(parse_xmp_str(&updated).unwrap().favorite, Some(false));
         assert!(!updated.contains(">True</l:Favorite>"));
         assert!(updated.contains("<r:Label>Red</r:Label>"));
         assert!(updated.contains("<crs:Exposure2012>+1</crs:Exposure2012>"));
         assert_eq!(
-            parse_xmp_str(&merge_with_favorite(&original, 3, 0, false, &[], "", 1).unwrap())
+            parse_xmp_str(&merge_with_favorite(&original, false, &[], "", 8).unwrap())
                 .unwrap()
                 .favorite,
             Some(true)

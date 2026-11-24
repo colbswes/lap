@@ -59,7 +59,9 @@ pub(super) fn apply_with_source_text(
         tx.execute("UPDATE afiles SET e_date_time=?1, taken_date=?2 WHERE id=?3",
             params![date, taken, file_id]).map_err(|e| e.to_string())?;
     }
-    if let Some((lat, lon, alt)) = capture.and_then(|capture| capture.gps) {
+    let location_edited = dirty & super::schema::LOCATION_EDIT_BIT != 0
+        && mode != XmpImportMode::ManualOverwrite;
+    if let Some((lat, lon, alt)) = capture.and_then(|capture| capture.gps).filter(|_| !location_edited) {
         let (name, admin1, admin2, country) = crate::t_sqlite::AFile::geocode(lat, lon);
         tx.execute(
             "UPDATE afiles SET gps_latitude=?1, gps_longitude=?2, gps_altitude=?3,
@@ -79,9 +81,9 @@ fn apply_fields(
     dirty: i32,
     tag_source: impl Fn(&str) -> &'static str,
 ) -> Result<bool, String> {
-    let (db_rating, db_culling_flag, db_comments, db_favorite): (i32, i32, Option<String>, bool) = conn.query_row(
-        "SELECT COALESCE(rating, 0), COALESCE(culling_flag, 0), comments, COALESCE(is_favorite, 0) FROM afiles WHERE id = ?1", [file_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    let (db_comments, db_favorite): (Option<String>, bool) = conn.query_row(
+        "SELECT comments, COALESCE(is_favorite, 0) FROM afiles WHERE id = ?1", [file_id],
+        |row| Ok((row.get(0)?, row.get(1)?))
     ).map_err(|e| e.to_string())?;
 
     if let Some(favorite) = meta.favorite {
@@ -101,45 +103,7 @@ fn apply_fields(
         }
     }
 
-    // 1. Rating
-    if let Some(rating) = meta.rating {
-        let clamped = rating.clamp(0, 5);
-        let should_update = match mode {
-            XmpImportMode::InitialScan => clamped > 0,
-            XmpImportMode::RescanNonDestructive | XmpImportMode::RefreshNonDestructive => {
-                dirty & CatalogField::Rating.mask() == 0 && db_rating == 0 && clamped > 0
-            }
-            XmpImportMode::ManualOverwrite => clamped != db_rating,
-        };
-        if should_update {
-            conn.execute(
-                "UPDATE afiles SET rating = ?1 WHERE id = ?2",
-                params![clamped, file_id],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-    }
-
-    // 2. Culling flag
-    if let Some(flag) = meta.culling_flag {
-        let clamped = flag.clamp(0, 2);
-        let should_update = match mode {
-            XmpImportMode::InitialScan => clamped > 0,
-            XmpImportMode::RescanNonDestructive | XmpImportMode::RefreshNonDestructive => {
-                dirty & CatalogField::Culling.mask() == 0 && db_culling_flag == 0 && clamped > 0
-            }
-            XmpImportMode::ManualOverwrite => clamped != db_culling_flag,
-        };
-        if should_update {
-            conn.execute(
-                "UPDATE afiles SET culling_flag = ?1 WHERE id = ?2",
-                params![clamped, file_id],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-    }
-
-    // 3. Comments / description
+    // Comments / description
     if let Some(ref desc) = meta.description {
         let trimmed = desc.trim();
         let protected_clear = matches!(mode, XmpImportMode::RescanNonDestructive | XmpImportMode::RefreshNonDestructive)
@@ -153,7 +117,7 @@ fn apply_fields(
         }
     }
 
-    // 4. Keywords / Tags
+    // Keywords / Tags
     if let Some(ref tags) = meta.tags {
         if matches!(
             mode,
@@ -237,7 +201,6 @@ pub fn merge_system(embedded: &mut XmpMetadata, system: XmpMetadata) {
     {
         embedded.description = system.description;
     }
-    embedded.rating = embedded.rating.or(system.rating);
     if let Some(tags) = system.tags {
         for tag in tags {
             push_keyword(&tag, embedded.tags.get_or_insert_with(Vec::new));
@@ -249,8 +212,6 @@ pub fn merge_system(embedded: &mut XmpMetadata, system: XmpMetadata) {
 /// keyword property must preserve both flat and hierarchical embedded tags.
 pub(super) fn merge_sidecar(embedded: &mut XmpMetadata, sidecar: XmpMetadata) {
     embedded.favorite = sidecar.favorite.or(embedded.favorite);
-    embedded.rating = sidecar.rating.or(embedded.rating);
-    embedded.culling_flag = sidecar.culling_flag.or(embedded.culling_flag);
     if sidecar.tags.is_some() {
         embedded.tags = sidecar.tags;
         embedded.hierarchical_tags = sidecar.hierarchical_tags;
@@ -267,9 +228,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE atags(id INTEGER PRIMARY KEY,name TEXT,parent_id INTEGER,source TEXT);
-             CREATE TABLE afiles(id INTEGER PRIMARY KEY,rating INTEGER,culling_flag INTEGER,comments TEXT,is_favorite INTEGER,has_tags INTEGER);
+             CREATE TABLE afiles(id INTEGER PRIMARY KEY,comments TEXT,is_favorite INTEGER,has_tags INTEGER);
              CREATE TABLE afile_tags(file_id INTEGER,tag_id INTEGER,PRIMARY KEY(file_id,tag_id));
-             INSERT INTO afiles VALUES(1,0,0,NULL,0,1);
+             INSERT INTO afiles VALUES(1,NULL,0,1);
              INSERT INTO atags VALUES(1,'Anniversary',NULL,NULL);
              INSERT INTO afile_tags VALUES(1,1);",
         ).unwrap();

@@ -69,7 +69,7 @@ test("remapSmartAlbumPersonIds rewrites merged person rule values without touchi
       query: {
         version: 1,
         match: "all",
-        rules: [{ id: "r5", field: "rating", operator: "gte", value: 4 }],
+        rules: [{ id: "r5", field: "favorite", operator: "is", value: true }],
       },
     },
   ];

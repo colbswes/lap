@@ -25,6 +25,7 @@
           :file="fileInfo"
           :showThumbnailPlaceholder="true"
           :nextFilePath="nextFilePath"
+          :prefetchFiles="panePrefetchFiles.left"
           :hasPrevious="fileIndex > 0"
           :hasNext="fileIndex < fileCount - 1"
           :fileIndex="fileIndex"
@@ -76,7 +77,6 @@
             :showWindowControls="true"
             :isFullScreen="isFullScreen"
             :file="getFileInfoByPane(activePane)"
-            :nextFilePath="getNextFilePathByPane(activePane)"
             :hasPrevious="getFileIndexByPane(activePane) > 0"
             :hasNext="getFileIndexByPane(activePane) < fileCount - 1"
             :fileIndex="getFileIndexByPane(activePane)"
@@ -127,6 +127,7 @@
                 :file="getFileInfoByPane(pane)"
                 :showThumbnailPlaceholder="true"
                 :nextFilePath="getNextFilePathByPane(pane)"
+                :prefetchFiles="panePrefetchFiles[pane]"
                 :hasPrevious="getFileIndexByPane(pane) > 0"
                 :hasNext="getFileIndexByPane(pane) < fileCount - 1"
                 :fileIndex="getFileIndexByPane(pane)"
@@ -291,6 +292,7 @@
 
 <script setup lang="ts">
 
+import { clearDecodedImages, type PrefetchFile } from '@/common/viewerImages';
 import { getVisibleEditableMetadataFields } from '@/common/fileInfoFields';
 import EditMetadataDialog from "@/components/EditMetadataDialog.vue";
 import { isOriginalStorageUnavailable, isOriginalUnavailable, setAlbumAccessibility, resetFileAccessibility } from '@/common/availability';
@@ -326,8 +328,6 @@ import {
   setAlbumCover,
   setDesktopWallpaper,
   setFileFavorite,
-  setFileRating,
-  setFileCullingFlag,
   setFileRotate,
 } from '@/common/api';
 
@@ -402,8 +402,18 @@ const mediaViewerRef = ref<any>(null); // media viewer reference
 const rightMediaViewerRef = ref<any>(null); // right media viewer reference (split mode)
 type Pane = 'left' | 'right' | 'bottomLeft' | 'bottomRight';
 const allPanes: Pane[] = ['left', 'right', 'bottomLeft', 'bottomRight'];
-const cullingSync = createMetadataSyncTracker();
-const ratingSync = createMetadataSyncTracker('rating');
+const panePrefetchFiles = reactive<Record<Pane, PrefetchFile[]>>({ left: [], right: [], bottomLeft: [], bottomRight: [] });
+const NAVIGATION_TIMEOUT_MS = 5000;
+const pendingNavigation = new Map<Pane, { index: number; request: number; timeout: ReturnType<typeof setTimeout> }>();
+let navigationRequest = 0;
+
+function readPrefetchFiles(value: string | null): PrefetchFile[] {
+  if (!value) return [];
+  try {
+    const files = JSON.parse(value);
+    return Array.isArray(files) ? files : [];
+  } catch { return []; }
+}
 const favoriteSync = createMetadataSyncTracker('is_favorite');
 const paneViewerRefs = new Map<Pane, any>();
 const isFullScreen = ref(false);
@@ -520,10 +530,12 @@ onMounted(async() => {
   fileId.value    = Number(urlParams.get('fileId'));
   fileIndex.value = Number(urlParams.get('fileIndex'));
   fileCount.value = Number(urlParams.get('fileCount'));
-  nextFilePath.value = decodeURIComponent(urlParams.get('nextFilePath') || '');
+  nextFilePath.value = urlParams.get('nextFilePath') || '';
+  panePrefetchFiles.left = readPrefetchFiles(urlParams.get('prefetchFiles'));
   const initialRightFileId = Number(urlParams.get('rightFileId') || '0');
   const initialRightFileIndex = Number(urlParams.get('rightFileIndex') || '-1');
-  rightNextFilePath.value = decodeURIComponent(urlParams.get('rightNextFilePath') || '');
+  rightNextFilePath.value = urlParams.get('rightNextFilePath') || '';
+  panePrefetchFiles.right = readPrefetchFiles(urlParams.get('rightPrefetchFiles'));
   const forceSplitCount = normalizeSplitCount(urlParams.get('forceSplitCount'));
   isCompareModeSession.value = urlParams.get('compareMode') === '1';
   compareFileCount.value = isCompareModeSession.value ? Number(urlParams.get('compareFileCount') || '0') : 0;
@@ -541,6 +553,8 @@ onMounted(async() => {
   rightIsZoomFit.value = true;
   activePane.value = 'left';
   isFullScreen.value = !!config.imageViewer?.isFullScreen;
+  void loadPaneFileInfo('left', fileId.value);
+  if (rightFileId.value > 0) void loadPaneFileInfo('right', rightFileId.value);
 
   unlistenAlbumAccessChanged = await listen('album-accessibility-changed', async (event: any) => {
     const { albumId, rootPath, available, libraryId } = event.payload || {};
@@ -550,22 +564,21 @@ onMounted(async() => {
     await Promise.all(getAvailablePanes().map(async pane => {
       const file = getFileInfoByPane(pane);
       if (!file || Number(file.album_id) !== Number(albumId)) return;
-      const updated = await getFileInfo(file.id);
-      if (libraryId !== libConfig._libraryId || getFileInfoByPane(pane)?.id !== file.id) return;
-      if (pane === 'left') fileInfo.value = updated;
-      else if (pane === 'right') rightFileInfo.value = updated;
-      else extraPaneState[pane].fileInfo = updated;
+      if (Number(file.id) === getFileIdByPane(pane)) {
+        await loadPaneFileInfo(pane, Number(file.id));
+      }
     }));
   });
 
   // Listen 
   unlistenImg = await listen('update-img', async (event: any) => {
-    if(uiStore.inputStack.length > 0) {
-      return;
-    }
-
     const requestedPane = String(event.payload?.pane || 'left');
     const pane: Pane = allPanes.includes(requestedPane as Pane) ? requestedPane as Pane : 'left';
+    const navigationRequest = event.payload?.navigationRequest;
+    if (navigationRequest !== undefined && pendingNavigation.get(pane)?.request !== navigationRequest) return;
+    if (navigationRequest === undefined && uiStore.inputStack.length > 0) return;
+    clearPendingNavigation(pane);
+    if (event.payload?.navigationRejected) return;
     if (typeof event.payload?.compareMode === 'boolean') {
       isCompareModeSession.value = !!event.payload.compareMode;
     }
@@ -593,21 +606,21 @@ onMounted(async() => {
     }
 
     fileCount.value = Number(event.payload.fileCount);
+    panePrefetchFiles[pane] = Array.isArray(event.payload.prefetchFiles) ? event.payload.prefetchFiles : [];
     if (pane === 'right') {
       rightFileId.value = Number(event.payload.fileId);
       rightFileIndex.value = Number(event.payload.fileIndex);
       rightNextFilePath.value = event.payload.nextFilePath || '';
-      if (rightFileId.value <= 0) rightFileInfo.value = null;
     } else if (pane === 'bottomLeft' || pane === 'bottomRight') {
       extraPaneState[pane].fileId = Number(event.payload.fileId);
       extraPaneState[pane].fileIndex = Number(event.payload.fileIndex);
       extraPaneState[pane].nextFilePath = event.payload.nextFilePath || '';
-      if (extraPaneState[pane].fileId <= 0) extraPaneState[pane].fileInfo = null;
     } else {
       fileId.value = Number(event.payload.fileId);
       fileIndex.value = Number(event.payload.fileIndex);
       nextFilePath.value = event.payload.nextFilePath || '';
     }
+    void loadPaneFileInfo(pane, getFileIdByPane(pane), event.payload.file);
   });
   ensureFourPanesLoaded();
 
@@ -616,6 +629,16 @@ onMounted(async() => {
     const { message, fileId: targetFileId, changes, rotateDelta = 90 } = event.payload as any;
     console.log('message-from-content:', message, targetFileId);
     switch (message) {
+      case 'refresh-images': {
+        const { libraryId, filePaths } = event.payload as { libraryId: string; filePaths: string[] };
+        if (libraryId === libConfig._libraryId) {
+          for (const path of filePaths) {
+            clearDecodedImages(path);
+            uiStore.updateFileVersion(path);
+          }
+        }
+        break;
+      }
       case 'rotate':
         for (const pane of allPanes) {
           if (targetFileId !== getFileIdByPane(pane)) continue;
@@ -644,11 +667,6 @@ onMounted(async() => {
         break;
       }
       case 'update-file-meta': {
-        const incomingCulling = changes?.culling_flag ?? changes?.cullingFlag;
-        if (incomingCulling !== undefined) {
-          cullingSync.recordExternalMetadata(targetFileId, Number(incomingCulling));
-        }
-        if (changes?.rating !== undefined) ratingSync.recordExternalMetadata(targetFileId, Number(changes.rating));
         if (changes?.is_favorite !== undefined) favoriteSync.recordExternalMetadata(targetFileId, Number(changes.is_favorite));
         applyFileMetaToPanes(targetFileId, changes || {});
         break;
@@ -662,6 +680,7 @@ onMounted(async() => {
     // Content re-broadcasts the settled list; ignore our own normal-mode
     // event so navigation never uses the pre-removal file count.
     if (event?.payload?.source === 'image-viewer' && !isCompareModeSession.value) return;
+    allPanes.forEach(clearPendingNavigation);
     const deletedIds = Array.isArray(event?.payload?.fileIds)
       ? event.payload.fileIds.map((id: any) => Number(id)).filter((id: number) => id > 0)
       : [];
@@ -683,6 +702,7 @@ onMounted(async() => {
       fileIndex.value = -1;
       fileInfo.value = null;
       nextFilePath.value = '';
+      panePrefetchFiles.left = [];
       clearSecondaryPanes();
       activePane.value = 'left';
 
@@ -704,16 +724,20 @@ onMounted(async() => {
     if (fileCount.value <= 0) {
       fileId.value = 0;
       fileIndex.value = -1;
+      fileInfo.value = null;
       nextFilePath.value = '';
+      panePrefetchFiles.left = [];
       rightFileId.value = 0;
       rightFileIndex.value = -1;
       rightFileInfo.value = null;
       rightNextFilePath.value = '';
+      panePrefetchFiles.right = [];
       for (const pane of ['bottomLeft', 'bottomRight'] as const) {
         extraPaneState[pane].fileId = 0;
         extraPaneState[pane].fileIndex = -1;
         extraPaneState[pane].fileInfo = null;
         extraPaneState[pane].nextFilePath = '';
+        panePrefetchFiles[pane] = [];
       }
       return;
     }
@@ -780,6 +804,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize);
   document.documentElement.style.fontSize = '';
   clearSlideShowTimer();
+  allPanes.forEach(clearPendingNavigation);
   
   // unlisten
   unlistenImg();
@@ -1126,20 +1151,6 @@ function handleKeyDown(event: KeyboardEvent) {
     return;
   }
 
-  const ratingShortcut = getMatchedRating(event);
-  if (ratingShortcut !== null) {
-    event.preventDefault();
-    if (!event.repeat) void setCurrentFileRating(ratingShortcut, getActiveFilePane(), event.shiftKey);
-    return;
-  }
-
-  const cullingShortcut = getMatchedCulling(event);
-  if (cullingShortcut !== null) {
-    event.preventDefault();
-    if (!event.repeat) void setCurrentFileCullingFlag(cullingShortcut, getActiveFilePane(), event.shiftKey);
-    return;
-  }
-
 
   if (matchesShortcut('view.cycleBackground', event, shortcutPlatform)) {
     event.preventDefault();
@@ -1213,30 +1224,6 @@ function handleKeyDown(event: KeyboardEvent) {
     event.preventDefault();
     viewActions[matchedAction]?.();
   }
-}
-
-const ratingActions: Array<{ actionId: ShortcutActionId; rating: number }> = [
-  { actionId: 'meta.rating.clear', rating: 0 },
-  { actionId: 'meta.rating.one', rating: 1 },
-  { actionId: 'meta.rating.two', rating: 2 },
-  { actionId: 'meta.rating.three', rating: 3 },
-  { actionId: 'meta.rating.four', rating: 4 },
-  { actionId: 'meta.rating.five', rating: 5 },
-];
-const cullingActions: Array<{ actionId: ShortcutActionId; cullingFlag: number }> = [
-  { actionId: 'meta.culling.pick', cullingFlag: 1 },
-  { actionId: 'meta.culling.reject', cullingFlag: 2 },
-  { actionId: 'meta.culling.unreviewed', cullingFlag: 0 },
-];
-
-function getMatchedRating(event: KeyboardEvent) {
-  const match = ratingActions.find(({ actionId }) => matchesShortcut(actionId, event, shortcutPlatform));
-  return match ? match.rating : null;
-}
-
-function getMatchedCulling(event: KeyboardEvent) {
-  const match = cullingActions.find(({ actionId }) => matchesShortcut(actionId, event, shortcutPlatform));
-  return match ? match.cullingFlag : null;
 }
 
 function getMatchedViewBackground(event: KeyboardEvent): number | null {
@@ -1454,24 +1441,20 @@ watch(() => isSyncViewport.value, (isSync) => {
   config.imageViewer.isSyncViewport = isSync;
 });
 
-async function loadPaneFileInfo(pane: Pane, targetId: number) {
-  const requestId = cullingSync.beginFileInfoLoad(pane);
-  ratingSync.beginFileInfoLoad(pane);
-  favoriteSync.beginFileInfoLoad(pane);
-  if (getFileInfoByPane(pane) && Number(getFileInfoByPane(pane).id) !== targetId) {
-    setFileInfoByPane(pane, null);
-  }
-  const loaded = targetId > 0 ? await getFileInfo(targetId) : null;
-  if (!cullingSync.isCurrentFileInfoLoad(pane, requestId, getFileIdByPane(pane), targetId)) {
+async function loadPaneFileInfo(pane: Pane, targetId: number, pushedFile?: any) {
+  const libraryId = libConfig._libraryId;
+  const requestId = favoriteSync.beginFileInfoLoad(pane);
+  const supplied = getMatchingPaneFileInfo(pushedFile, targetId);
+  const loaded = supplied ? { ...supplied } : targetId > 0 ? await getFileInfo(targetId) : null;
+  if (libraryId !== libConfig._libraryId || !favoriteSync.isCurrentFileInfoLoad(pane, requestId, getFileIdByPane(pane), targetId)) {
     return;
   }
-  const resolved = cullingSync.applyPendingMetadata(loaded, requestId);
-  ratingSync.applyPendingMetadata(resolved, requestId);
-  favoriteSync.applyPendingMetadata(resolved, requestId);
+  // A pushed snapshot may predate a metadata commit in this window.
+  const loadVersion = supplied ? undefined : requestId;
+  const resolved = favoriteSync.applyPendingMetadata(loaded, loadVersion);
   setFileInfoByPane(pane, resolved);
   if (pane === 'left') {
     iconRotate.value = resolved?.rotate || 0;
-    console.log('fileInfo:', resolved);
     if (isSlideShow.value) {
       scheduleNextSlide();
     }
@@ -1488,21 +1471,6 @@ function setFileInfoByPane(pane: Pane, info: any) {
     return;
   }
   fileInfo.value = info;
-}
-
-// watch file changed
-watch(() => fileId.value, async (newFileId) => {
-  await loadPaneFileInfo('left', newFileId);
-});
-
-watch(() => rightFileId.value, async (newFileId) => {
-  await loadPaneFileInfo('right', newFileId);
-});
-
-for (const pane of ['bottomLeft', 'bottomRight'] as const) {
-  watch(() => extraPaneState[pane].fileId, async (newFileId) => {
-    await loadPaneFileInfo(pane, newFileId);
-  });
 }
 
 // watch file index
@@ -1602,6 +1570,10 @@ function ensureFourPanesLoaded() {
 }
 
 function clearSecondaryPanes() {
+  for (const pane of allPanes.slice(1)) {
+    panePrefetchFiles[pane] = [];
+    clearPendingNavigation(pane);
+  }
   rightFileId.value = 0;
   rightFileIndex.value = -1;
   rightFileInfo.value = null;
@@ -1627,8 +1599,28 @@ watch(() => [fileIndex.value, fileCount.value], () => {
   ensureFourPanesLoaded();
 });
 
+function clearPendingNavigation(pane: Pane) {
+  const pending = pendingNavigation.get(pane);
+  if (!pending) return;
+  clearTimeout(pending.timeout);
+  pendingNavigation.delete(pane);
+}
+
 function requestFileAtIndex(index: number, pane: Pane = 'left') {
-  emit('message-from-image-viewer', { message: 'request-file-at-index', index, pane });
+  if (!Number.isInteger(index) || index < 0 || index >= fileCount.value) return;
+  const previousIndex = pendingNavigation.get(pane)?.index ?? getFileIndexByPane(pane);
+  clearPendingNavigation(pane);
+  const request = ++navigationRequest;
+  const fail = () => {
+    if (pendingNavigation.get(pane)?.request === request) clearPendingNavigation(pane);
+  };
+  const expiresAt = Date.now() + NAVIGATION_TIMEOUT_MS;
+  const timeout = setTimeout(fail, NAVIGATION_TIMEOUT_MS);
+  pendingNavigation.set(pane, { index, request, timeout });
+  void emit('message-from-image-viewer', {
+    message: 'request-file-at-index', index, pane, direction: index < previousIndex ? -1 : 1,
+    navigationRequest: request, expiresAt,
+  }).catch(fail);
 }
 
 function getFileInfoByPane(pane: Pane = 'left') {
@@ -1698,7 +1690,7 @@ function applyFileMetaToPanes(targetFileId: number, changes: Record<string, any>
 
 function clickPrev(pane: Pane = 'left') {
   setActivePane(pane);
-  const currentIndex = getFileIndexByPane(pane);
+  const currentIndex = pendingNavigation.get(pane)?.index ?? getFileIndexByPane(pane);
   const viewerRef = getViewerRef(pane);
   if (currentIndex > 0) {
     requestFileAtIndex(currentIndex - 1, pane);
@@ -1709,7 +1701,7 @@ function clickPrev(pane: Pane = 'left') {
 
 function clickNext(pane: Pane = 'left') {
   setActivePane(pane);
-  const currentIndex = getFileIndexByPane(pane);
+  const currentIndex = pendingNavigation.get(pane)?.index ?? getFileIndexByPane(pane);
   const viewerRef = getViewerRef(pane);
 
   // Fix loop for slideshow
@@ -1812,14 +1804,8 @@ const toggleFavorite = (pane: Pane = 'left', advance = false) => {
   if (!target) return;
   return setCurrentMetadata('is_favorite', Number(!target.is_favorite), pane, advance);
 };
-const setCurrentFileRating = (rating: number, pane: Pane = 'left', advance = false) =>
-  setCurrentMetadata('rating', rating, pane, advance);
-const setCurrentFileCullingFlag = (flag: number, pane: Pane = 'left', advance = false) =>
-  setCurrentMetadata('culling_flag', flag, pane, advance);
 
 const metadataWriters = {
-  culling_flag: { tracker: cullingSync, persist: setFileCullingFlag },
-  rating: { tracker: ratingSync, persist: setFileRating },
   is_favorite: { tracker: favoriteSync, persist: (id: number, value: number) => setFileFavorite(id, Boolean(value)) },
 };
 async function setCurrentMetadata(field: keyof typeof metadataWriters, value: number, pane: Pane, advance: boolean) {
@@ -1844,7 +1830,6 @@ async function setCurrentMetadata(field: keyof typeof metadataWriters, value: nu
         applyFileMetaToPanes(id, { [field]: field === 'is_favorite' ? Boolean(flag) : flag });
       }
       syncFileMetaToContent(id, { [field]: field === 'is_favorite' ? Boolean(flag) : flag });
-      if (field === 'culling_flag') void emit('culling-status-updated');
       if (advanceInfo?.advance) {
         advanceAfterMetadataShortcut(id, advanceInfo.pane);
       }
@@ -2345,23 +2330,6 @@ const handleItemAction = async (payload: { action: string }) => {
       break;
     case 'comment':
       openCommentEditor(pane);
-      break;
-    case 'rating-0':
-    case 'rating-1':
-    case 'rating-2':
-    case 'rating-3':
-    case 'rating-4':
-    case 'rating-5':
-      await setCurrentFileRating(Number(payload.action.split('-')[1]), pane);
-      break;
-    case 'culling-pick':
-      await setCurrentFileCullingFlag(1, pane);
-      break;
-    case 'culling-reject':
-      await setCurrentFileCullingFlag(2, pane);
-      break;
-    case 'culling-unreviewed':
-      await setCurrentFileCullingFlag(0, pane);
       break;
     case 'zoom-in':
       clickZoomIn(pane);

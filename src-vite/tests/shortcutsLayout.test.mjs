@@ -95,28 +95,17 @@ test("shifted letter bindings match by character (Shift+R rotates)", () => {
 });
 
 test("single-letter actions match by character and still allow shift", () => {
-  assert.equal(matchesShortcut("meta.culling.pick", event({ key: "p", code: "KeyP" })), true);
+  assert.equal(matchesShortcut("meta.favorite", event({ key: "f", code: "KeyF" })), true);
   assert.equal(
-    matchesShortcut("meta.culling.pick", event({ key: "P", code: "KeyP", shiftKey: true })),
+    matchesShortcut("meta.favorite", event({ key: "F", code: "KeyF", shiftKey: true })),
     true,
   );
-  assert.equal(matchesShortcut("meta.culling.pick", event({ key: "x", code: "KeyP" })), false);
+  assert.equal(matchesShortcut("meta.favorite", event({ key: "x", code: "KeyF" })), false);
 });
 
-test("non-letter codes: digits and numpad keep exact physical matching", () => {
+test("non-letter codes: numpad keeps exact physical matching", () => {
   assert.equal(
     matchesShortcut("app.scale.increase", cmd("+", "NumpadAdd")),
-    true,
-  );
-  // Digit bindings stay physical so shifted digit slots keep working on both
-  // layouts: QWERTY Shift+1 produces "!" and AZERTY Shift+1 produces "1",
-  // and both reach the Digit1 binding through event.code.
-  assert.equal(
-    matchesShortcut("meta.rating.one", event({ key: "!", code: "Digit1", shiftKey: true })),
-    true,
-  );
-  assert.equal(
-    matchesShortcut("meta.rating.one", event({ key: "1", code: "Digit1", shiftKey: true })),
     true,
   );
 });

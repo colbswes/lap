@@ -26,111 +26,6 @@
       </div>
       </template>
 
-      <div class="sidebar-item sidebar-item-hover" @click="toggleRatings">
-        <IconRight
-          :class="[
-            'p-1 w-6 h-6 shrink-0 transition-transform',
-            libConfig.library.ratingsExpanded ? 'rotate-90' : '',
-          ]"
-          @click.stop="toggleRatings"
-        />
-        <span class="sidebar-item-label">
-          {{ localeMsg.rating.title }}
-        </span>
-      </div>
-
-      <Transition
-        @before-enter="onBeforeEnter"
-        @enter="onEnter"
-        @after-enter="onAfterEnter"
-        @leave="onLeave"
-      >
-        <div v-if="libConfig.library.ratingsExpanded" class="overflow-hidden">
-          <ul class="mb-2">
-            <li class="pl-4">
-              <div
-                :class="[
-                  'sidebar-item sidebar-item-compact ml-2',
-                  libConfig.library.item === LIB_ITEM.RATINGS && libConfig.rating.item === RATE.ALL ? 'sidebar-item-selected' : 'sidebar-item-hover',
-                ]"
-                @click="selectRating(RATE.ALL)"
-              >
-                <IconStarFilled class="mx-1 w-4 h-4 shrink-0" />
-                <span class="sidebar-item-label">{{ localeMsg.rating.rated }}</span>
-                <span v-if="ratedCount" class="text-[10px] tabular-nums text-base-content/30 mr-2">{{ ratedCount.toLocaleString() }}</span>
-              </div>
-            </li>
-            <li v-for="rating in [5, 4, 3, 2, 1]" :key="rating" class="pl-4">
-              <div
-                :class="[
-                  'sidebar-item sidebar-item-compact ml-2',
-                  libConfig.library.item === LIB_ITEM.RATINGS && libConfig.rating.item === rating ? 'sidebar-item-selected' : 'sidebar-item-hover',
-                ]"
-                @click="selectRating(rating)"
-              >
-                <div class="mx-1 flex items-center gap-0.5">
-                  <IconStarFilled
-                    v-for="index in rating"
-                    :key="index"
-                    class="w-4 h-4 shrink-0"
-                  />
-                </div>
-                <span v-if="ratingCounts[rating]" class="ml-auto text-[10px] tabular-nums text-base-content/30 mr-2">{{ ratingCounts[rating].toLocaleString() }}</span>
-              </div>
-            </li>
-            <li class="pl-4">
-              <div
-                :class="[
-                  'sidebar-item sidebar-item-compact ml-2',
-                  libConfig.library.item === LIB_ITEM.RATINGS && libConfig.rating.item === RATE.UNRATED ? 'sidebar-item-selected' : 'sidebar-item-hover',
-                ]"
-                @click="selectRating(RATE.UNRATED)"
-              >
-                <IconStar class="mx-1 w-4 h-4 shrink-0" />
-                <span class="sidebar-item-label">{{ localeMsg.rating.unrated }}</span>
-                <span v-if="unratedCount" class="text-[10px] tabular-nums text-base-content/30 mr-2">{{ unratedCount.toLocaleString() }}</span>
-              </div>
-            </li>
-          </ul>
-        </div>
-      </Transition>
-
-      <div class="sidebar-item sidebar-item-hover" @click="toggleCulling">
-        <IconRight
-          :class="[
-            'p-1 w-6 h-6 shrink-0 transition-transform',
-            libConfig.library.cullingExpanded ? 'rotate-90' : '',
-          ]"
-          @click.stop="toggleCulling"
-        />
-        <span class="sidebar-item-label">{{ localeMsg.culling.title }}</span>
-      </div>
-
-      <Transition
-        @before-enter="onBeforeEnter"
-        @enter="onEnter"
-        @after-enter="onAfterEnter"
-        @leave="onLeave"
-      >
-        <div v-if="libConfig.library.cullingExpanded" class="overflow-hidden">
-          <ul class="mb-2">
-            <li v-for="item in cullingItems" :key="item.id" class="pl-4">
-              <div
-                :class="[
-                  'sidebar-item sidebar-item-compact ml-2',
-                  libConfig.library.item === LIB_ITEM.CULLING && libConfig.culling.item === item.id ? 'sidebar-item-selected' : 'sidebar-item-hover',
-                ]"
-                @click="selectCulling(item.id)"
-              >
-                <component :is="item.icon" class="mx-1 w-4 h-4 shrink-0" />
-                <span class="sidebar-item-label">{{ item.label }}</span>
-                <span v-if="item.count" class="ml-auto text-[10px] tabular-nums text-base-content/30 mr-2">{{ item.count.toLocaleString() }}</span>
-              </div>
-            </li>
-          </ul>
-        </div>
-      </Transition>
-
       <div class="sidebar-item sidebar-item-hover" @click="toggleSubjects">
         <IconRight
           :class="[
@@ -180,9 +75,9 @@ import { useI18n } from 'vue-i18n';
 import { config, libConfig } from '@/common/config';
 import { useUIStore } from '@/stores/uiStore';
 import { createEmptyLibraryCounts } from '@/stores/libraryStore';
-import { CULLING, LIB_ITEM, RATE, SIDEBAR, type LibItem } from '@/common/constants';
+import { LIB_ITEM, SIDEBAR, type LibItem } from '@/common/constants';
 
-import { IconFiles, IconHeartFilled, IconRight, IconBolt, IconFlag, IconFlagFilled, IconFlagOff, IconStar, IconStarFilled, IconHistory } from '@/common/icons';
+import { IconFiles, IconHeartFilled, IconRight, IconBolt, IconHistory } from '@/common/icons';
 import { SMART_TAG_CATEGORIES } from '@/common/smartTags';
 import { getLibraryVisibleCounts } from '@/common/api';
 import { useLibraryChangeRefresh } from '@/composables/useLibraryChangeRefresh';
@@ -202,10 +97,6 @@ const subjectCounts = computed(() => libConfig.library.subjectCounts || {});
 const totalCount = computed(() => Number(libraryCounts.value.all || 0));
 const favoriteCount = computed(() => Number(libraryCounts.value.favorite || 0));
 const todayCount = computed(() => Number(libraryCounts.value.today || 0));
-const unratedCount = computed(() => Number(libraryCounts.value.unrated || 0));
-const ratedCount = computed(() => Number(libraryCounts.value.rated || 0));
-const cullingCounts = computed(() => libraryCounts.value.culling);
-const ratingCounts = computed(() => libraryCounts.value.ratings);
 let libraryCountRequest = 0;
 async function refreshLibraryCounts() {
   const request = ++libraryCountRequest;
@@ -218,9 +109,6 @@ async function refreshLibraryCounts() {
   ) return;
   libConfig.library.counts = {
     all: counts.all, favorite: counts.favorite, today: counts.today,
-    rated: counts.rated, unrated: counts.unrated,
-    ratings: { 1: counts.rating1, 2: counts.rating2, 3: counts.rating3, 4: counts.rating4, 5: counts.rating5 },
-    culling: { [CULLING.PICK]: counts.pick, [CULLING.REJECT]: counts.reject, [CULLING.UNREVIEWED]: counts.unreviewed },
   };
 }
 onMounted(() => { void refreshLibraryCounts(); });
@@ -261,12 +149,6 @@ const smartTagItems = computed(() =>
   })
 );
 
-const cullingItems = computed(() => [
-  { id: CULLING.PICK, label: localeMsg.value.culling.picks, icon: IconFlagFilled, count: cullingCounts.value[CULLING.PICK] },
-  { id: CULLING.REJECT, label: localeMsg.value.culling.rejected, icon: IconFlagOff, count: cullingCounts.value[CULLING.REJECT] },
-  { id: CULLING.UNREVIEWED, label: localeMsg.value.culling.unreviewed, icon: IconFlag, count: cullingCounts.value[CULLING.UNREVIEWED] },
-]);
-
 function formatSearchResultCount(count: number) {
   return count.toLocaleString();
 }
@@ -279,14 +161,6 @@ function selectItem(item: LibItem) {
 
 function toggleSubjects() {
   libConfig.library.subjectsExpanded = !libConfig.library.subjectsExpanded;
-}
-
-function toggleRatings() {
-  libConfig.library.ratingsExpanded = !libConfig.library.ratingsExpanded;
-}
-
-function toggleCulling() {
-  libConfig.library.cullingExpanded = !libConfig.library.cullingExpanded;
 }
 
 function onBeforeEnter(el: Element) {
@@ -313,20 +187,6 @@ function onLeave(el: Element) {
   void element.offsetHeight;
   element.style.height = '0';
   element.style.opacity = '0';
-}
-
-function selectRating(rating: number) {
-  libConfig.library.item = LIB_ITEM.RATINGS;
-  libConfig.rating.item = rating;
-  uiStore.requestCountUpdate({ source: 'library', item: LIB_ITEM.RATINGS, rating });
-  libConfig.library.activateTick = Number(libConfig.library.activateTick || 0) + 1;
-}
-
-function selectCulling(item: string) {
-  libConfig.library.item = LIB_ITEM.CULLING;
-  libConfig.culling.item = item;
-  uiStore.requestCountUpdate({ source: 'library', item: LIB_ITEM.CULLING, cullingItem: item });
-  libConfig.library.activateTick = Number(libConfig.library.activateTick || 0) + 1;
 }
 
 function selectSmartTag(smartId: string) {

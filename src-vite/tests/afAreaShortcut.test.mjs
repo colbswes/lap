@@ -31,7 +31,7 @@ function hostHandler(viewer, mode, toggle, overrides = {}) {
     showQuickView: { value: mode === 'quick-view' }, getActivePreviewMode: () => mode,
     getActivePreviewMediaRef: () => ({ toggleAfAreas: toggle }),
     getActivePane: () => 'right', getViewerRef: pane => { assert.equal(pane, 'right'); return { toggleAfAreas: toggle }; },
-    getMatchedViewBackground: () => null, getMatchedRating: () => null, getMatchedCulling: () => null,
+    getMatchedViewBackground: () => null,
     ...overrides };
   return new Function(...Object.keys(deps), ts.transpile(source.slice(start, end) + '\n}',
     { target: ts.ScriptTarget.ES2022 }) + `;return ${viewer ? 'handleKeyDown' : 'handleLocalKeyDown'};`)(...Object.values(deps));

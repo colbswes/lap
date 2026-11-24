@@ -65,7 +65,7 @@ export const useConfigStore = defineStore('configStore', {
       fileType: 0,              // filter file type bitmask (0: all, 1: image, 2: video, 4: raw)
       sortType: 0,              // sort type (default to time)
       sortOrder: 0,             // sort order(0: ascending, 1: descending)
-      groupBy: 0,               // result grouping: 0=none, 1=folder, 2=day, 3=month, 4=rating, 5=location, 6=camera, 7=lens, 8=year, 9=file type, 10=culling
+      groupBy: 0,               // result grouping: 0=none, 1=folder, 2=day, 3=month, 5=location, 6=camera, 7=lens, 8=year, 9=file type (4 and 10 were rating/culling, removed)
     },
 
     calendar: {
@@ -177,6 +177,7 @@ export const useConfigStore = defineStore('configStore', {
       mapProvider: 'global',      // global | tianditu
       tiandituToken: '',
       mapMarkerSize: 64,          // map photo marker size in px
+      mapGlobe: true,             // Locations map view: 3D globe (true) or flat map (false)
       mapTheme: 0,                // full Map view theme (0: standard, 1: satellite); independent of infoPanel.mapTheme
       grid: {
         sizePosition: 0,         // grid size slider position (0-1)
@@ -469,6 +470,10 @@ export const useConfigStore = defineStore('configStore', {
             settings.fileDeleteBehavior = settings.deletePermanently === true ? 'permanent' : 'trash';
           }
           delete settings.deletePermanently;
+        }
+        // Group-by 4 (rating) and 10 (culling) were removed; fall back to no grouping.
+        if (state?.search && [4, 10].includes(Number(state.search.groupBy))) {
+          state.search.groupBy = 0;
         }
         return state;
       },

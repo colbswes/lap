@@ -246,12 +246,12 @@ export async function saveLibraryState(id, state) {
   return false;
 }
 
-// update and persist a library's collection scope
-export async function setCollectionScope(id, scope) {
+// update and persist a library's hidden filters (folders, collections, tags, people/pets, smart collections)
+export async function setHiddenFilters(id, filters) {
   try {
-    return await invoke('set_collection_scope', { id, scope });
+    return await invoke('set_hidden_filters', { id, filters });
   } catch (error) {
-    console.error('Failed to set collection scope:', error);
+    console.error('Failed to set hidden filters:', error);
   }
   return null;
 }
@@ -1072,6 +1072,7 @@ export async function getCollectionFileIds(collectionId) {
   return null;
 }
 
+
 export async function getFileCollections(fileId) {
   try {
     return await invoke('get_file_collections', { fileId });
@@ -1345,6 +1346,16 @@ export async function batchDeleteFiles(files, permanently = false, selection = n
 
 export function editFileMetadata(libraryId, fileIds, changes) {
   return invoke('edit_file_metadata', { libraryId, fileIds, changes });
+}
+
+// Set a location on files, or clear it when latitude and longitude are null.
+export function setFileLocation(libraryId, fileIds, latitude, longitude) {
+  return invoke('set_file_location', { libraryId, fileIds, latitude, longitude });
+}
+
+// Search the bundled place list by name ("Paris" or "Paris, TX").
+export function searchPlaces(query, limit = 20) {
+  return invoke('search_places', { query, limit });
 }
 
 // get file thumb
@@ -1666,36 +1677,6 @@ export async function setFileFavorite(fileId, isFavorite) {
     };
   } catch (error) {
     console.log('Failed to set file favorite:', error);
-  }
-  return null;
-}
-
-// set file rating
-export async function setFileRating(fileId, rating) {
-  if (!Number.isInteger(fileId) || fileId <= 0) return null;
-  try {
-    const result = await invoke('set_file_rating', { fileId, rating });
-    if (typeof result === 'number' && result > 0) {
-      return result;
-    };
-  } catch (error) {
-    console.log('Failed to set file rating:', error);
-  }
-  return null;
-}
-
-// set file culling status (0: unreviewed, 1: pick, 2: reject)
-export async function setFileCullingFlag(fileId, cullingFlag) {
-  if (!Number.isInteger(fileId) || fileId <= 0) {
-    return null;
-  }
-  try {
-    const result = await invoke('set_file_culling_flag', { fileId, cullingFlag });
-    if (typeof result === 'number' && result > 0) {
-      return result;
-    }
-  } catch (error) {
-    console.log('Failed to set file culling flag:', error);
   }
   return null;
 }
@@ -2355,9 +2336,14 @@ export async function assignFaceToPerson(faceId, { personId = null, name = null,
   return await invoke('assign_face_to_person', { faceId, personId, name, wholeGroup, kind });
 }
 
-// Manually add a person or pet tag to a photo, with an optional normalized bbox ({ x, y, width, height } in 0..1).
+// Manually add a person or pet tag to a photo or video, with an optional normalized bbox ({ x, y, width, height } in 0..1).
 export async function addManualFace(fileId, { bbox = null, personId = null, name = null, kind = 'person' } = {}) {
   return await invoke('add_manual_face', { fileId, bbox, personId, name, kind });
+}
+
+// Bulk-add a manual person or pet tag to multiple photos or videos. Returns { person_id, added }.
+export async function addManualFacesBatch(fileIds, { personId = null, name = null, kind = 'person' } = {}) {
+  return await invoke('add_manual_faces_batch', { fileIds, personId, name, kind });
 }
 
 // Delete a face/pet tag or box. Returns its previous person id if any.
@@ -2365,7 +2351,7 @@ export async function deleteFace(faceId) {
   return await invoke('delete_face', { faceId });
 }
 
-// Scan a single photo on demand for faces and pets. Returns { added, matched, total }.
+// Scan a single photo or video on demand for faces and pets. Returns { added, matched, total }.
 export async function scanFileFaces(fileId) {
   return await invoke('scan_file_faces', { fileId });
 }

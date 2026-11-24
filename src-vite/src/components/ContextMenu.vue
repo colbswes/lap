@@ -96,7 +96,7 @@
               >
                 <div class="w-full flex items-center">
                   <div class="w-5">
-                    <component class="t-icon-size-sm" :is="child.icon" ></component>
+                    <component v-if="child.icon" class="t-icon-size-sm" :is="child.icon" ></component>
                   </div>
                   <span class="ml-2 mr-4">{{ child.label }}</span>
                   <span v-if="child.shortcut" class="ml-auto text-base-content/30">{{ child.shortcut }}</span>

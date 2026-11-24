@@ -24,7 +24,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 
 static SIDE_CAR_DIR: OnceCell<PathBuf> = OnceCell::new();
 const PROCESS_TIMEOUT_SECS: u64 = 30;
@@ -61,31 +61,24 @@ pub fn init_ffmpeg_path(app: &AppHandle) {
     }
 }
 
-/// Manages active FFmpeg/FFprobe processes, allowing per-player cancellation.
+/// Manages active FFmpeg/FFprobe requests, allowing per-player cancellation.
+#[derive(Default)]
 pub struct VideoManager {
-    pub active_processes: Mutex<HashMap<String, (u64, tokio::process::Child)>>,
-    pub active_requests: Mutex<HashMap<String, u64>>,
-    pub task_counter: std::sync::atomic::AtomicU64,
+    active_requests: Mutex<HashMap<String, ActiveVideoRequest>>,
+    task_counter: std::sync::atomic::AtomicU64,
 }
 
-impl Default for VideoManager {
-    fn default() -> Self {
-        Self {
-            active_processes: Mutex::new(HashMap::new()),
-            active_requests: Mutex::new(HashMap::new()),
-            task_counter: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
+struct ActiveVideoRequest {
+    request_id: u64,
+    generation: u64,
+    cancel: oneshot::Sender<()>,
+    finished: oneshot::Receiver<()>,
 }
 
-async fn is_video_request_active(state: &VideoManager, player_id: &str, request_id: u64) -> bool {
-    state.active_requests.lock().await.get(player_id) == Some(&request_id)
-}
-
-async fn finish_video_request(state: &VideoManager, player_id: &str, request_id: u64) {
-    let mut requests = state.active_requests.lock().await;
-    if requests.get(player_id) == Some(&request_id) {
-        requests.remove(player_id);
+fn check_video_request(cancel: &mut oneshot::Receiver<()>) -> Result<(), String> {
+    match cancel.try_recv() {
+        Err(oneshot::error::TryRecvError::Empty) => Ok(()),
+        _ => Err("Cancelled".to_string()),
     }
 }
 
@@ -150,25 +143,26 @@ fn find_sidecar(name: &str) -> Option<PathBuf> {
     })
 }
 
-fn sidecar_command(sidecar_name: &str, fallback: &str) -> tokio::process::Command {
+fn sidecar_command(
+    sidecar_name: &str,
+    fallback: &str,
+    interactive: bool,
+) -> tokio::process::Command {
     let bin = find_sidecar(sidecar_name).unwrap_or_else(|| PathBuf::from(fallback));
-    #[cfg(unix)]
-    {
+    if cfg!(unix) && !interactive {
         let mut cmd = tokio::process::Command::new("nice");
         cmd.arg("-n").arg("19").arg(bin);
         cmd
-    }
-    #[cfg(not(unix))]
-    {
+    } else {
         tokio::process::Command::new(bin)
     }
 }
 
-fn ffprobe_command() -> tokio::process::Command {
-    sidecar_command(ffprobe_sidecar_name(), "ffprobe")
+fn ffprobe_command(interactive: bool) -> tokio::process::Command {
+    sidecar_command(ffprobe_sidecar_name(), "ffprobe", interactive)
 }
-fn ffmpeg_command() -> tokio::process::Command {
-    sidecar_command(ffmpeg_sidecar_name(), "ffmpeg")
+fn ffmpeg_command(interactive: bool) -> tokio::process::Command {
+    sidecar_command(ffmpeg_sidecar_name(), "ffmpeg", interactive)
 }
 
 fn debug_stderr() -> std::process::Stdio {
@@ -205,8 +199,12 @@ fn should_skip_duration_probe(file_path: &str) -> bool {
 }
 
 /// Internal: Run ffprobe with bounded resource limits and configurable timeout.
-async fn probe_json_with_timeout(file_path: &str, timeout_secs: u64) -> Result<Value, String> {
-    let mut cmd = ffprobe_command();
+async fn probe_json_with_timeout(
+    file_path: &str,
+    timeout_secs: u64,
+    interactive: bool,
+) -> Result<Value, String> {
+    let mut cmd = ffprobe_command(interactive);
 
     cmd.args(["-v", "quiet"]);
     if crate::t_image::is_heic_path(file_path) && find_sidecar(ffprobe_sidecar_name()).is_some() {
@@ -271,34 +269,44 @@ async fn probe_json_with_timeout(file_path: &str, timeout_secs: u64) -> Result<V
 /// Internal: Get bounded probe JSON. MPEG program/transport streams must not
 /// seek toward EOF merely to estimate duration.
 async fn probe_json_async(file_path: &str) -> Result<Value, String> {
-    probe_json_with_timeout(file_path, PROBE_TIMEOUT_SECS).await
+    probe_json_with_timeout(file_path, PROBE_TIMEOUT_SECS, false).await
 }
 
 async fn probe_json_for_video_request(
     file_path: &str,
-    state: &VideoManager,
-    player_id: &str,
-    request_id: u64,
+    cancel: &mut oneshot::Receiver<()>,
+    deadline: tokio::time::Instant,
 ) -> Result<Value, String> {
-    let probe = probe_json_async(file_path);
-    tokio::pin!(probe);
-
-    loop {
-        tokio::select! {
-            result = &mut probe => return result,
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                if !is_video_request_active(state, player_id, request_id).await {
-                    return Err("Cancelled".to_string());
-                }
-            }
-        }
+    tokio::select! {
+        biased;
+        _ = cancel => Err("Cancelled".to_string()),
+        _ = tokio::time::sleep_until(deadline) => Err(EXTERNAL_PLAYER_REQUIRED_ERROR.to_string()),
+        result = probe_json_with_timeout(file_path, PROBE_TIMEOUT_SECS, true) => result,
     }
+}
+
+async fn wait_for_video_process(
+    child: &mut tokio::process::Child,
+    cancel: &mut oneshot::Receiver<()>,
+    deadline: tokio::time::Instant,
+) -> Result<std::process::ExitStatus, String> {
+    let result = tokio::select! {
+        biased;
+        _ = cancel => Err("Cancelled".to_string()),
+        _ = tokio::time::sleep_until(deadline) => Err(EXTERNAL_PLAYER_REQUIRED_ERROR.to_string()),
+        status = child.wait() => status.map_err(|e| format!("Process crashed: {e}")),
+    };
+    if result.is_err() {
+        // Reap the process before removing its output, especially on Windows.
+        let _ = child.kill().await;
+    }
+    result
 }
 
 /// Get video duration asynchronously.
 #[allow(dead_code)]
 pub async fn get_video_duration(file_path: &str) -> Result<u64, String> {
-    let json = probe_json_with_timeout(file_path, INDEX_PROBE_TIMEOUT_SECS).await?;
+    let json = probe_json_with_timeout(file_path, INDEX_PROBE_TIMEOUT_SECS, false).await?;
     Ok(json["format"]["duration"]
         .as_str()
         .and_then(|s| s.parse::<f64>().ok())
@@ -440,7 +448,7 @@ async fn run_thumbnail_command(
     strategy: ThumbnailStrategy,
     timeout_secs: u64,
 ) -> Result<Option<Vec<u8>>, String> {
-    let mut cmd = ffmpeg_command();
+    let mut cmd = ffmpeg_command(false);
 
     // Fast seek: -ss before -i (input-side seeking, near-instant but less precise)
     if let ThumbnailStrategy::FastSeek(t) = strategy {
@@ -670,7 +678,7 @@ fn video_dimensions(video: &Value) -> (u32, u32) {
 
 pub async fn get_video_metadata_async(file_path: &str) -> Result<VideoMetadata, String> {
     crate::t_utils::require_local_content(std::path::Path::new(file_path)).map_err(|e| e.to_string())?;
-    let json = probe_json_with_timeout(file_path, INDEX_PROBE_TIMEOUT_SECS).await?;
+    let json = probe_json_with_timeout(file_path, INDEX_PROBE_TIMEOUT_SECS, false).await?;
 
     if crate::t_image::is_heic_path(file_path) {
         let (_, primary) = heif_primary_image(&json)?;
@@ -1059,17 +1067,17 @@ pub async fn clear_video_cache(
     app: AppHandle,
     state: tauri::State<'_, VideoManager>,
 ) -> Result<(), String> {
-    {
-        let mut guard = state.active_processes.lock().await;
-        let children: Vec<_> = guard.drain().map(|(_, (_, child))| child).collect();
-        drop(guard);
-        for mut child in children {
-            let _ = child.start_kill();
-        }
+    let requests = std::mem::take(&mut *state.active_requests.lock().await);
+    let finished: Vec<_> = requests
+        .into_values()
+        .map(|request| {
+            drop(request.cancel);
+            request.finished
+        })
+        .collect();
+    for request in finished {
+        let _ = request.await;
     }
-
-    // Windows Fix: Give the OS a moment to release file handles after killing processes
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     if let Ok(d) = app.path().app_cache_dir().map(|d| d.join("video_cache")) {
         if d.exists() {
@@ -1086,42 +1094,20 @@ pub async fn cancel_video_prepare(
     player_id: String,
     request_id: Option<u64>,
 ) -> Result<(), String> {
-    let should_cancel = {
-        let mut requests = state.active_requests.lock().await;
-        match (requests.get(&player_id).copied(), request_id) {
-            (Some(active_request_id), Some(expected_request_id))
-                if active_request_id == expected_request_id =>
-            {
-                requests.remove(&player_id);
-                true
-            }
-            (Some(_), Some(_)) => false,
-            (Some(_), None) => {
-                requests.remove(&player_id);
-                true
-            }
-            (None, _) => false,
-        }
-    };
-    if !should_cancel {
-        return Ok(());
-    }
-    let child = {
-        let mut processes = state.active_processes.lock().await;
-        let should_remove = processes
+    let request = {
+        let mut active = state.active_requests.lock().await;
+        if active
             .get(&player_id)
-            .is_some_and(|(active_request_id, _)| {
-                request_id
-                    .is_none_or(|expected_request_id| expected_request_id == *active_request_id)
-            });
-        if should_remove {
-            processes.remove(&player_id).map(|(_, child)| child)
+            .is_some_and(|request| request_id.is_none_or(|id| id == request.request_id))
+        {
+            active.remove(&player_id)
         } else {
             None
         }
     };
-    if let Some(mut child) = child {
-        let _ = child.start_kill();
+    if let Some(request) = request {
+        drop(request.cancel);
+        let _ = request.finished.await;
     }
     Ok(())
 }
@@ -1141,71 +1127,67 @@ pub async fn prepare_video(
         return Err(EXTERNAL_PLAYER_REQUIRED_ERROR.to_string());
     }
 
-    let request_id = request_id.unwrap_or_else(|| {
-        state
-            .task_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    });
-    {
-        state
-            .active_requests
-            .lock()
-            .await
-            .insert(player_id.clone(), request_id);
-        let child = state
-            .active_processes
-            .lock()
-            .await
-            .remove(&player_id)
-            .map(|(_, child)| child);
-        if let Some(mut child) = child {
-            let _ = child.start_kill();
-        }
-    }
+    let generation = state
+        .task_counter
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (cancel, mut cancelled) = oneshot::channel();
+    let (mark_finished, finished) = oneshot::channel();
+    state.active_requests.lock().await.insert(
+        player_id.clone(),
+        ActiveVideoRequest {
+            request_id: request_id.unwrap_or(generation),
+            generation,
+            cancel,
+            finished,
+        },
+    );
 
-    // Global deadline: user should never wait more than PROCESS_TIMEOUT_SECS.
-    // This is a photo management app for phone/camera clips, not a full video player.
+    let result = prepare_video_request(&app, &file_path, force.as_deref(), &mut cancelled).await;
+    let mut requests = state.active_requests.lock().await;
+    if requests
+        .get(&player_id)
+        .is_some_and(|request| request.generation == generation)
+    {
+        requests.remove(&player_id);
+    }
+    let _ = mark_finished.send(());
+    result
+}
+
+async fn prepare_video_request(
+    app: &AppHandle,
+    file_path: &str,
+    force: Option<&str>,
+    cancel: &mut oneshot::Receiver<()>,
+) -> Result<VideoPrepareResult, String> {
+    // Probing, remuxing, transcoding, and retries share one playback deadline.
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(PROCESS_TIMEOUT_SECS);
+    let force_process = force == Some("process");
+    let force_compatible = force == Some("compatible");
 
-    let force_process = force.as_deref() == Some("process");
-    let force_compatible = force.as_deref() == Some("compatible");
+    let action = match probe_json_for_video_request(file_path, cancel, deadline).await {
+        Ok(json) => tokio::select! {
+            biased;
+            _ = &mut *cancel => return Err("Cancelled".to_string()),
+            _ = tokio::time::sleep_until(deadline) => return Err(EXTERNAL_PLAYER_REQUIRED_ERROR.to_string()),
+            action = analyze_strategy(&json, file_path) => action,
+        },
+        Err(e) if e == "Cancelled" || e == EXTERNAL_PLAYER_REQUIRED_ERROR => return Err(e),
+        // Compatibility requests can still succeed when bounded probing fails.
+        Err(_) if force_process || force_compatible => VideoAction::Transcode,
+        Err(e) => return Err(format!("Probe failed: {e}")),
+    };
 
-    let action =
-        match probe_json_for_video_request(&file_path, &state, &player_id, request_id).await {
-            Ok(json) => analyze_strategy(&json, &file_path).await,
-            Err(e) => {
-                if e == "Cancelled" {
-                    finish_video_request(&state, &player_id, request_id).await;
-                    return Err(e);
-                }
-
-                if force_process || force_compatible {
-                    // Compatibility requests must not fail solely because a malformed
-                    // container defeated bounded probing. FFmpeg remains cancellable
-                    // and shares the original playback deadline.
-                    VideoAction::Transcode
-                } else {
-                    finish_video_request(&state, &player_id, request_id).await;
-                    return Err(format!("Probe failed: {}", e));
-                }
-            }
-        };
-
-    if !is_video_request_active(&state, &player_id, request_id).await {
-        return Err("Cancelled".to_string());
-    }
-
+    check_video_request(cancel)?;
     if action == VideoAction::Direct && !force_process && !force_compatible {
-        let result = VideoPrepareResult {
-            url: crate::t_http::make_video_stream_url(&file_path)?,
+        return Ok(VideoPrepareResult {
+            url: crate::t_http::make_video_stream_url(file_path)?,
             action: VideoAction::Direct,
-        };
-        finish_video_request(&state, &player_id, request_id).await;
-        return Ok(result);
+        });
     }
 
-    let mut current_action = if force_process {
+    let current_action = if force_process {
         VideoAction::Transcode
     } else if force_compatible {
         if action == VideoAction::Direct {
@@ -1216,9 +1198,6 @@ pub async fn prepare_video(
     } else {
         action
     };
-    #[cfg(target_os = "macos")]
-    let mut try_software_enc = false;
-
     let temp_dir = app
         .path()
         .app_cache_dir()
@@ -1229,30 +1208,63 @@ pub async fn prepare_video(
     }
 
     let ext = "mp4"; // Use MP4 for platforms with reliable built-in H.264 playback in the embedded WebView
-    let cache_name = get_cache_filename_async(&file_path, ext).await;
+    let cache_name = get_cache_filename_async(file_path, ext).await;
     let output_path = temp_dir.join(&cache_name);
-    // Fixed Concurrency: include player_id in tmp name to avoid contention
-    let tmp_path = temp_dir.join(format!("{}.{}.tmp", cache_name, hash_id(&player_id)));
+    let tmp_path = output_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
 
     // Cache validation: check if exists and size > 32KB (avoid broken/truncated files)
     if let Ok(meta) = tokio::fs::metadata(&output_path).await {
+        check_video_request(cancel)?;
         if meta.len() > 32 * 1024 && (force.is_none() || force_compatible) {
             let result = VideoPrepareResult {
                 url: crate::t_http::make_video_stream_url(output_path.to_string_lossy().as_ref())?,
                 action: current_action,
             };
-            finish_video_request(&state, &player_id, request_id).await;
             return Ok(result);
         }
         // If file is broken (<32KB) or we are forcing, remove it to regenerate
         let _ = tokio::fs::remove_file(&output_path).await;
     }
 
-    // Processing loop with global deadline — all stages (remux, transcode, fallback) share one budget.
-    loop {
-        let mut cmd = ffmpeg_command();
+    let result = process_video(file_path, &tmp_path, current_action, cancel, deadline).await;
+    let result = async {
+        let action = result?;
+        check_video_request(cancel)?;
+        if !tokio::fs::try_exists(&output_path).await.unwrap_or(false) {
+            check_video_request(cancel)?;
+            if tokio::fs::rename(&tmp_path, &output_path).await.is_ok() {
+                tokio::spawn(auto_cleanup_video_cache_async(temp_dir));
+            } else if !tokio::fs::try_exists(&output_path).await.unwrap_or(false) {
+                return Err("Rename failed".to_string());
+            }
+        }
+        Ok(VideoPrepareResult {
+            url: crate::t_http::make_video_stream_url(output_path.to_string_lossy().as_ref())?,
+            action,
+        })
+    }
+    .await;
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+    result
+}
 
-        cmd.arg("-i").arg(&file_path);
+async fn process_video(
+    file_path: &str,
+    tmp_path: &std::path::Path,
+    mut current_action: VideoAction,
+    cancel: &mut oneshot::Receiver<()>,
+    deadline: tokio::time::Instant,
+) -> Result<VideoAction, String> {
+    #[cfg(target_os = "macos")]
+    let mut try_software_enc = false;
+    loop {
+        check_video_request(cancel)?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(EXTERNAL_PLAYER_REQUIRED_ERROR.to_string());
+        }
+        let mut cmd = ffmpeg_command(true);
+
+        cmd.arg("-i").arg(file_path);
         cmd.args(["-map", "0:v:0", "-map", "0:a:0?"]);
         if current_action == VideoAction::Remux {
             cmd.args([
@@ -1288,7 +1300,7 @@ pub async fn prepare_video(
                 "-y",
             ]);
         }
-        cmd.arg(&tmp_path);
+        cmd.arg(tmp_path);
         #[cfg(target_os = "windows")]
         {
             cmd.creation_flags(0x08000000);
@@ -1296,7 +1308,6 @@ pub async fn prepare_video(
 
         cmd.stderr(debug_stderr());
 
-        #[allow(unused_mut)]
         let mut t_child = cmd
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
@@ -1324,123 +1335,34 @@ pub async fn prepare_video(
             })
         });
 
-        {
-            let requests = state.active_requests.lock().await;
-            if requests.get(&player_id) != Some(&request_id) {
-                let _ = t_child.start_kill();
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err("Cancelled".to_string());
-            }
-            state
-                .active_processes
-                .lock()
-                .await
-                .insert(player_id.clone(), (request_id, t_child));
-        }
-
-        let final_status = loop {
-            // Priority Check: Abort if global deadline passed → tell user to use external player
-            if tokio::time::Instant::now() > deadline {
-                let child = state
-                    .active_processes
-                    .lock()
-                    .await
-                    .remove(&player_id)
-                    .map(|(_, child)| child);
-                if let Some(mut child) = child {
-                    let _ = child.start_kill();
-                }
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                finish_video_request(&state, &player_id, request_id).await;
-                return Err(EXTERNAL_PLAYER_REQUIRED_ERROR.to_string());
-            }
-
-            {
-                let mut guard = state.active_processes.lock().await;
-                if let Some((pid, child)) = guard.get_mut(&player_id) {
-                    if *pid != request_id {
-                        return Err("Task preempted".to_string());
-                    }
-
-                    // DO NOT use .wait() here while holding the lock! It will deadlock other cmds.
-                    match child.try_wait() {
-                        Ok(Some(s)) => {
-                            guard.remove(&player_id);
-                            break s; // Task finished
-                        }
-                        Ok(None) => {} // Still running, release lock and sleep
-                        Err(e) => {
-                            guard.remove(&player_id);
-                            drop(guard);
-                            finish_video_request(&state, &player_id, request_id).await;
-                            return Err(format!("Process crashed: {}", e));
-                        }
-                    }
-                } else {
-                    drop(guard);
-                    let _ = tokio::fs::remove_file(&tmp_path).await;
-                    finish_video_request(&state, &player_id, request_id).await;
-                    return Err("Cancelled".to_string());
-                }
-            } // Lock released here
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        };
-
+        let final_status = wait_for_video_process(&mut t_child, cancel, deadline).await?;
         if final_status.success() {
-            // Check if another task already promoted this cache
-            if output_path.exists() {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                finish_video_request(&state, &player_id, request_id).await;
-                return Ok(VideoPrepareResult {
-                    url: crate::t_http::make_video_stream_url(output_path.to_string_lossy().as_ref())?,
-                    action: current_action,
-                });
-            }
-
-            // Windows: rename fails if destination exists
-            #[cfg(target_os = "windows")]
-            let _ = tokio::fs::remove_file(&output_path).await;
-            if tokio::fs::rename(&tmp_path, &output_path).await.is_ok() {
-                let td = temp_dir.clone();
-                tokio::spawn(async move {
-                    auto_cleanup_video_cache_async(td).await;
-                });
-                finish_video_request(&state, &player_id, request_id).await;
-                return Ok(VideoPrepareResult {
-                    url: crate::t_http::make_video_stream_url(output_path.to_string_lossy().as_ref())?,
-                    action: current_action,
-                });
-            }
-            finish_video_request(&state, &player_id, request_id).await;
-            return Err("Rename failed".to_string());
-        } else {
-            // Trace failure cause in debug mode
-            #[cfg(debug_assertions)]
-            if let Some(stderr_task) = stderr_task {
-                if let Ok(err_log) = stderr_task.await {
-                    eprintln!(
-                        "FFmpeg stage failed ({:?}) output:\n{}",
-                        current_action, err_log
-                    );
-                }
-            }
-
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            if current_action == VideoAction::Remux {
-                // FALLBACK PASS 1: Remux failed, transition to Transcode
-                current_action = VideoAction::Transcode;
-                continue;
-            }
-            #[cfg(target_os = "macos")]
-            if current_action == VideoAction::Transcode && !try_software_enc {
-                // FALLBACK PASS 2: macOS Hardware encoding failed, switch to Software (libx264)
-                try_software_enc = true;
-                continue;
-            }
-            finish_video_request(&state, &player_id, request_id).await;
-            return Err(format!("FFmpeg failed: {}", final_status));
+            return Ok(current_action);
         }
+        // Trace failure cause in debug mode
+        #[cfg(debug_assertions)]
+        if let Some(stderr_task) = stderr_task {
+            if let Ok(err_log) = stderr_task.await {
+                eprintln!(
+                    "FFmpeg stage failed ({:?}) output:\n{}",
+                    current_action, err_log
+                );
+            }
+        }
+
+        let _ = tokio::fs::remove_file(tmp_path).await;
+        if current_action == VideoAction::Remux {
+            // FALLBACK PASS 1: Remux failed, transition to Transcode
+            current_action = VideoAction::Transcode;
+            continue;
+        }
+        #[cfg(target_os = "macos")]
+        if current_action == VideoAction::Transcode && !try_software_enc {
+            // FALLBACK PASS 2: macOS Hardware encoding failed, switch to Software (libx264)
+            try_software_enc = true;
+            continue;
+        }
+        return Err(format!("FFmpeg failed: {}", final_status));
     }
 }
 
@@ -1516,5 +1438,53 @@ mod capture_date_tests {
         let expected = chrono::DateTime::parse_from_rfc3339(date).unwrap()
             .with_timezone(&chrono::Local).format("%Y:%m:%d %H:%M:%S").to_string();
         assert_eq!(video_capture_date(&utc, None), Some(expected));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod process_wait_tests {
+    use super::*;
+    use tokio::time::{Duration, Instant, timeout};
+
+    #[tokio::test]
+    async fn dropping_the_cancel_sender_wakes_the_waiter_and_reaps_the_child() {
+        let mut child = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let (cancel, mut cancelled) = oneshot::channel();
+        {
+            let wait = wait_for_video_process(
+                &mut child,
+                &mut cancelled,
+                Instant::now() + Duration::from_secs(30),
+            );
+            tokio::pin!(wait);
+            tokio::select! {
+                biased;
+                _ = &mut wait => panic!("child should still be running"),
+                _ = std::future::ready(()) => (),
+            }
+            drop(cancel);
+            assert_eq!(
+                timeout(Duration::from_secs(2), wait).await.unwrap().unwrap_err(),
+                "Cancelled"
+            );
+        }
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn deadline_kills_and_reaps_the_child() {
+        let mut child = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let (_cancel, mut cancelled) = oneshot::channel();
+        let result = wait_for_video_process(&mut child, &mut cancelled, Instant::now()).await;
+        assert_eq!(result.unwrap_err(), EXTERNAL_PLAYER_REQUIRED_ERROR);
+        assert!(child.try_wait().unwrap().is_some());
     }
 }

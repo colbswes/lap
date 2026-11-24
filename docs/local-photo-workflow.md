@@ -1,15 +1,13 @@
-# Local Photo Workflow (Collection Scopes & Apple Photos Import)
+# Local Photo Workflow (Album Visibility & Apple Photos Import)
 
-This personal fork adds two focused features to Lap so you can keep everyday photos separate from family archives while still searching across everything in one catalog.
+This personal fork adds two focused features to Lap so you can keep everyday photos separate from archives while keeping everything in one catalog.
 
-## 1. Collection Scopes (`Everyday`, `Family Archive`, `Everything`)
+## 1. Hide / Show Folders, Collections, Smart Collections, and Tags
 
-- Use the **Everyday / Family / All** switcher at the top of the left sidebar to switch views at any time.
-- Click the **filter button** next to the switcher (or right-click any folder root in **Folders**) to choose which root folders belong to **Everyday** and which belong to **Family Archive**.
-- **Everything** always includes all root folders in the library without moving or duplicating files.
-- The active scope applies consistently across Library counts, Folders, Smart Albums, Semantic Search, Calendar, Tags, People, Location, Camera, Collections, and Map — and persists per library across restarts.
-- People stay in one shared catalog, so you never have to label the same person twice; switching scopes shows only the people and counts present in the active scope.
-- Search shows the active scope in both the Search sidebar and the content header, with a one-click **Search Everything** action when you want a cross-collection search.
+- Hover any **Folder**, **Collection**, **Smart collection**, or **Tag** in the sidebar and click the eye icon (or open its `...` / right-click menu and choose **Hide** / **Show**).
+- Hidden items stay dimmed in their sidebar list with a crossed-out eye icon so you can click directly into them or unhide them in one click, and **Show all** is available in the header menu whenever any item is hidden.
+- Hidden items are excluded from Library counts, Smart collections, Search, Calendar, Tags, People, Locations, Cameras, Collections, and Map — and persist per library across restarts.
+- You can also switch between **Tags**, **Collections**, and **Smart collections** from their menus (**Create smart collection**, **Save as collection**, **Add tag to photos…**, **Duplicate**).
 
 ## 2. Guided & CLI Apple Photos Import
 
@@ -17,7 +15,7 @@ This personal fork adds two focused features to Lap so you can keep everyday pho
 
 Open **Import from Apple Photos…** from the Welcome screen, the Library dropdown menu (top-left), or the Folders panel `...` menu:
 
-- Choose a destination folder (defaults to `~/Pictures/Lap-Everyday`) and target scope (**Everyday** or **Family Archive**).
+- Choose a destination folder (defaults to `~/Pictures/Lap-Everyday`).
 - Choose edited photo handling (`Edited if available, else original` by default, `Both`, or `Originals only`), Live Photo preservation, optional iCloud `--download-missing`, and optional sample filters (`Limit`, `From date`, `Album`, or custom `.photoslibrary`).
 - Supports **Dry run** previews, live progress streaming, cancellation, a completion report, and automatic adding + scanning in Lap.
 - **Exclude iCloud Shared Albums** is enabled by default so personal library exports stay clean; your Apple Shared Albums still appear in the collapsible **Apple Shared Albums** section at the bottom of the Folders sidebar, where clicking any shared album lets you browse its cached Apple Photos previews (0 extra disk space), open Apple Photos, or import just that album on demand.

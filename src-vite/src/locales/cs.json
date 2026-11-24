@@ -4,7 +4,6 @@
     "library": "Knihovna",
     "album": "Alba",
     "search": "Hledat",
-    "rating": "Hodnocení",
     "tag": "Štítky",
     "calendar": "Kalendář",
     "location": "Místa",
@@ -164,8 +163,6 @@
         "media_subtype": "Podtyp média",
         "extension": "Přípona",
         "favorite": "Oblíbené",
-        "rating": "Hodnocení",
-        "culling": "Výběr fotografií",
         "date": "Datum",
         "date_taken": "Datum pořízení",
         "date_created": "Datum vytvoření",
@@ -334,28 +331,10 @@
     "resume": "Pokračovat v indexování"
   },
   "favorite": {
+    "mixed": "Smíšené",
     "title": "Oblíbené",
     "files": "Oblíbené soubory",
     "folders": "Oblíbené složky"
-  },
-  "rating": {
-    "mixed": "Smíšené",
-    "title": "Hodnocení",
-    "unrated": "Bez hodnocení",
-    "all_rated": "Všechny ohodnocené",
-    "rated": "Ohodnocené",
-    "clear_rating": "Zrušit hodnocení",
-    "five_stars": "5 hvězdiček",
-    "four_stars": "4 hvězdičky",
-    "three_stars": "3 hvězdičky",
-    "two_stars": "2 hvězdičky",
-    "one_star": "1 hvězdička"
-  },
-  "culling": {
-    "title": "Výběr fotografií",
-    "picks": "Vybrané",
-    "rejected": "Odmítnuté",
-    "unreviewed": "Nezkontrolované"
   },
   "assign_tags": {
     "recent_link": "Nedávné",
@@ -473,13 +452,12 @@
         "Složka",
         "Den",
         "Měsíc",
-        "Hodnocení",
+        "",
         "Místo",
         "Fotoaparát",
         "Objektiv",
         "Rok",
-        "Typ souboru",
-        "Výběr fotografií"
+        "Typ souboru"
       ],
       "sort_type_options": [
         "Datum pořízení",
@@ -1481,7 +1459,7 @@
       "title": "Metadata",
       "section_import": "Import metadat",
       "import": "Z EXIF, IPTC a XMP",
-      "import_hint": "Při skenování a obnovení importovat oblíbené, hodnocení, značky výběru, štítky a popisy. Místní úpravy zůstanou zachovány."
+      "import_hint": "Při skenování a obnovení importovat oblíbené, štítky a popisy. Místní úpravy zůstanou zachovány."
     },
     "browse": {
       "section_album": "Složka alba",
@@ -1706,20 +1684,6 @@
         "print": "Tisk",
         "toggle_favorite": "Přidat k oblíbeným / Odebrat z oblíbených",
         "toggle_favorite_and_next": "Přidat k oblíbeným / Odebrat z oblíbených → další",
-        "set_clear_rating": "Hodnocení",
-        "set_clear_rating_and_next": "Hodnocení → Další",
-        "mark_pick": "Výběr fotografií · Vybrat",
-        "mark_pick_and_next": "Výběr fotografií · Vybrat → Další",
-        "mark_rejected": "Výběr fotografií · Odmítnout",
-        "mark_rejected_and_next": "Výběr fotografií · Odmítnout → Další",
-        "mark_unreviewed": "Výběr fotografií · Nezkontrolováno",
-        "mark_unreviewed_and_next": "Výběr fotografií · Nezkontrolováno → Další",
-        "clear_rating": "Zrušit hodnocení",
-        "rate_one": "Ohodnotit 1 hvězdičkou",
-        "rate_two": "Ohodnotit 2 hvězdičkami",
-        "rate_three": "Ohodnotit 3 hvězdičkami",
-        "rate_four": "Ohodnotit 4 hvězdičkami",
-        "rate_five": "Ohodnotit 5 hvězdičkami",
         "edit_tags": "Štítky",
         "edit_collections": "Kolekce",
         "edit_comment": "Popis",
@@ -1799,7 +1763,7 @@
       "change_location": "Změnit",
       "change_location_confirm": "Vybrat složku",
       "prechange_title": "Změnit umístění dat",
-      "prechange_message": "Data knihovny uchovávají metadata, oblíbené položky, hodnocení, štítky a další organizační údaje. Doporučuje se výchozí systémové umístění. Pokud data přesunete, použijte místní složku kvůli vyššímu výkonu.",
+      "prechange_message": "Data knihovny uchovávají metadata, oblíbené položky, štítky a další organizační údaje. Doporučuje se výchozí systémové umístění. Pokud data přesunete, použijte místní složku kvůli vyššímu výkonu.",
       "restore_default_location": "Obnovit výchozí umístění",
       "restore_default_confirm_title": "Obnovit výchozí umístění",
       "restore_default_confirm_message": "Všechny datové soubory knihoven budou přesunuty zpět do výchozího umístění.",

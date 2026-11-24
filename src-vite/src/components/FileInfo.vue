@@ -26,6 +26,7 @@
     </div>
 
     <FileInfoFieldsDialog v-if="showFieldSettings" @cancel="showFieldSettings = false" />
+    <EditLocationDialog v-if="showLocationEditor && fileInfo" :files="[fileInfo]" @saved="onLocationSaved" @cancel="showLocationEditor = false" />
 
     <!-- Info Content -->
     <div v-if="fileInfo" :class="{ invisible: !infoReady && (!hasDisplayedInfo || showDelayedLoading) }" :inert="!infoReady || undefined" :aria-hidden="!infoReady || undefined" class="mb-2 px-2 flex-1 overflow-y-auto overflow-x-hidden flex flex-col [overflow-anchor:none]">
@@ -156,15 +157,9 @@
         </div>
         <div class="shrink-0">
           <div v-if="showOrganizationPanel" class="pt-3 space-y-1.5">
-            <FavoriteRatingControl class="pl-4"
+            <FavoriteControl class="pl-4"
               :favorite="Boolean(fileInfo?.is_favorite)"
-              :rating="Number(fileInfo?.rating || 0)"
-              :culling="Number(fileInfo?.culling_flag ?? fileInfo?.cullingFlag ?? 0)"
-              label-class="text-base-content/30"
-              inactive-rating-class="text-base-content/70"
               @favorite="emit('toggleFavorite')"
-              @rating="(rating) => emit('setRating', rating)"
-              @culling="(cullingFlag) => emit('setCulling', cullingFlag)"
             />
 
             <!-- Tags -->
@@ -203,9 +198,9 @@
               </div>
             </template>
 
-            <!-- People: one chip per detected/manual face; edit to confirm, rename, dismiss, or add manually -->
-            <template v-if="config.settings.face.enabled && [1, 3].includes(Number(fileInfo?.file_type))">
-              <div class="flex items-center text-[11px] text-base-content/30 min-h-6 py-1.5">{{ $t('sidebar.people') }}</div>
+            <!-- People / Pets: one chip per detected/manual face; edit to confirm, rename, dismiss, or add manually -->
+            <template v-if="config.settings.face.enabled && [1, 2, 3].includes(Number(fileInfo?.file_type))">
+              <div class="flex items-center text-[11px] text-base-content/30 min-h-6 py-1.5">{{ $t(fileFacesSectionLabelKey) }}</div>
               <div class="flex items-center min-h-6 gap-x-2.5 gap-y-1.5 flex-wrap">
                 <span
                   v-for="face in fileFaces"
@@ -217,7 +212,7 @@
                     class="inline-flex items-center gap-1.5 transition-colors cursor-pointer"
                     :class="face.person_id ? 'text-base-content/70 hover:text-base-content' : 'text-base-content/40 italic hover:text-base-content/70'"
                     :title="face.person_id ? undefined : $t('menu.person.assign_dialog_title')"
-                    @click.stop="face.person_id ? navigatePerson({ id: face.person_id, name: face.person_name || '' }) : openAssignFace(face)"
+                    @click.stop="face.person_id ? navigatePerson({ id: face.person_id, name: face.person_name || '', kind: face.kind === 'pet' ? 'pet' : 'person' }) : openAssignFace(face)"
                   >
                     <span class="w-5 h-5 rounded-full overflow-hidden bg-base-300/70 ring-1 ring-base-content/5 shrink-0 flex items-center justify-center">
                       <img
@@ -233,7 +228,7 @@
                   <button
                     type="button"
                     class="p-0.5 rounded text-base-content/30 hover:text-base-content/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer"
-                    :title="$t('menu.person.edit_face')"
+                    :title="$t(face.kind === 'pet' ? 'menu.person.edit_pet' : 'menu.person.edit_face')"
                     @click.stop="openAssignFace(face)"
                   >
                     <IconEdit class="w-3 h-3" />
@@ -252,12 +247,12 @@
                   type="button"
                   class="badge badge-sm badge-outline max-w-full min-w-0 border-base-content/10 bg-base-content/5 font-medium text-base-content/65 hover:text-base-content cursor-pointer gap-1 disabled:opacity-50"
                   :disabled="isScanningFaces"
-                  :title="$t('menu.person.scan_photo_tooltip')"
+                  :title="$t(isVideoFile ? 'menu.person.scan_video_tooltip' : 'menu.person.scan_photo_tooltip')"
                   @click.stop="handleScanFileFaces"
                 >
                   <span v-if="isScanningFaces" class="loading loading-spinner loading-xs size-3!"></span>
                   <IconRefresh v-else class="size-3 shrink-0" />
-                  <span class="min-w-0 truncate">{{ isScanningFaces ? $t('menu.person.scan_photo_scanning') : $t('menu.person.scan_photo') }}</span>
+                  <span class="min-w-0 truncate">{{ isScanningFaces ? $t('menu.person.scan_photo_scanning') : $t(isVideoFile ? 'menu.person.scan_video' : 'menu.person.scan_photo') }}</span>
                 </button>
               </div>
             </template>
@@ -494,12 +489,15 @@
       </div>
 
       <div class="shrink-0">
-      <div v-if="hasLocationInfo" class="border-t border-base-content/5 px-1 py-3">
+      <div class="border-t border-base-content/5 px-1 py-3">
+        <div class="flex items-center gap-2">
         <button type="button" class="flex w-full items-center gap-1 cursor-pointer text-base-content/70 hover:text-base-content" :aria-expanded="showMapPanel" @click="toggleMapPanel">
           <IconRight class="w-3 h-3 transition-transform duration-200" :class="{ 'rotate-90': showMapPanel }" />
           <span class="font-bold uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.geo_location') }}</span>
         </button>
-        <div v-if="showMapPanel" class="pt-3 pl-4 grid grid-cols-[84px_minmax(0,1fr)] gap-y-1.5 gap-x-4 text-xs">
+          <TButton :icon="IconEdit" :tooltip="$t('file_info.edit_location')" button-size="small" @click.stop="showLocationEditor = true" />
+        </div>
+        <div v-if="showMapPanel && hasLocationInfo" class="pt-3 pl-4 grid grid-cols-[84px_minmax(0,1fr)] gap-y-1.5 gap-x-4 text-xs">
             <template v-if="displayField('location.geo_location', formatGeoLocation())">
             <!-- Geo Location -->
             <div class="flex items-center text-[11px] text-base-content/30 h-6">{{ $t('file_info.geo_location') }}</div>
@@ -589,6 +587,7 @@ import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
+import { SIDEBAR } from '@/common/constants';
 import { isWebViewVideoPlaybackDisabled, getGStreamerAvailability } from '@/common/video';
 import { isOriginalUnavailable } from '@/common/availability';
 import { getTagsForFile, editFileMetadata, renameFile, editImage, getAlbum, getFileCollections, getFileInfo, getMotionPhotoVideoPath, revealPath, getFacesForFile, getFaceThumbnail, getPersonThumbnail, scanFileFaces, isCloudOnlyFile } from '@/common/api';
@@ -634,9 +633,11 @@ import {
 } from '@/common/icons';
 import Breadcrumb from '@/components/Breadcrumb.vue';
 import TButton from '@/components/TButton.vue';
-import FavoriteRatingControl from '@/components/FavoriteRatingControl.vue';
+import FavoriteControl from '@/components/FavoriteControl.vue';
 import ImageHistogram from '@/components/ImageHistogram.vue';
 import MapView from '@/components/MapView.vue';
+import EditLocationDialog from '@/components/EditLocationDialog.vue';
+import { fileInfoRevision } from '@/common/fileInfoRefresh';
 
 const props = defineProps({
   empty: { type: Boolean, default: false },
@@ -661,8 +662,6 @@ const emit = defineEmits([
   'close',
   'success',
   'toggleFavorite',
-  'setRating',
-  'setCulling',
   'rotate',
   'tagStatesChanged',
   'quickEditCollection',
@@ -697,7 +696,7 @@ async function refreshTags() {
   const tags = await getTagsForFile(id);
   if (!tagsDisposed && request === tagsRequest && props.fileInfo?.id === id && libConfig._libraryId === library && tags) displayTags.value = tags;
 }
-watch(() => [props.fileInfo?.id, props.fileInfo?.tags, libConfig._libraryId], (current, previous) => {
+watch(() => [props.fileInfo?.id, props.fileInfo?.tags, libConfig._libraryId], (current, previous, onCleanup) => {
   // Membership refreshes temporarily invalidate tags; keep the same file's badges
   // until replacement data arrives so the editor below them does not jump.
   if (!previous || current[0] !== previous[0] || current[2] !== previous[2]) {
@@ -705,7 +704,9 @@ watch(() => [props.fileInfo?.id, props.fileInfo?.tags, libConfig._libraryId], (c
   } else if (Array.isArray(props.fileInfo?.tags)) {
     displayTags.value = props.fileInfo.tags;
   }
-  void refreshTags();
+  if (Array.isArray(props.fileInfo?.tags) || !props.fileInfo?.id) return;
+  const timer = setTimeout(() => void refreshTags(), 120);
+  onCleanup(() => clearTimeout(timer));
 }, { immediate: true });
 onMounted(async () => { const stop = await listen('tags-changed', refreshTags); if (tagsDisposed) stop(); else stopTags = stop; });
 onBeforeUnmount(() => { tagsDisposed = true; tagsRequest++; stopTags?.(); });
@@ -893,6 +894,7 @@ function loadMetadataDetails(force = false) {
   for (const section of sectionNames) if (sectionOpen(section)) void loadDetailSection(section, force);
   publishFileInfo();
 }
+let selectionDetailsTimer: ReturnType<typeof setTimeout> | undefined;
 const LoadingIcon = { render: () => h('span', { class: 'loading loading-spinner' }) };
 const refreshingFile = ref<string | null>(null);
 const activeInfoKey = computed(() => `${libConfig._libraryId}:${props.fileInfo?.id ?? ''}`);
@@ -980,6 +982,8 @@ const showBasicInfoPanel = computed(() => config.infoPanel.showBasicInfo);
 const showMetadataPanel = computed(() => config.infoPanel.showMetadata);
 const showMapPanel = computed(() => config.infoPanel.showMap);
 watch(() => [libConfig._libraryId, props.fileInfo?.id, props.fileInfo?.file_path, props.fileInfo?.last_scan_time, props.fileInfo?.modified_at, skipDetailReads.value], (values, previous) => {
+  clearTimeout(selectionDetailsTimer);
+  selectionDetailsTimer = undefined;
   const sameFile = previous && values[0] === previous[0] && values[1] === previous[1];
   if (sameFile) {
     invalidateDetailSections();
@@ -998,7 +1002,14 @@ watch(() => [libConfig._libraryId, props.fileInfo?.id, props.fileInfo?.file_path
   if (skipDetailReads.value) { useDbFieldsOnly(); return; }
   publishFileInfo();
   // The explicit refresh waits for catalog updates before fetching open sections.
-  if (refreshingFile.value !== activeInfoKey.value) loadMetadataDetails();
+  if (sameFile) {
+    if (refreshingFile.value !== activeInfoKey.value) loadMetadataDetails();
+  } else {
+    selectionDetailsTimer = setTimeout(() => {
+      selectionDetailsTimer = undefined;
+      if (refreshingFile.value !== activeInfoKey.value) loadMetadataDetails();
+    }, 120);
+  }
 }, { immediate: true });
 for (const section of sectionNames) {
   watch(() => sectionOpen(section), open => {
@@ -1015,7 +1026,11 @@ for (const section of sectionNames) {
 }
 watch(visibleFields, () => loadMetadataDetails());
 watch(hideEmptyFields, () => publishFileInfo());
-onBeforeUnmount(() => { cancelPendingDetails(); detailsRequest++; });
+onBeforeUnmount(() => {
+  clearTimeout(selectionDetailsTimer);
+  cancelPendingDetails();
+  detailsRequest++;
+});
 const isVideoFile = computed(() => Number(props.fileInfo?.file_type || 0) === 2);
 const isLivePhoto = computed(() => (
   props.fileInfo?.media_subtype === 'live_photo' && !!props.fileInfo?.live_photo_video_path
@@ -1259,13 +1274,19 @@ onBeforeUnmount(stopPreviewVideo);
 
 watch(
   () => [props.fileInfo?.id, Boolean(props.fileInfo?.has_collections), props.fileInfo?.collectionVersion] as const,
-  async ([fileId, hasCollections]) => {
+  ([fileId, hasCollections], _previous, onCleanup) => {
     const requestSeq = ++fileCollectionsRequestSeq;
     fileCollections.value = [];
     if (!fileId || !hasCollections) return;
-    const collections = await getFileCollections(Number(fileId));
-    if (requestSeq !== fileCollectionsRequestSeq || Number(props.fileInfo?.id) !== Number(fileId)) return;
-    fileCollections.value = Array.isArray(collections) ? collections : [];
+    const timer = setTimeout(async () => {
+      const collections = await getFileCollections(Number(fileId));
+      if (requestSeq !== fileCollectionsRequestSeq || Number(props.fileInfo?.id) !== Number(fileId)) return;
+      fileCollections.value = Array.isArray(collections) ? collections : [];
+    }, 120);
+    onCleanup(() => {
+      clearTimeout(timer);
+      fileCollectionsRequestSeq++;
+    });
   },
   { immediate: true }
 );
@@ -1418,6 +1439,16 @@ async function saveInlineMetadata() {
   if (edit.library === libConfig._libraryId) emit('metadataSaved', [edit.file], { [edit.key]: value });
 }
 watch(() => [props.fileInfo?.id, libConfig._libraryId], cancelInlineMetadata);
+
+// Location editing
+const showLocationEditor = ref(false);
+watch(() => [props.fileInfo?.id, libConfig._libraryId], () => { showLocationEditor.value = false; });
+function onLocationSaved(files: Record<string, any>[], changes: Record<string, any>) {
+  showLocationEditor.value = false;
+  emit('metadataSaved', files, changes);
+  // Location sidebar and globe reload their counts and markers.
+  fileInfoRevision.value++;
+}
 let metadataDisposed = false;
 onBeforeUnmount(() => { metadataDisposed = true; cancelInlineMetadata(); });
 
@@ -1442,14 +1473,19 @@ function revealFileInFolder() {
 
 watch(
   () => props.fileInfo?.album_id,
-  async (albumId) => {
+  (albumId, _previous, onCleanup) => {
     const requestSeq = ++albumRootRequestSeq;
     albumRootPath.value = '';
     if (!albumId) return;
-    const album = await getAlbum(albumId);
-    if (requestSeq !== albumRootRequestSeq) return;
-    if (props.fileInfo?.album_id !== albumId) return;
-    albumRootPath.value = album?.path || '';
+    const timer = setTimeout(async () => {
+      const album = await getAlbum(albumId);
+      if (requestSeq !== albumRootRequestSeq || props.fileInfo?.album_id !== albumId) return;
+      albumRootPath.value = album?.path || '';
+    }, 120);
+    onCleanup(() => {
+      clearTimeout(timer);
+      albumRootRequestSeq++;
+    });
   },
   { immediate: true }
 );
@@ -1642,6 +1678,17 @@ function openAssignFace(face: FileFace) {
   };
 }
 
+const fileFacesSectionLabelKey = computed(() => {
+  const hasPets = fileFaces.value.some((f: any) => f.kind === 'pet');
+  const hasPeople = fileFaces.value.some((f: any) => f.kind !== 'pet');
+  if (hasPets && hasPeople) return 'menu.person.people_and_pets';
+  if (hasPets) return 'menu.person.kind_pets';
+  if (!hasPeople && config.main.sidebarIndex === SIDEBAR.PERSON && config.settings.personKind === 'pet') {
+    return 'menu.person.kind_pets';
+  }
+  return 'sidebar.people';
+});
+
 function openAddManualFace() {
   const fileId = Number(props.fileInfo?.id || 0);
   if (!fileId) return;
@@ -1651,7 +1698,7 @@ function openAddManualFace() {
     person_id: null,
     person_name: null,
     thumbnail: '',
-    kind: 'person',
+    kind: config.main.sidebarIndex === SIDEBAR.PERSON && config.settings.personKind === 'pet' ? 'pet' : 'person',
     manual: true,
     norm_bbox: null,
   };
@@ -1677,8 +1724,8 @@ async function handleScanFileFaces() {
       toast.info(t('menu.person.scan_photo_none'));
     }
   } catch (error) {
-    console.error('Failed to scan photo for faces:', error);
-    toast.error(t('menu.person.scan_photo_failed'));
+    console.error('Failed to scan media for faces:', error);
+    toast.error(t(isVideoFile.value ? 'menu.person.scan_video_failed' : 'menu.person.scan_photo_failed'));
   } finally {
     isScanningFaces.value = false;
   }
@@ -1705,13 +1752,19 @@ onBeforeUnmount(() => {
   unlistenFileInfoPersonsChanged = null;
 });
 
-watch(() => props.fileInfo?.id, (id) => {
-  void loadFilePersons(Number(id || 0));
+watch(() => props.fileInfo?.id, (id, _previous, onCleanup) => {
+  fileFaces.value = [];
+  if (!id) return;
+  const timer = setTimeout(() => void loadFilePersons(Number(id)), 120);
+  onCleanup(() => {
+    clearTimeout(timer);
+    filePersonsRequestSeq++;
+  });
 }, { immediate: true });
 
-function navigatePerson(person: { id: number; name: string }) {
+function navigatePerson(person: { id: number; name: string; kind?: 'person' | 'pet' }) {
   if (!person?.id) return;
-  emit('navigatePerson', { personId: person.id, personName: person.name });
+  emit('navigatePerson', { personId: person.id, personName: person.name, personKind: person.kind || 'person' });
 }
 
 defineExpose({

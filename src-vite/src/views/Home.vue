@@ -105,12 +105,6 @@
             :class="leftPanelVisualExpanded ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 pointer-events-none'"
             :style="{ width: `calc(${Number(config.leftPanel.width || 260) / 16}rem - 4rem)` }"
           >
-            <CollectionScopeBar
-              v-if="databaseCorrupted === false && !libraryEmpty"
-              @select="handleSelectCollectionScope"
-              @configure="openCollectionScopeDialog()"
-            />
-
             <!-- Component panel (flex-1 to fill remaining space) -->
             <div
               class="min-h-0 flex-1 overflow-hidden"
@@ -122,6 +116,7 @@
                 :is="activeSidebarButton.component"
                 :titlebar="activeSidebarButton.text"
                 v-bind="activeSidebarButton.props || {}"
+                @draft-consumed="pendingSmartAlbumDraft = null"
               />
             </div>
             <div
@@ -183,14 +178,6 @@
       @cancel="showManageLibraries = false"
     />
 
-    <!-- Collection Scope Dialog -->
-    <CollectionScopeDialog
-      v-if="showCollectionScopeDialog"
-      :initialScopeId="collectionScopeDialogInitialId"
-      @changed="notifyCollectionScopeChanged"
-      @close="showCollectionScopeDialog = false"
-    />
-
     <!-- Apple Photos Import Dialog (macOS) -->
     <ApplePhotosImportDialog
       v-if="showApplePhotosImportDialog"
@@ -242,12 +229,10 @@ import TButton from '@/components/TButton.vue';
 import Content from '@/components/Content.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import CollectionTray from '@/components/CollectionTray.vue';
-import CollectionScopeBar from '@/components/CollectionScopeBar.vue';
-const CollectionScopeDialog = defineAsyncComponent(() => import('@/components/CollectionScopeDialog.vue'));
 const ApplePhotosImportDialog = defineAsyncComponent(() => import('@/components/ApplePhotosImportDialog.vue'));
 const SharedAlbumDialog = defineAsyncComponent(() => import('@/components/SharedAlbumDialog.vue'));
 const ManageLibraries = defineAsyncComponent(() => import('@/components/ManageLibraries.vue'));
-import { getActiveScopeAlbumIds } from '@/common/collectionScopes';
+import { isTextEditable } from '@/common/textSelectAll';
 import iconLogo from '@/assets/images/icon.png';
 
 import {
@@ -381,11 +366,10 @@ const currentLibrary = computed(() =>
 
 // Manage Libraries dialog state
 const showManageLibraries = ref(false);
-const showCollectionScopeDialog = ref(false);
 const showApplePhotosImportDialog = ref(false);
 const applePhotosImportPreset = ref<any>(null);
 const activeSharedAlbum = ref<any>(null);
-const collectionScopeDialogInitialId = ref<string | undefined>(undefined);
+const pendingSmartAlbumDraft = ref<any>(null);
 
 function closeApplePhotosImportDialog() {
   showApplePhotosImportDialog.value = false;
@@ -402,36 +386,10 @@ function handleImportFromSharedAlbum(album: any) {
     dest: `~/Pictures/Lap-Shared/${safeFolder}`,
     excludeShared: false,
     downloadMissing: true,
-    targetScopeId: 'family',
   };
   showApplePhotosImportDialog.value = true;
 }
 const showDesktopTitleBar = isWin || isLinux;
-
-function openCollectionScopeDialog(scopeId?: string) {
-  collectionScopeDialogInitialId.value = scopeId || libConfig.collectionScope?.activeId;
-  showCollectionScopeDialog.value = true;
-}
-
-async function notifyCollectionScopeChanged() {
-  const activeAlbumIds = getActiveScopeAlbumIds(libConfig.collectionScope);
-  if (
-    activeAlbumIds !== null &&
-    libConfig.album.id > 0 &&
-    !activeAlbumIds.includes(Number(libConfig.album.id))
-  ) {
-    libConfig.album.id = 0;
-    libConfig.album.folderId = null;
-    libConfig.album.folderPath = '';
-    libConfig.album.selected = false;
-  }
-  await emit('library-total-refreshed', { source: 'collection-scope' });
-}
-
-async function handleSelectCollectionScope(scopeId: string) {
-  await libConfig.setActiveScope(scopeId);
-  await notifyCollectionScopeChanged();
-}
 
 /// Splitter for resizing the left pane
 const isDraggingSplitter = ref(false);
@@ -444,9 +402,9 @@ let unlistenOpenAbout: (() => void) | null = null;
 let unlistenAlbumsRefreshed: (() => void) | null = null;
 let unlistenAddAlbumRequested: (() => void) | null = null;
 let unlistenEditAlbumRequested: (() => void) | null = null;
-let unlistenConfigureScopes: (() => void) | null = null;
 let unlistenImportApplePhotos: (() => void) | null = null;
 let unlistenOpenSharedAlbum: (() => void) | null = null;
+let unlistenCreateSmartAlbumDraft: (() => void) | null = null;
 // Native Edit menu "Select All" routes to the photo selection via the backend event.
 let unlistenMenuSelectAll: (() => void) | null = null;
 const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
@@ -467,7 +425,7 @@ const {
 const buttons = computed(() =>  [
   { index: SIDEBAR.LIBRARY, icon: IconPhotoAll, component: Library, text: localeMsg.value.sidebar.library },
   { index: SIDEBAR.ALBUM, icon: IconFolders, component: AlbumList, text: localeMsg.value.sidebar.album, props: { selectionSource: 'album' } },
-  { index: SIDEBAR.SMART_ALBUM, icon: IconFolderCog, component: SmartAlbumList, text: localeMsg.value.album.smart_album_list },
+  { index: SIDEBAR.SMART_ALBUM, icon: IconFolderCog, component: SmartAlbumList, text: localeMsg.value.album.smart_album_list, props: { initialDraft: pendingSmartAlbumDraft.value } },
   { index: SIDEBAR.SEARCH, icon: IconSearch, component: ImageSearch, text: localeMsg.value.sidebar.search },
   { index: SIDEBAR.CALENDAR, icon: IconCalendarDay, component: Calendar, text: localeMsg.value.sidebar.calendar },
   { index: SIDEBAR.TAG, icon: IconTag, component: Tag, text: localeMsg.value.sidebar.tag },
@@ -488,7 +446,7 @@ const visibleButtons = computed(() =>
   buttons.value
     .map((item) => ({ ...item, disabled: libraryEmpty.value && item.index !== SIDEBAR.ALBUM }))
     .filter(item => !item.hidden)
-    .sort((a, b) => a.index - b.index)
+    .sort((a, b) => ((a as any).order ?? a.index) - ((b as any).order ?? b.index))
 );
 
 watch(() => config.settings.face.enabled, (enabled) => {
@@ -587,6 +545,9 @@ onMounted(async () => {
     void clickSettings(SETTINGS_TAB.ABOUT);
   });
   unlistenMenuSelectAll = await listen('menu-select-all', () => {
+    // The event reaches every window; only act when this one has focus, and
+    // leave Cmd-A to the text field when one is focused (App.vue selects it).
+    if (!document.hasFocus() || isTextEditable(document.activeElement)) return;
     contentRef.value?.selectAll?.();
   });
 
@@ -609,10 +570,6 @@ onMounted(async () => {
     (panelRef.value as any)?.openAlbumEdit?.(albumId);
   });
 
-  unlistenConfigureScopes = await listen('configure-collection-scopes', (event: any) => {
-    openCollectionScopeDialog(event?.payload?.scopeId);
-  });
-
   unlistenImportApplePhotos = await listen('import-apple-photos-requested', (event: any) => {
     if (isMac) {
       applePhotosImportPreset.value = event?.payload || null;
@@ -624,6 +581,16 @@ onMounted(async () => {
     if (isMac && event?.payload?.uuid) {
       activeSharedAlbum.value = event.payload;
     }
+  });
+
+  unlistenCreateSmartAlbumDraft = await listen('create-smart-album-from-draft', async (event: any) => {
+    if (!event?.payload) return;
+    pendingSmartAlbumDraft.value = event.payload;
+    libConfig.activePane = 'main';
+    config.main.sidebarIndex = SIDEBAR.SMART_ALBUM;
+    showPanel.value = true;
+    await nextTick();
+    (panelRef.value as any)?.openNewSmartAlbumDraft?.(event.payload);
   });
 
   unlistenAlbumsRefreshed = await listen('albums-refreshed', async (event: any) => {
@@ -665,12 +632,12 @@ onBeforeUnmount(() => {
   unlistenAddAlbumRequested = null;
   unlistenEditAlbumRequested?.();
   unlistenEditAlbumRequested = null;
-  unlistenConfigureScopes?.();
-  unlistenConfigureScopes = null;
   unlistenImportApplePhotos?.();
   unlistenImportApplePhotos = null;
   unlistenOpenSharedAlbum?.();
   unlistenOpenSharedAlbum = null;
+  unlistenCreateSmartAlbumDraft?.();
+  unlistenCreateSmartAlbumDraft = null;
 });
 
 function handleHomeKeyDown(event: KeyboardEvent) {

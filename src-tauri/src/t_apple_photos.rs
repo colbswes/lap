@@ -1664,7 +1664,7 @@ mod identity_import_tests {
             .execute_batch(
                 "CREATE TABLE albums (id INTEGER PRIMARY KEY, path TEXT, file_types INTEGER, small_image_filter INTEGER, excluded_folders TEXT);
                  CREATE TABLE afolders (id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT, is_excluded_from_search INTEGER);
-                 CREATE TABLE afiles (id INTEGER PRIMARY KEY, folder_id INTEGER, name TEXT, size INTEGER, file_type INTEGER, taken_date INTEGER, is_favorite INTEGER, e_rating INTEGER, is_picked INTEGER, live_photo_video_id INTEGER, width INTEGER, height INTEGER, e_orientation INTEGER, has_faces INTEGER);
+                 CREATE TABLE afiles (id INTEGER PRIMARY KEY, folder_id INTEGER, name TEXT, size INTEGER, file_type INTEGER, taken_date INTEGER, is_favorite INTEGER, live_photo_video_id INTEGER, width INTEGER, height INTEGER, e_orientation INTEGER, has_faces INTEGER);
                  CREATE TABLE persons (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, kind TEXT NOT NULL DEFAULT 'person', thumbnail BLOB, cover_face_id INTEGER, created_at INTEGER);
                  CREATE TABLE faces (id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER, bbox TEXT, embedding BLOB, person_id INTEGER, created_at INTEGER, confirmed INTEGER NOT NULL DEFAULT 0, low_quality INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'face', species TEXT);
                  CREATE TABLE face_rejections (face_id INTEGER, person_id INTEGER, PRIMARY KEY (face_id, person_id));",
@@ -1681,8 +1681,8 @@ mod identity_import_tests {
         lconn
             .execute_batch(
                 "INSERT INTO afiles VALUES
-                     (1, 1, 'IMG_1000_edited.heic', 100, 1, 1700000000, 0, 0, 0, NULL, 1000, 1000, 1, 1),
-                     (2, 1, 'IMG_2000.HEIC', 100, 1, 1700000001, 0, 0, 0, NULL, 1000, 1000, 1, 1);
+                     (1, 1, 'IMG_1000_edited.heic', 100, 1, 1700000000, 0, NULL, 1000, 1000, 1, 1),
+                     (2, 1, 'IMG_2000.HEIC', 100, 1, 1700000001, 0, NULL, 1000, 1000, 1, 1);
                  INSERT INTO faces (id, file_id, bbox, kind) VALUES
                      (10, 1, '{\"x\":300,\"y\":400,\"width\":400,\"height\":400}', 'pet'),
                      (11, 2, '{\"x\":300,\"y\":300,\"width\":400,\"height\":400}', 'pet');",

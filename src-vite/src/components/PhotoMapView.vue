@@ -17,6 +17,7 @@
         :tooltip="t(config.settings.mapTheme === 0 ? 'map.standard' : 'map.satellite')"
         @click="toggleMap"
       />
+      <TButton v-if="showGlobeToggle" :icon="IconGlobe" :tooltip="t('map.globe')" @click="config.settings.mapGlobe = true" />
       <TButton v-if="showAppleMapsButton" :icon="IconExternal" :tooltip="t('file_info.open_apple_maps')" @click="openAppleMaps" />
     </div>
     <div v-if="isQueryMap && !loading" class="absolute top-2 right-2 z-500 pointer-events-none rounded-box bg-base-100/60 px-2 py-1 text-xs text-base-content/70">
@@ -44,7 +45,7 @@ import {
 } from '@/common/api'
 import { getThumbUrl, isMac } from '@/common/utils'
 import { useUIStore } from '@/stores/uiStore'
-import { IconExternal, IconMapCenter, IconMapDefault, IconMapSatellite, IconZoomIn, IconZoomOut } from '@/common/icons'
+import { IconExternal, IconGlobe, IconMapCenter, IconMapDefault, IconMapSatellite, IconZoomIn, IconZoomOut } from '@/common/icons'
 import TButton from '@/components/TButton.vue'
 
 const props = defineProps({
@@ -58,6 +59,7 @@ const props = defineProps({
   lat: { type: Number, default: 0 },
   lon: { type: Number, default: 0 },
   label: { type: String, default: 'Lap' },
+  showGlobeToggle: { type: Boolean, default: false },
 })
 const emit = defineEmits(['open-cluster', 'select-file', 'preview-file', 'restored'])
 

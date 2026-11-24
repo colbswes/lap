@@ -39,7 +39,7 @@ async function render(key, overrides = {}) {
   };
   const app = createSSRApp({ data: () => context, render: compile(section(key)) });
   app.config.globalProperties.$t = key => key;
-  for (const name of ['IconRight', 'FavoriteRatingControl', 'TButton', 'IconRotate', 'IconCollection', 'IconPerson']) {
+  for (const name of ['IconRight', 'FavoriteControl', 'TButton', 'IconRotate', 'IconCollection', 'IconPerson']) {
     app.component(name, { render: () => null });
   }
   return renderToString(app);
@@ -126,7 +126,7 @@ function detailsFixture(file = { id: 1, file_path: '/1.jpg', e_title: 'DB title'
     showSourceMetadataPanel: ref(true), showMetadataPanel: ref(true), showMapPanel: ref(false),
     generalFileInfo: ref({}), refreshingFile: ref(null),
     activeInfoKey: { get value() { return `test:${props.fileInfo.id}`; } },
-    setTimeout: callback => { const timer = { callback }; timers.push(timer); return timer; },
+    setTimeout: (callback, delay) => { const timer = { callback, delay }; timers.push(timer); return timer; },
     clearTimeout: timer => { if (timer) timer.cancelled = true; },
     invoke: (command, args) => {
       calls.push({ command, args });
@@ -149,13 +149,21 @@ function detailsFixture(file = { id: 1, file_path: '/1.jpg', e_title: 'DB title'
     props.fileInfo = { id, file_path: `/${id}.jpg`, e_title: `DB ${id}` };
     state.changeFile(['test', id], previous);
   };
-  return { props, pending, calls, timers, state, select };
+  const flushSelection = () => {
+    for (const timer of timers.filter(timer => timer.delay === 120 && !timer.cancelled)) {
+      timer.cancelled = true;
+      timer.callback();
+    }
+  };
+  return { props, pending, calls, timers, state, select, flushSelection };
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
 test('uncached file waits for all expanded sections and publishes successful fields with DB fallback', async () => {
   const f = detailsFixture();
   f.state.changeFile(['test', 1], undefined);
+  assert.equal(f.pending.length, 0);
+  f.flushSelection();
   assert.equal(f.pending.length, 2);
   assert.equal(f.state.infoReady.value, false);
   f.pending[0].resolve({ credit: { values: ['credit'], source: 'XMP' } });
@@ -182,14 +190,19 @@ test('offline albums and cloud-only originals show DB immediately without any fi
 test('cached files show immediately and late replies cannot publish a previous file', async () => {
   const f = detailsFixture();
   f.state.changeFile(['test', 1], undefined);
+  f.flushSelection();
   f.pending[0].resolve({ credit: { values: ['cached'], source: 'XMP' } });
   f.pending[1].resolve({});
   await settle();
   f.select(2);
   assert.equal(f.state.infoReady.value, false);
+  f.flushSelection();
+  f.select(3);
   f.select(1);
   assert.equal(f.state.infoReady.value, true);
   assert.equal(f.state.metadataDetails.value.credit.values[0], 'cached');
+  f.flushSelection();
+  assert.equal(f.pending.length, 6, 'the intermediate selection is coalesced');
   f.pending[2].resolve({ credit: { values: ['stale'], source: 'XMP' } });
   f.pending[3].resolve({});
   f.pending[4].resolve({ credit: { values: ['cached'], source: 'XMP' } });
@@ -201,7 +214,8 @@ test('cached files show immediately and late replies cannot publish a previous f
 test('timeout cancels reads and releases the complete DB-only panel', async () => {
   const f = detailsFixture();
   f.state.changeFile(['test', 1], undefined);
-  for (const timer of f.timers) timer.callback();
+  f.flushSelection();
+  for (const timer of f.timers) if (!timer.cancelled) timer.callback();
   await settle();
   assert.equal(f.state.infoReady.value, true);
   assert.deepEqual(f.state.metadataDetails.value, {});

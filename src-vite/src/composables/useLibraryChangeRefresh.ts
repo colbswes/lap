@@ -8,7 +8,11 @@ import { listen } from '@tauri-apps/api/event';
  * Only the active sidebar panel is mounted, so listening here keeps inactive
  * panels free of background queries.
  */
-export function useLibraryChangeRefresh(refresh: () => void | Promise<void>, debounceMs = 50) {
+export function useLibraryChangeRefresh(
+  refresh: () => void | Promise<void>,
+  debounceMs = 50,
+  shouldIgnore?: (payload: any) => boolean,
+) {
   let disposed = false;
   let unlisten: (() => void) | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -27,8 +31,8 @@ export function useLibraryChangeRefresh(refresh: () => void | Promise<void>, deb
 
   onMounted(async () => {
     try {
-      const stop = await listen('library-total-refreshed', () => {
-        if (disposed) return;
+      const stop = await listen('library-total-refreshed', (event: any) => {
+        if (disposed || shouldIgnore?.(event?.payload)) return;
         if (timer) clearTimeout(timer);
         timer = setTimeout(flush, debounceMs);
       });

@@ -188,15 +188,6 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
             let path = request.uri().path();
             let file_id_str = path.rsplit('/').next().unwrap_or("");
             let file_id: i64 = file_id_str.parse().unwrap_or(0);
-            let options = raw_display_options(request.uri().query());
-            let cached_only = request.uri().query().unwrap_or_default().split('&')
-                .any(|param| param == "cachedOnly=true");
-            let for_editing = request.uri().query().unwrap_or_default().split('&')
-                .any(|param| param == "forEditing=true");
-            let raw_request = request.uri().query().unwrap_or_default().split('&')
-                .find_map(|param| param.strip_prefix("rawViewerId="))
-                .map(t_image::register_raw_preview_request);
-
             if file_id <= 0 {
                 responder.respond(text_response(
                     http::StatusCode::BAD_REQUEST,
@@ -205,11 +196,23 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
                 return;
             }
 
+            let query = request.uri().query().unwrap_or_default();
+            let options = raw_display_options(Some(query));
+            let has_param = |param| query.split('&').any(|value| value == param);
+            let cached_only = has_param("cachedOnly=true");
+            let for_editing = has_param("forEditing=true");
+            let full_size = has_param("rawFullSize=true");
+            let viewer = query.split('&').find_map(|param| param.strip_prefix("viewerId="))
+                .filter(|viewer| !viewer.is_empty())
+                .or_else(|| query.split('&').find_map(|param| param.strip_prefix("rawViewerId=")));
+            let preview = t_image::PreviewRequest::new(viewer, has_param("prefetch=true"));
             let library_id = path.trim_start_matches('/').split('/').next().unwrap_or("default").to_string();
             tauri::async_runtime::spawn(async move {
                 // Scheme callbacks can run on the UI thread. Never wait for a
                 // library lock, configuration IO or SQLite there.
-                let lookup = tauri::async_runtime::spawn_blocking(move || {
+                let lookup_request = preview.clone();
+                let lookup = preview.wait_for(tauri::async_runtime::spawn_blocking(move || {
+                    lookup_request.check_active()?;
                     crate::t_cmds::with_current_library(&library_id, || {
                         let file = t_sqlite::AFile::get_file_info(file_id)?
                             .ok_or_else(|| "File not found".to_string())?;
@@ -222,9 +225,9 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
                         };
                         Ok((file, companion))
                     })
-                }).await;
+                })).await;
                 let (file, companion) = match lookup {
-                    Ok(Ok(files)) => files,
+                    Ok(Ok(Ok(files))) => files,
                     _ => {
                         responder.respond(text_response(http::StatusCode::NOT_FOUND, "file not found"));
                         return;
@@ -254,11 +257,11 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
                 if for_editing {
                     // Use exactly the same pixels (including decoder fallbacks)
                     // that get_edited_image applies the crop and adjustments to.
-                    let result = tauri::async_runtime::spawn_blocking(move || {
+                    let result = preview.decode(move || {
                         tauri::async_runtime::block_on(t_image::get_editable_preview_bytes(&file_path))
                     }).await;
                     responder.respond(match result {
-                        Ok(Ok(Some(data))) => image_response(data),
+                        Ok(Some(data)) => image_response(data),
                         _ => text_response(http::StatusCode::NOT_FOUND, "editable preview not found"),
                     });
                     return;
@@ -268,8 +271,12 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
                 }).unwrap_or("");
                 if options.prefer_pair {
                     if let Some(path) = companion.and_then(|file| file.file_path) {
-                        if let Ok(data) = t_image::get_file_image_bytes_cached(&path, options).await {
-                            if image::load_from_memory(&data).is_ok() {
+                        if let Ok(data) = t_image::get_file_image_bytes_cached(&path, options, &preview).await {
+                            let validated = preview.decode(move || {
+                                image::load_from_memory(&data).map_err(|error| error.to_string())?;
+                                Ok(data)
+                            }).await;
+                            if let Ok(data) = validated {
                                 responder.respond(raw_preview_response(data, "pair", false, pair_label));
                                 return;
                             }
@@ -277,15 +284,14 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
                     }
                 }
                 if is_raw {
-                    let full_size = request.uri().query().unwrap_or_default().split('&').any(|param| param == "rawFullSize=true");
-                    let response = match t_image::get_raw_preview_cached(&file_path, options, full_size, raw_request).await {
+                    let response = match t_image::get_raw_preview_cached(&file_path, options, full_size, &preview).await {
                         Ok((data, source, unavailable)) => raw_preview_response(data, source, unavailable, pair_label),
                         Err(_) => text_response(http::StatusCode::NOT_FOUND, "RAW preview not found"),
                     };
                     responder.respond(response);
                     return;
                 }
-                let response = match t_image::get_file_image_bytes_cached(&file_path, options).await {
+                let response = match t_image::get_file_image_bytes_cached(&file_path, options, &preview).await {
                     Ok(data) => image_response(data),
                     Err(_) => text_response(http::StatusCode::NOT_FOUND, "preview not found"),
                 };

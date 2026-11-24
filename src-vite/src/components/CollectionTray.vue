@@ -98,6 +98,7 @@
               :class="[
                 'sidebar-item group border-2 border-transparent transition-colors',
                 selectedId === collection.id ? 'sidebar-item-selected' : 'sidebar-item-hover',
+                isCollectionHidden(collection.id) ? 'opacity-50' : '',
               ]"
               @click="selectCollection(collection)"
             >
@@ -128,6 +129,20 @@
               >
                 {{ getCollectionDisplayCount(collection).toLocaleString() }}
               </span>
+              <button
+                v-if="renamingId !== collection.id"
+                type="button"
+                :title="isCollectionHidden(collection.id) ? $t('collection.show') : $t('collection.hide')"
+                :aria-label="isCollectionHidden(collection.id) ? $t('collection.show') : $t('collection.hide')"
+                :aria-pressed="isCollectionHidden(collection.id)"
+                :class="[
+                  'p-1 rounded-box text-base-content/45 hover:text-base-content hover:bg-base-100/40 cursor-pointer shrink-0 transition-colors',
+                  isCollectionHidden(collection.id) ? 'flex' : 'hidden group-hover:flex',
+                ]"
+                @click.stop="toggleCollectionHidden(collection)"
+              >
+                <component :is="isCollectionHidden(collection.id) ? IconHide : IconUnhide" class="w-4 h-4" />
+              </button>
               <div
                 v-if="renamingId !== collection.id"
                 :class="[
@@ -176,6 +191,14 @@
       @ok="confirmClear"
       @cancel="clearTarget = null"
     />
+    <TaggingDialog
+      v-if="taggingFileIds.length > 0"
+      :fileIds="taggingFileIds"
+      :file-name="taggingCollectionName"
+      position-key="edit-tag"
+      @ok="closeTaggingDialog"
+      @cancel="closeTaggingDialog"
+    />
   </section>
 </template>
 
@@ -185,12 +208,15 @@ import { emit as tauriEmit, listen } from '@tauri-apps/api/event';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
-import { clearCollection, createCollection, deleteCollection as deleteCollectionApi, getCollectionCounts, listCollections, renameCollection, reorderCollections } from '@/common/api';
+import { clearCollection, createCollection, deleteCollection as deleteCollectionApi, getCollectionCounts, getCollectionQueryFileIds, listCollections, renameCollection, reorderCollections } from '@/common/api';
+import { isHiddenId } from '@/common/hiddenAlbums';
+import { buildSmartDraftFromCollection, makeDefaultQueryParams } from '@/common/collectionActions';
 import { useLibraryChangeRefresh } from '@/composables/useLibraryChangeRefresh';
-import { IconAdd, IconRight, IconRename, IconMore, IconCollection, IconRemove, IconTrash, IconClose, IconSearch, IconDragHandle, IconOrder } from '@/common/icons';
+import { IconAdd, IconRight, IconRename, IconMore, IconFolderCog, IconHide, IconTag, IconTrash, IconClose, IconSearch, IconDragHandle, IconOrder, IconUnhide, IconCollection } from '@/common/icons';
 import { VueDraggable, type DraggableEvent } from 'vue-draggable-plus';
 import ContextMenu from '@/components/ContextMenu.vue';
 import MessageBox from '@/components/MessageBox.vue';
+import TaggingDialog from '@/components/TaggingDialog.vue';
 import TButton from '@/components/TButton.vue';
 
 const props = defineProps({
@@ -236,15 +262,41 @@ const renamingId = ref<number | null>(null);
 const renameValue = ref('');
 const renameInputRef = ref<HTMLInputElement | HTMLInputElement[] | null>(null);
 const isItemDragging = ref(false);
+const isCollectionHidden = (collectionId: number) =>
+  isHiddenId(libConfig.hiddenCollectionIds, Number(collectionId));
+
+const hiddenCollectionCount = computed(() =>
+  collections.value.filter(collection => isCollectionHidden(collection.id)).length
+);
+
+async function toggleCollectionHidden(collection: Collection) {
+  await libConfig.toggleCollectionHidden(Number(collection.id));
+  await tauriEmit('library-total-refreshed', { source: 'hidden-filters' });
+}
+
+async function showAllCollections() {
+  await libConfig.showAllCollections();
+  await tauriEmit('library-total-refreshed', { source: 'hidden-filters' });
+}
+
 const canReorderCollections = computed(() =>
   collections.value.length > 1 && !searchQuery.value.trim() && renamingId.value === null && !isItemDragging.value
 );
-const collectionPanelMenuItems = computed(() => [{
-  label: t('collection.reorder'),
-  icon: IconOrder,
-  disabled: !canReorderCollections.value,
-  action: () => { isReorderingCollections.value = !isReorderingCollections.value; },
-}]);
+const collectionPanelMenuItems = computed(() => [
+  {
+    label: t('collection.reorder'),
+    icon: IconOrder,
+    disabled: !canReorderCollections.value,
+    action: () => { isReorderingCollections.value = !isReorderingCollections.value; },
+  },
+  ...(hiddenCollectionCount.value > 0 ? [
+    {
+      label: t('collection.show_all'),
+      icon: IconUnhide,
+      action: () => { void showAllCollections(); },
+    },
+  ] : []),
+]);
 watch(canReorderCollections, (canReorder) => {
   if (!canReorder) isReorderingCollections.value = false;
 });
@@ -255,6 +307,8 @@ watch(() => props.expanded, (expanded) => {
 });
 const deleteTarget = ref<Collection | null>(null);
 const clearTarget = ref<Collection | null>(null);
+const taggingFileIds = ref<number[]>([]);
+const taggingCollectionName = ref('');
 let unlistenCollectionFilesDropped: (() => void) | null = null;
 let unlistenCollectionsChanged: (() => void) | null = null;
 let unlistenContentItemsDragState: (() => void) | null = null;
@@ -283,8 +337,9 @@ onMounted(async () => {
   unlistenCollectionFilesDropped = await listen('collection-files-dropped', async () => {
     await loadCollections();
   });
-  unlistenCollectionsChanged = await listen('collections-changed', async () => {
-    await loadCollections();
+  unlistenCollectionsChanged = await listen('collections-changed', async (event: any) => {
+    const preferredId = Number(event?.payload?.selectedId || 0) || undefined;
+    await loadCollections(preferredId);
   });
   unlistenContentItemsDragState = await listen('content-items-drag-state', (event: any) => {
     isItemDragging.value = Boolean(event.payload?.dragging);
@@ -407,8 +462,13 @@ async function confirmDelete() {
   const replacementId = wasSelected && targetIndex >= 0
     ? collections.value[targetIndex + 1]?.id || collections.value[targetIndex - 1]?.id
     : undefined;
+  const wasHidden = isCollectionHidden(target.id);
   deleteTarget.value = null;
   await deleteCollectionApi(target.id);
+  if (wasHidden) {
+    await libConfig.removeHiddenCollection(Number(target.id));
+    await tauriEmit('library-total-refreshed', { source: 'hidden-filters' });
+  }
   await loadCollections(replacementId);
   await tauriEmit('refresh-content');
 }
@@ -422,12 +482,46 @@ async function confirmClear() {
   await tauriEmit('refresh-content');
 }
 
+async function openTaggingForCollection(collection: Collection) {
+  const fileIds = await getCollectionQueryFileIds(collection.id, makeDefaultQueryParams());
+  if (!Array.isArray(fileIds) || fileIds.length === 0) return;
+  taggingCollectionName.value = collection.name;
+  taggingFileIds.value = fileIds.map((id: any) => Number(id)).filter((id: number) => id > 0);
+}
+
+function closeTaggingDialog() {
+  taggingFileIds.value = [];
+  taggingCollectionName.value = '';
+}
+
+function createSmartFromCollection(collection: Collection) {
+  void tauriEmit('create-smart-album-from-draft', buildSmartDraftFromCollection(collection));
+}
+
 function collectionMenuItems(collection: Collection) {
+  const hidden = isCollectionHidden(collection.id);
   return [
     {
       label: t('collection.rename'),
       icon: IconRename,
       action: () => startRename(collection),
+    },
+    {
+      label: hidden ? t('collection.show') : t('collection.hide'),
+      icon: hidden ? IconUnhide : IconHide,
+      action: () => { void toggleCollectionHidden(collection); },
+    },
+    { label: "-", action: null },
+    {
+      label: t('collection.create_smart_collection'),
+      icon: IconFolderCog,
+      action: () => createSmartFromCollection(collection),
+    },
+    {
+      label: t('collection.tag_photos'),
+      icon: IconTag,
+      disabled: getCollectionDisplayCount(collection) === 0,
+      action: () => { void openTaggingForCollection(collection); },
     },
     {
       label: t('collection.clear'),

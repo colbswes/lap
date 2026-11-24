@@ -918,11 +918,32 @@ fn is_human_false_positive_in_pet(face: &FaceBox, pets: &[Detection]) -> bool {
     })
 }
 
-/// Decode an upright image for face/pet detection, preferring the local original
-/// and falling back to the stored thumbnail.
+/// Decode an upright image for face/pet detection: for images, prefers the local original
+/// and falls back to the stored thumbnail; for videos, prefers the stored thumbnail (matching
+/// the preview/cover frame) and falls back to extracting a frame from the local video.
 pub(crate) fn decode_image_for_faces(file_id: i64, file_path: &str) -> Option<Vec<u8>> {
     let original_local = !crate::t_utils::is_cloud_only_path(file_path)
         && crate::t_utils::content_readable(file_path);
+    if crate::t_utils::get_file_type(file_path) == Some(2) {
+        return t_sqlite::AThumb::fetch(file_id)
+            .ok()
+            .flatten()
+            .and_then(|thumb| thumb.thumb_data)
+            .or_else(|| {
+                if original_local {
+                    crate::t_video::get_video_thumbnail_sync(
+                        file_path,
+                        t_common::FACE_DECODE_SIZE,
+                        None,
+                        None,
+                    )
+                    .ok()
+                    .flatten()
+                } else {
+                    None
+                }
+            });
+    }
     let decoded = if original_local {
         crate::t_image::decode_upright_for_faces(file_path, t_common::FACE_DECODE_SIZE)
     } else {
@@ -934,6 +955,122 @@ pub(crate) fn decode_image_for_faces(file_id: i64, file_path: &str) -> Option<Ve
             .flatten()
             .and_then(|thumb| thumb.thumb_data)
     })
+}
+
+/// Clockwise quarter turns (0..=3) of an in-app rotation (`afiles.rotate`, degrees clockwise).
+/// The in-app rotation sits on top of the EXIF-upright decode, so detection has to apply
+/// it too or a photo the user turned upright is still scanned sideways.
+pub(crate) fn quarter_turns(rotate_degrees: i64) -> u32 {
+    (rotate_degrees.rem_euclid(360) / 90) as u32
+}
+
+/// Rotate an image clockwise by `turns` quarter turns.
+pub(crate) fn rotate_image(img: DynamicImage, turns: u32) -> DynamicImage {
+    match turns % 4 {
+        1 => img.rotate90(),
+        2 => img.rotate180(),
+        3 => img.rotate270(),
+        _ => img,
+    }
+}
+
+/// `decode_image_for_faces`, then turned by the in-app rotation so it matches what the
+/// user sees (used to embed boxes the user drew or reclassified).
+pub(crate) fn decode_image_for_faces_rotated(
+    file_id: i64,
+    file_path: &str,
+    rotate_degrees: i64,
+) -> Option<Vec<u8>> {
+    let bytes = decode_image_for_faces(file_id, file_path)?;
+    match quarter_turns(rotate_degrees) {
+        0 => Some(bytes),
+        turns => rotate_encoded(&bytes, turns),
+    }
+}
+
+/// Rotate encoded image bytes clockwise by `turns` quarter turns, re-encoded as JPEG.
+fn rotate_encoded(image_bytes: &[u8], turns: u32) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(image_bytes).ok()?;
+    let rgb = rotate_image(img, turns).to_rgb8();
+    let mut out = std::io::Cursor::new(Vec::new());
+    rgb.write_to(&mut out, image::ImageFormat::Jpeg).ok()?;
+    Some(out.into_inner())
+}
+
+/// Where box `(x, y, w, h)` in a `frame` of `(width, height)` lands after rotating the
+/// frame clockwise by `turns` quarter turns. Works for pixel or normalized (1x1) frames.
+pub(crate) fn rotate_box(
+    b: (f32, f32, f32, f32),
+    frame: (f32, f32),
+    turns: u32,
+) -> (f32, f32, f32, f32) {
+    let (mut b, mut frame) = (b, frame);
+    for _ in 0..turns % 4 {
+        // One clockwise turn maps point (x, y) to (H - y, x) and swaps the frame.
+        b = (frame.1 - (b.1 + b.3), b.0, b.3, b.2);
+        frame = (frame.1, frame.0);
+    }
+    b
+}
+
+/// Detect faces and pets in an EXIF-upright decode, honoring the in-app rotation, and
+/// return boxes in the stored upright frame `(width, height)` (falling back to the decoded
+/// size when unknown). With `try_sideways`, a pass that finds no human faces is retried a
+/// quarter turn either way, catching photos whose camera orientation tag is wrong.
+pub(crate) fn detect_in_upright_frame(
+    engine: &mut FaceEngine,
+    image_bytes: &[u8],
+    (width, height): (u32, u32),
+    rotate_degrees: i64,
+    try_sideways: bool,
+) -> Result<Vec<Detection>, String> {
+    let user_turns = quarter_turns(rotate_degrees);
+    let mut passes = vec![user_turns];
+    if try_sideways {
+        passes.extend([(user_turns + 1) % 4, (user_turns + 3) % 4]);
+    }
+
+    let mut first_pass: Option<Vec<Detection>> = None;
+    for turns in passes {
+        let rotated;
+        let bytes = if turns == 0 {
+            image_bytes
+        } else {
+            rotated = rotate_encoded(image_bytes, turns)
+                .ok_or_else(|| "Failed to rotate image for face detection".to_string())?;
+            &rotated
+        };
+        let (mut detections, (proc_w, proc_h)) = engine.detect_all_from_bytes(bytes)?;
+        if proc_w == 0 || proc_h == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Upright frame size, then the same frame as seen in this pass.
+        let upright = if width > 0 && height > 0 {
+            (width as f32, height as f32)
+        } else if turns % 2 == 1 {
+            (proc_h as f32, proc_w as f32)
+        } else {
+            (proc_w as f32, proc_h as f32)
+        };
+        let pass_frame = if turns % 2 == 1 { (upright.1, upright.0) } else { upright };
+        let (sx, sy) = (pass_frame.0 / proc_w as f32, pass_frame.1 / proc_h as f32);
+        for det in &mut detections {
+            let b = &mut det.bbox;
+            let scaled = (b.x * sx, b.y * sy, b.width * sx, b.height * sy);
+            let (x, y, w, h) = rotate_box(scaled, pass_frame, (4 - turns) % 4);
+            (b.x, b.y, b.width, b.height) = (x, y, w, h);
+            // Landmarks are in this pass's decoded pixels and are not stored; drop them
+            // rather than return them in a different frame from the box.
+            b.landmarks = None;
+        }
+
+        if detections.iter().any(|d| d.kind == "face") {
+            return Ok(detections);
+        }
+        first_pass.get_or_insert(detections);
+    }
+    Ok(first_pass.unwrap_or_default())
 }
 
 /// Canonical ArcFace landmark positions in a 112x112 crop
@@ -1176,7 +1313,7 @@ pub fn run_face_indexing(
             }
         };
 
-        for (file_id, file_path, width, height) in files {
+        for (file_id, file_path, width, height, rotate) in files {
             if *cancel_token.lock().unwrap() {
                 cancelled = true;
                 break;
@@ -1216,23 +1353,19 @@ pub fn run_face_indexing(
                 continue;
             };
             let mut engine = face_state.0.lock().unwrap();
-            let process_result = engine.detect_all_from_bytes(&image_bytes);
+            // Boxes come back in the stored upright frame, with the in-app rotation applied
+            // for detection only.
+            let process_result = detect_in_upright_frame(
+                &mut engine,
+                &image_bytes,
+                (width.max(0) as u32, height.max(0) as u32),
+                rotate,
+                false,
+            );
             drop(engine);
 
             match process_result {
-                Ok((mut faces, (proc_w, proc_h))) => {
-                    // Scale bbox from the decoded image to original size
-                    {
-                        let scale_x = width as f32 / proc_w as f32;
-                        let scale_y = height as f32 / proc_h as f32;
-
-                        for face in &mut faces {
-                            face.bbox.x *= scale_x;
-                            face.bbox.y *= scale_y;
-                            face.bbox.width *= scale_x;
-                            face.bbox.height *= scale_y;
-                        }
-                    }
+                Ok(mut faces) => {
 
                     // Rescan: keep stored faces and pets (and their names); add only
                     // detections that don't overlap a stored or dismissed one of the same kind.
@@ -1433,6 +1566,48 @@ mod tests {
         assert!(is_low_quality(&face_with(120.0, 0.7, 0.0))); // uncertain
         assert!(is_low_quality(&face_with(120.0, 0.9, 22.0))); // strongly turned
         assert!(is_low_quality(&face_with(120.0, 0.9, -22.0)));
+    }
+
+    #[test]
+    fn in_app_rotation_maps_boxes_between_upright_and_rotated_frames() {
+        assert_eq!(quarter_turns(0), 0);
+        assert_eq!(quarter_turns(270), 3);
+        assert_eq!(quarter_turns(-90), 3);
+        assert_eq!(quarter_turns(450), 1);
+
+        // A 400x300 upright frame turned once clockwise becomes 300x400: the top-left
+        // corner box moves to the top-right.
+        assert_eq!(rotate_box((0.0, 0.0, 40.0, 30.0), (400.0, 300.0), 1), (270.0, 0.0, 30.0, 40.0));
+        assert_eq!(rotate_box((10.0, 20.0, 40.0, 30.0), (400.0, 300.0), 2), (350.0, 250.0, 40.0, 30.0));
+
+        // Rotating by `t` then by the remaining turns returns the original box.
+        let b = (12.0, 34.0, 56.0, 78.0);
+        for t in 0..4 {
+            let frame_after = if t % 2 == 1 { (300.0, 400.0) } else { (400.0, 300.0) };
+            let there = rotate_box(b, (400.0, 300.0), t);
+            assert_eq!(rotate_box(there, frame_after, (4 - t) % 4), b, "turns {t}");
+        }
+    }
+
+    /// Detection on the user-rotated image must give the same upright box as rotating the
+    /// box itself: rotate a real image, detect, and compare against the upright scan.
+    #[test]
+    fn rotated_pixels_and_rotated_boxes_agree() {
+        // A bright 20x10 block at (60, 30) in an 200x100 image, located after rotation.
+        let mut img = image::RgbImage::new(200, 100);
+        for y in 30..40 { for x in 60..80 { img.put_pixel(x, y, image::Rgb([255, 255, 255])); } }
+        for turns in 1..4 {
+            let rotated = rotate_image(DynamicImage::ImageRgb8(img.clone()), turns).to_rgb8();
+            let (w, h) = rotated.dimensions();
+            let lit: Vec<(u32, u32)> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| rotated.get_pixel(x, y)[0] > 0)
+                .collect();
+            let (x0, y0) = (lit.iter().map(|p| p.0).min().unwrap(), lit.iter().map(|p| p.1).min().unwrap());
+            let (x1, y1) = (lit.iter().map(|p| p.0).max().unwrap(), lit.iter().map(|p| p.1).max().unwrap());
+            let found = (x0 as f32, y0 as f32, (x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32);
+            assert_eq!(rotate_box((60.0, 30.0, 20.0, 10.0), (200.0, 100.0), turns), found, "turns {turns}");
+        }
     }
 
     #[test]

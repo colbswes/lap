@@ -1,6 +1,9 @@
 //! Loopback HTTP transport for original images and Range-capable video playback.
 use once_cell::sync::OnceCell;
 use std::io::{self, SeekFrom};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 use tauri::Manager;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -19,7 +22,7 @@ pub fn init_original_media_server(app: &tauri::AppHandle) -> io::Result<()> {
     let _ = ORIGINAL_MEDIA_BASE_URL.set(format!("http://{addr}{route}"));
 
     tauri::async_runtime::spawn(async move {
-        let route: std::sync::Arc<str> = route.into();
+        let route: Arc<str> = route.into();
         while let Ok((stream, _)) = listener.accept().await {
             let scope = scope.clone();
             let route = route.clone();
@@ -90,10 +93,12 @@ fn parse_http_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {
 async fn write_headers(
     stream: &mut TcpStream,
     status: &str,
+    keep_alive: bool,
     headers: &[(&str, String)],
 ) -> io::Result<()> {
+    let connection = if keep_alive { "keep-alive" } else { "close" };
     let mut response = format!(
-        "HTTP/1.1 {status}\r\nConnection: close\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: sandbox; default-src 'none'\r\nX-Content-Type-Options: nosniff\r\n"
+        "HTTP/1.1 {status}\r\nConnection: {connection}\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: sandbox; default-src 'none'\r\nX-Content-Type-Options: nosniff\r\n"
     );
     for (name, value) in headers {
         response.push_str(&format!("{name}: {value}\r\n"));
@@ -102,55 +107,163 @@ async fn write_headers(
     stream.write_all(response.as_bytes()).await
 }
 
-async fn reject(stream: &mut TcpStream, status: &str) -> io::Result<()> {
-    write_headers(stream, status, &[("Content-Length", "0".into())]).await
+async fn reject(stream: &mut TcpStream, status: &str, keep_alive: bool) -> io::Result<()> {
+    write_headers(
+        stream,
+        status,
+        keep_alive,
+        &[("Content-Length", "0".into())],
+    )
+    .await
 }
 
-async fn read_request(stream: &mut TcpStream) -> io::Result<Option<String>> {
-    let mut request = Vec::with_capacity(2048);
+async fn read_request(stream: &mut TcpStream, pending: &mut Vec<u8>) -> io::Result<Option<String>> {
+    const MAX_HEADER_BYTES: usize = 16 * 1024;
     let mut chunk = [0u8; 2048];
-    while request.len() < 16 * 1024 {
+    loop {
+        if let Some(end) = pending.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            if end + 4 > MAX_HEADER_BYTES {
+                return Ok(None);
+            }
+            let request = std::str::from_utf8(&pending[..end]).ok().map(str::to_owned);
+            pending.drain(..end + 4);
+            return Ok(request);
+        }
+        if pending.len() >= MAX_HEADER_BYTES {
+            return Ok(None);
+        }
         let count = stream.read(&mut chunk).await?;
         if count == 0 {
             return Ok(None);
         }
-        request.extend_from_slice(&chunk[..count]);
-        if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-            return Ok(String::from_utf8(request).ok());
-        }
+        pending.extend_from_slice(&chunk[..count]);
     }
-    Ok(None)
+}
+
+struct Request<'a> {
+    method: &'a str,
+    target: &'a str,
+    origin: Option<&'a str>,
+    range: Option<&'a str>,
+    if_none_match: Vec<&'a str>,
+    keep_alive: bool,
+}
+
+impl<'a> Request<'a> {
+    fn parse(head: &'a str) -> Option<Self> {
+        let mut lines = head.split("\r\n");
+        let mut parts = lines.next()?.split(' ');
+        let method = parts.next().filter(|part| !part.is_empty())?;
+        let target = parts.next().filter(|part| part.starts_with('/'))?;
+        let version = parts.next()?;
+        if !matches!(version, "HTTP/1.0" | "HTTP/1.1") || parts.next().is_some() {
+            return None;
+        }
+
+        let mut origin = None;
+        let mut range = None;
+        let mut if_none_match = Vec::new();
+        let mut close = false;
+        let mut keep_alive = version == "HTTP/1.1";
+        let mut has_content_length = false;
+        for line in lines {
+            let (name, value) = line.split_once(':')?;
+            let name = http::HeaderName::from_bytes(name.as_bytes()).ok()?;
+            http::HeaderValue::from_str(value).ok()?;
+            let value = value.trim();
+            match name.as_str() {
+                "origin" => {
+                    if origin.replace(value).is_some() {
+                        return None;
+                    }
+                }
+                "range" if range.is_none() => range = Some(value),
+                "if-none-match" => if_none_match.push(value),
+                "connection" => {
+                    for option in value.split(',').map(str::trim) {
+                        close |= option.eq_ignore_ascii_case("close");
+                        keep_alive |= option.eq_ignore_ascii_case("keep-alive");
+                    }
+                }
+                // The media endpoint accepts only requests without bodies. Leaving
+                // unread body bytes on a persistent socket would desync framing.
+                "transfer-encoding" => return None,
+                "content-length" => {
+                    if has_content_length
+                        || value.is_empty()
+                        || !value.bytes().all(|byte| byte == b'0')
+                    {
+                        return None;
+                    }
+                    has_content_length = true;
+                }
+                _ => {}
+            }
+        }
+        Some(Self {
+            method,
+            target,
+            origin,
+            range,
+            if_none_match,
+            keep_alive: keep_alive && !close,
+        })
+    }
 }
 
 async fn handle_connection(
     mut stream: TcpStream,
     route: &str,
-    is_allowed: impl FnOnce(&std::path::Path) -> bool + Send + 'static,
+    is_allowed: impl Fn(&Path) -> bool + Send + Sync + 'static,
 ) -> io::Result<()> {
-    let Ok(Ok(Some(request))) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), read_request(&mut stream)).await
-    else {
-        return Ok(());
-    };
-    let mut lines = request.split("\r\n");
-    let mut parts = lines.next().unwrap_or_default().split_whitespace();
-    let method = parts.next().unwrap_or_default();
-    let target = parts
-        .next()
-        .unwrap_or_default()
-        .split('?')
-        .next()
-        .unwrap_or_default();
+    let is_allowed = Arc::new(is_allowed);
+    let mut pending = Vec::with_capacity(2048);
+    while let Ok(request) = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_request(&mut stream, &mut pending),
+    )
+    .await
+    {
+        let Some(head) = request? else {
+            break;
+        };
+        let Some(request) = Request::parse(&head) else {
+            write_headers(
+                &mut stream,
+                "400 Bad Request",
+                false,
+                &[("Content-Length", "0".into())],
+            )
+            .await?;
+            break;
+        };
+        let keep_alive = request.keep_alive;
+        serve_request(&mut stream, route, is_allowed.clone(), request).await?;
+        if !keep_alive {
+            break;
+        }
+    }
+    Ok(())
+}
+
+async fn serve_request(
+    stream: &mut TcpStream,
+    route: &str,
+    is_allowed: Arc<impl Fn(&Path) -> bool + Send + Sync + 'static>,
+    request: Request<'_>,
+) -> io::Result<()> {
+    let Request {
+        method,
+        target,
+        origin,
+        range,
+        if_none_match,
+        keep_alive,
+    } = request;
+    let target = target.split_once('?').map_or(target, |(path, _)| path);
     let Some(encoded) = target.strip_prefix(route) else {
-        return reject(&mut stream, "404 Not Found").await;
+        return reject(stream, "404 Not Found", keep_alive).await;
     };
-    let origin = lines
-        .clone()
-        .take_while(|line| !line.is_empty())
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("origin").then(|| value.trim())
-        });
     let mut cors = vec![("Vary", "Origin".into())];
     if let Some(origin) = origin {
         // WKWebView can serialize a custom-scheme origin as opaque.
@@ -160,7 +273,7 @@ async fn handle_connection(
             "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost" | "null"
         ) || (cfg!(debug_assertions) && origin == "http://localhost:3580");
         if !trusted {
-            return reject(&mut stream, "403 Forbidden").await;
+            return reject(stream, "403 Forbidden", keep_alive).await;
         }
         cors.push(("Access-Control-Allow-Origin", origin.into()));
     }
@@ -168,18 +281,17 @@ async fn handle_connection(
         cors.extend([
             ("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS".into()),
             ("Access-Control-Allow-Headers", "Range".into()),
-            ("Content-Length", "0".into()),
         ]);
-        return write_headers(&mut stream, "204 No Content", &cors).await;
+        return write_headers(stream, "204 No Content", keep_alive, &cors).await;
     }
     if method != "GET" && method != "HEAD" {
-        return reject(&mut stream, "405 Method Not Allowed").await;
+        return reject(stream, "405 Method Not Allowed", keep_alive).await;
     }
     let Ok(path) = percent_encoding::percent_decode_str(encoded).decode_utf8() else {
-        return reject(&mut stream, "400 Bad Request").await;
+        return reject(stream, "400 Bad Request", keep_alive).await;
     };
     let Ok(path) = tauri::path::SafePathBuf::new(std::path::PathBuf::from(path.as_ref())) else {
-        return reject(&mut stream, "403 Forbidden").await;
+        return reject(stream, "403 Forbidden", keep_alive).await;
     };
     let opened = tokio::task::spawn_blocking(move || {
         let path = path.as_ref();
@@ -199,14 +311,17 @@ async fn handle_connection(
     .await;
     let (mut file, path) = match opened {
         Ok(Ok(opened)) => opened,
-        Ok(Err(status)) => return reject(&mut stream, status).await,
-        Err(_) => return reject(&mut stream, "500 Internal Server Error").await,
+        Ok(Err(status)) => return reject(stream, status, keep_alive).await,
+        Err(_) => return reject(stream, "500 Internal Server Error", keep_alive).await,
     };
-    let file_size = file.metadata().await?.len();
-    let range = lines.take_while(|line| !line.is_empty()).find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("range").then(|| value.trim())
-    });
+    let metadata = file.metadata().await?;
+    let file_size = metadata.len();
+    let cacheable = method == "GET" && range.is_none();
+    let cache_control = if cacheable {
+        "private, no-cache"
+    } else {
+        "no-store"
+    };
     let mut headers = cors;
     headers.extend([
         (
@@ -214,13 +329,37 @@ async fn handle_connection(
             "Content-Range, Accept-Ranges".into(),
         ),
         ("Accept-Ranges", "bytes".into()),
-        ("Cache-Control", "no-store".into()),
+        ("Cache-Control", cache_control.into()),
     ]);
+    if cacheable {
+        let etag = metadata.modified().ok().map(|modified| {
+            let nanos = match modified.duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_nanos() as i128,
+                Err(error) => -(error.duration().as_nanos() as i128),
+            };
+            format!("\"{file_size:x}-{nanos}\"")
+        });
+        let not_modified = if_none_match.iter().any(|value| {
+            *value == "*"
+                || etag.as_ref().is_some_and(|etag| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .any(|tag| tag.strip_prefix("W/").unwrap_or(tag) == etag)
+                })
+        });
+        if let Some(etag) = etag {
+            headers.push(("ETag", etag));
+        }
+        if not_modified {
+            return write_headers(stream, "304 Not Modified", keep_alive, &headers).await;
+        }
+    }
     let (status, offset, length) = if let Some(range) = range {
         let Some((start, end)) = parse_http_range(range, file_size) else {
             headers.push(("Content-Range", format!("bytes */{file_size}")));
             headers.push(("Content-Length", "0".into()));
-            return write_headers(&mut stream, "416 Range Not Satisfiable", &headers).await;
+            return write_headers(stream, "416 Range Not Satisfiable", keep_alive, &headers).await;
         };
         headers.push(("Content-Range", format!("bytes {start}-{end}/{file_size}")));
         ("206 Partial Content", start, end - start + 1)
@@ -251,11 +390,16 @@ async fn handle_connection(
     if method != "HEAD" {
         file.seek(SeekFrom::Start(offset)).await?;
     }
-    write_headers(&mut stream, status, &headers).await?;
+    write_headers(stream, status, keep_alive, &headers).await?;
     if method != "HEAD" && length > 0 {
         let capacity = length.min(128 * 1024) as usize;
         let mut body = tokio::io::BufReader::with_capacity(capacity, file.take(length));
-        tokio::io::copy_buf(&mut body, &mut stream).await?;
+        if tokio::io::copy_buf(&mut body, stream).await? != length {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "media changed during response",
+            ));
+        }
     }
     Ok(())
 }
@@ -263,6 +407,97 @@ async fn handle_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    async fn reuses_a_socket_and_preserves_pipelined_request_boundaries() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let path = std::env::temp_dir().join(format!("lap-http-{}.mp4", uuid::Uuid::new_v4()));
+            std::fs::write(&path, b"0123456789").unwrap();
+            let set_mtime = |nanos| {
+                std::fs::File::options().write(true).open(&path).unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(
+                        UNIX_EPOCH + Duration::new(1_700_000_000, nanos),
+                    ))
+                    .unwrap();
+            };
+            set_mtime(100_000_000);
+            let target = format!("/media/test/{}?u=1", percent_encoding::utf8_percent_encode(
+                path.to_str().unwrap(), percent_encoding::NON_ALPHANUMERIC,
+            ));
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let mut client = BufReader::new(TcpStream::connect(listener.local_addr().unwrap()).await.unwrap());
+            let (server, _) = listener.accept().await.unwrap();
+            let allowed = path.clone();
+            let serve = tokio::spawn(handle_connection(server, "/media/test/", move |path| path == allowed));
+
+            async fn read_headers(client: &mut BufReader<TcpStream>) -> String {
+                let mut headers = String::new();
+                loop {
+                    let start = headers.len();
+                    assert_ne!(client.read_line(&mut headers).await.unwrap(), 0);
+                    if &headers[start..] == "\r\n" {
+                        return headers;
+                    }
+                }
+            }
+
+            client.get_mut().write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
+            let headers = read_headers(&mut client).await;
+            assert!(headers.contains("Connection: keep-alive"));
+            assert!(headers.contains("Cache-Control: private, no-cache"));
+            assert!(headers.contains("Content-Length: 10"));
+            let etag = headers.lines().find_map(|line| line.strip_prefix("ETag: ")).unwrap();
+            assert!(etag.starts_with('"') && etag.ends_with('"'));
+            let mut body = [0; 10];
+            client.read_exact(&mut body).await.unwrap();
+            assert_eq!(&body, b"0123456789");
+
+            client.get_mut().write_all(format!(
+                "GET {target} HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"other\", W/{etag}\r\n\r\nHEAD {target} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+            let conditional = read_headers(&mut client).await;
+            assert!(conditional.starts_with("HTTP/1.1 304"));
+            assert!(conditional.contains(&format!("ETag: {etag}\r\n")));
+            assert!(conditional.contains("Cache-Control: private, no-cache"));
+            let headers = read_headers(&mut client).await;
+            assert!(headers.starts_with("HTTP/1.1 200"));
+            assert!(headers.contains("Content-Length: 10"));
+
+            std::fs::write(&path, b"abcdefghij").unwrap();
+            set_mtime(200_000_000);
+            client.get_mut().write_all(format!(
+                "GET {target} HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: {etag}\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+            let headers = read_headers(&mut client).await;
+            assert!(headers.starts_with("HTTP/1.1 200"));
+            let new_etag = headers.lines().find_map(|line| line.strip_prefix("ETag: ")).unwrap();
+            assert_ne!(new_etag, etag);
+            client.read_exact(&mut body).await.unwrap();
+            assert_eq!(&body, b"abcdefghij");
+
+            client.get_mut().write_all(format!(
+                "GET {target} HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: {new_etag}\r\nRange: bytes=2-4\r\nConnection: close\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+            let headers = read_headers(&mut client).await;
+            assert!(headers.starts_with("HTTP/1.1 206"));
+            assert!(headers.contains("Connection: close"));
+            assert!(headers.contains("Cache-Control: no-store"));
+            let mut body = Vec::new();
+            client.read_to_end(&mut body).await.unwrap();
+            assert_eq!(body, b"cde");
+            serve.await.unwrap().unwrap();
+            std::fs::remove_file(path).unwrap();
+        }).await.unwrap();
+    }
+
+    #[test]
+    fn rejects_framing_that_would_leave_request_body_bytes_unread() {
+        let request = "GET /media/test/file HTTP/1.1\r\nHost: localhost";
+        assert!(Request::parse(&format!("{request}\r\nTransfer-Encoding: chunked")).is_none());
+        assert!(Request::parse(&format!("{request}\r\nContent-Length: 1")).is_none());
+        assert!(Request::parse(&format!("{request}\r\nContent-Length: 0")).is_some());
+    }
 
     #[tokio::test]
     async fn streams_full_files_and_ranges_only_with_the_route_and_scope() {
@@ -295,7 +530,9 @@ mod tests {
                 .await
                 .unwrap();
             client
-                .write_all(format!("Host: localhost\r\n{range}\r\n").as_bytes())
+                .write_all(
+                    format!("Host: localhost\r\nConnection: close\r\n{range}\r\n").as_bytes(),
+                )
                 .await
                 .unwrap();
             let mut response = Vec::new();
@@ -314,12 +551,14 @@ mod tests {
         let (headers, body) = request(&target, "GET", "", Some(path.clone())).await;
         assert!(headers.starts_with("HTTP/1.1 200"));
         assert!(headers.contains("Content-Type: video/mp4"));
+        assert!(headers.contains("Cache-Control: private, no-cache"));
         assert_eq!(body, b"0123456789");
 
         let (headers, body) =
             request(&target, "GET", "Range: bytes=2-4\r\n", Some(path.clone())).await;
         assert!(headers.starts_with("HTTP/1.1 206"));
         assert!(headers.contains("Content-Range: bytes 2-4/10"));
+        assert!(headers.contains("Cache-Control: no-store"));
         assert_eq!(body, b"234");
 
         let (headers, body) =
@@ -370,7 +609,8 @@ mod tests {
         let jxl_bytes = b"\xff\x0aJXL test payload";
         std::fs::write(&jxl_path, jxl_bytes).unwrap();
         let jxl_encoded = percent_encoding::utf8_percent_encode(
-            jxl_path.to_str().unwrap(), percent_encoding::NON_ALPHANUMERIC,
+            jxl_path.to_str().unwrap(),
+            percent_encoding::NON_ALPHANUMERIC,
         );
         let jxl_target = format!("/media/test/{jxl_encoded}?v=1");
         let (headers, body) = request(&jxl_target, "GET", "", Some(jxl_path.clone())).await;
@@ -401,6 +641,8 @@ mod tests {
         )
         .await;
         assert!(headers.contains("Content-Type: image/png"));
+        assert!(headers.contains("Cache-Control: private, no-cache"));
+        assert!(headers.contains("ETag: \""));
         assert_eq!(body, image);
 
         std::fs::remove_file(image_path).unwrap();

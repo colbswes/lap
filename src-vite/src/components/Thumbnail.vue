@@ -125,12 +125,6 @@
           <span v-if="badge.label" class="leading-none">
             {{ badge.label }}
           </span>
-          <component
-            v-if="badge.trailingIcon"
-            :is="badge.trailingIcon"
-            :class="['h-3.5 w-3.5 shrink-0', badge.trailingIconClass]"
-            :style="badge.trailingIconStyle"
-          />
         </div>
       </div>
 
@@ -256,9 +250,6 @@ import {
   IconHeartFilled,
   IconTag,
   IconCollection,
-  IconStarFilled,
-  IconFlagFilled,
-  IconFlagOff,
   IconLivePhoto
 } from '@/common/icons';
 
@@ -653,9 +644,6 @@ type ThumbnailBadge = {
   label?: string;
   iconClass?: string;
   iconStyle?: CSSProperties;
-  trailingIcon?: Component;
-  trailingIconClass?: string;
-  trailingIconStyle?: CSSProperties;
 };
 
 const normalizedRotate = computed(() => {
@@ -701,42 +689,12 @@ const hasBottomMediaBadges = computed(() => (
 const statusBadges = computed<ThumbnailBadge[]>(() => {
   const badges: ThumbnailBadge[] = [];
   const metaIcons: ThumbnailBadge['icons'] = [];
-  const rating = Number(props.file.rating || 0);
-  const cullingFlag = Number(props.file.culling_flag ?? props.file.cullingFlag ?? 0);
-  const cullingIcon = cullingFlag === 1
-    ? IconFlagFilled
-    : cullingFlag === 2
-      ? IconFlagOff
-      : undefined;
-  const cullingIconClass = cullingFlag === 1
-    ? 'text-primary'
-    : cullingFlag === 2
-      ? 'text-error'
-      : undefined;
 
   if (props.file.is_favorite) {
     badges.push({
       key: 'favorite',
       icon: IconHeartFilled,
       iconClass: 'text-error',
-      label: rating > 0 ? `${rating}` : undefined,
-      trailingIcon: cullingIcon,
-      trailingIconClass: cullingIconClass,
-    });
-  } else if (rating > 0) {
-    badges.push({
-      key: 'rating',
-      icon: IconStarFilled,
-      iconClass: 'text-warning',
-      label: `${rating}`,
-      trailingIcon: cullingIcon,
-      trailingIconClass: cullingIconClass,
-    });
-  } else if (cullingIcon) {
-    badges.push({
-      key: cullingFlag === 1 ? 'culling-pick' : 'culling-reject',
-      icon: cullingIcon,
-      iconClass: cullingIconClass,
     });
   }
   

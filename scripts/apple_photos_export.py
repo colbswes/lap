@@ -2,8 +2,7 @@
 """Repeatable one-way Apple Photos export helper for Lap.
 
 Exports photos and videos from an Apple Photos library into a date-organized
-folder tree that Lap can index as an Album (for example, inside the "Everyday"
-collection scope).
+folder tree that Lap can index as an Album.
 
 Key behaviors:
 - Uses `osxphotos export --update` with a persistent export database inside the

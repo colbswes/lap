@@ -7,9 +7,11 @@
     @wheel.prevent="handleWheel"
     @contextmenu="handleContextMenu"
   >
-    <div v-if="originalUnavailable" class="absolute inset-0 z-30 flex items-center justify-center bg-base-200">
-      <img v-if="offlinePoster" :src="offlinePoster" class="max-w-full max-h-full object-contain" @error="offlinePoster = ''" />
-      <div v-else class="flex flex-col items-center justify-center text-base-content/30">
+    <div v-if="(!frameReady && posterSrc) || originalUnavailable" class="absolute inset-0 z-5 pointer-events-none flex items-center justify-center">
+      <!-- In fit mode the poster fills the same box the video will fit into, so
+           the first decoded frame replaces it without a visible resize. -->
+      <img v-if="posterSrc" :src="posterSrc" :class="isZoomFit ? 'w-full h-full object-contain' : 'max-w-full max-h-full object-contain'" decoding="sync" alt="" @error="failedPoster = posterSrc" />
+      <div v-else-if="originalUnavailable" class="flex flex-col items-center justify-center text-base-content/30">
         <IconVideoSlash class="w-8 h-8 mb-2" />
         <span>{{ $t('tooltip.not_found.files') }}</span>
       </div>
@@ -17,7 +19,7 @@
     <TransitionGroup :name="transitionName" @after-leave="handleTransitionEnd">
       <div
         v-for="index in [0, 1]"
-        v-show="activeVideo === index"
+        v-show="frameReady && activeVideo === index"
         :key="`vid-${index}`"
         class="slide-wrapper absolute inset-0 w-full h-full pointer-events-none overflow-hidden"
       >
@@ -32,7 +34,7 @@
     </TransitionGroup>
 
     <Transition name="playback-overlay" :css="hasPlaybackInteraction && !isPlaying">
-      <div v-if="showPlayOverlay && !hasError && !isLoading && !isSeeking && (playbackFeedback || isReplaying || !hasPlaybackInteraction)"
+      <div v-if="frameReady && showPlayOverlay && !hasError && !isLoading && !isSeeking && (playbackFeedback || isReplaying || !hasPlaybackInteraction)"
         data-video-play-overlay
         class="absolute inset-0 flex items-center justify-center z-10"
         :class="playbackFeedback ? 'pointer-events-none' : 'pointer-events-auto cursor-pointer'"
@@ -102,6 +104,8 @@ videojs.addLanguage('zh-CN', zhCN);
 const props = defineProps({
   originalUnavailable: { type: Boolean, default: false },
   fileId: { type: Number, default: 0 },
+  fileVersion: { type: Number, default: 0 },
+  loadDelay: { type: Number, default: 0 },
   thumbnailSrc: { type: String, default: '' },
   filePath: { type: String, required: false },
   rotate: { type: Number, default: 0 },
@@ -124,10 +128,12 @@ const players = ref<(ReturnType<typeof videojs> | null)[]>([null, null]);
 const playerEpochs = ref([0, 0]);
 const videoJsLang = computed(() => (config.settings.language === 'zh' ? 'zh-CN' : config.settings.language));
 
-const offlinePoster = ref('');
-watch(() => [props.originalUnavailable, props.fileId, props.thumbnailSrc], () => {
-  offlinePoster.value = props.thumbnailSrc || (props.fileId ? getThumbUrl(props.fileId, false, config.settings.thumbnailSize) : '');
-}, { immediate: true });
+const frameReady = ref(false);
+const failedPoster = ref('');
+const posterSrc = computed(() => {
+  const src = props.thumbnailSrc || getThumbUrl(props.fileId, false, config.settings.thumbnailSize, props.fileVersion);
+  return src === failedPoster.value ? '' : src;
+});
 const hasError = ref(false);
 const errorMessage = ref('');
 const isLoading = ref(false);
@@ -163,6 +169,7 @@ const playerInstanceId = globalThis.crypto?.randomUUID?.()
   ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const getPlayerId = (index: number) => `${playerInstanceId}-${index}`;
 let currentLoadingId = 0;
+let videoLoadTimer: ReturnType<typeof setTimeout> | undefined;
 let nextBackendRequestId = 0;
 const activeBackendRequestIds: Array<number | null> = [null, null];
 const loadAttemptCleanups: Array<(() => void) | null> = [null, null];
@@ -318,7 +325,7 @@ const updateTransform = (options: boolean | { resetRotation?: boolean, recalcSca
   const recalcScale = typeof options === 'boolean' ? options : (options.recalcScale ?? false);
   const player = getActivePlayer();
   const video = player?.el().querySelector('video') as HTMLVideoElement | null;
-  if (!video) return;
+  if (!frameReady.value || !video) return;
 
   if (noTransition.value) video.classList.add('no-transition');
   else video.classList.remove('no-transition');
@@ -409,14 +416,14 @@ const setupPlayer = (index: number) => {
     player.on('playerresize', () => refreshFullscreenLayout(index));
 
     player.on('error', () => {
-      if (activeVideo.value === index) {
+      if (frameReady.value && activeVideo.value === index) {
         handlePlayerError(player);
       }
     });
 
     player.on('play', () => {
       if (activeVideo.value === index) {
-        if (!props.isActive) {
+        if (!props.isActive || !frameReady.value) {
           player.pause();
           return;
         }
@@ -446,7 +453,7 @@ const setupPlayer = (index: number) => {
     });
 
     player.on('ended', () => {
-      if (activeVideo.value === index) {
+      if (frameReady.value && activeVideo.value === index) {
         clearPlaybackFeedback();
         if (!props.isSlideShow && config.settings.loopVideo) {
           player.play().catch(() => {});
@@ -461,7 +468,7 @@ const setupPlayer = (index: number) => {
     });
 
     player.on('volumechange', () => {
-      if (activeVideo.value === index && !isLoading.value && props.isActive) {
+      if (frameReady.value && activeVideo.value === index && !isLoading.value && props.isActive) {
         config.setVideoVolume(player.volume());
         config.setVideoMuted(player.muted());
       }
@@ -469,7 +476,7 @@ const setupPlayer = (index: number) => {
   }
 };
 
-async function recreatePlayer(index: number) {
+async function recreatePlayer(index: number, loadId: number) {
   loadAttemptCleanups[index]?.();
   loadAttemptCleanups[index] = null;
 
@@ -486,63 +493,62 @@ async function recreatePlayer(index: number) {
 
   playerEpochs.value[index] += 1;
   await nextTick();
+  if (loadId !== currentLoadingId) return null;
   setupPlayer(index);
   return players.value[index];
 }
 
 const clickPlayVideo = () => {
-  if (!props.isActive) return;
+  if (!props.isActive || !frameReady.value) return;
   getActivePlayer()?.play();
 };
 
-const loadVideo = async (filePath: string) => {
-  if (!filePath) return;
-  clearLoadingOverlayTimer();
-  clearPlaybackDeadlineTimer();
-  const currentLoadId = ++currentLoadingId;
+function cancelVideoLoad() {
+  currentLoadingId++;
+  clearTimeout(videoLoadTimer);
+  frameReady.value = false;
+  resetLoadingUi();
+  players.value.forEach((player, index) => {
+    const pending = loadAttemptCleanups[index];
+    pending?.();
+    loadAttemptCleanups[index] = null;
+    if (player && !player.isDisposed()) {
+      player.pause();
+      player.muted(true);
+      if (pending || !props.filePath || props.originalUnavailable) {
+        try { player.reset(); } catch { /* Rebuild when this slot is next used. */ }
+      }
+    }
+    const requestId = activeBackendRequestIds[index];
+    if (requestId !== null) {
+      activeBackendRequestIds[index] = null;
+      void cancelVideoPrepare(getPlayerId(index), requestId).catch(error => {
+        console.warn('[Video] Failed to cancel previous prepare task:', error);
+      });
+    }
+  });
+}
+
+function scheduleVideoLoad(filePath: string, delay = 0) {
+  cancelVideoLoad();
   clearPlaybackFeedback();
   hasPlaybackInteraction.value = false;
   isSeeking.value = false;
-  
-  // IMMEDIATELY set loading state to block volumechange feedbacks from old players
-  hasError.value = false;
   isPlaying.value = false;
   isReplaying.value = false;
-  resetLoadingUi();
+  hasError.value = false;
+  failedPoster.value = '';
+  if (!filePath || props.originalUnavailable) return;
+
   isLoading.value = true;
+  const loadId = currentLoadingId;
+  if (delay > 0) videoLoadTimer = setTimeout(() => void loadVideo(filePath, loadId), delay);
+  else void loadVideo(filePath, loadId);
+}
 
+const loadVideo = async (filePath: string, currentLoadId: number) => {
+  if (currentLoadId !== currentLoadingId) return;
   const nextUpIndex = activeVideo.value ^ 1;
-  const cancelPromises = activeBackendRequestIds.map((requestId, index) => {
-    if (requestId === null) return Promise.resolve();
-    activeBackendRequestIds[index] = null;
-    return cancelVideoPrepare(getPlayerId(index), requestId).catch((error) => {
-      console.warn('[Video] Failed to cancel previous prepare task:', error);
-    });
-  });
-  await Promise.allSettled(cancelPromises);
-
-  if (currentLoadId !== currentLoadingId) return;
-  if (props.originalUnavailable) {
-    getActivePlayer()?.pause();
-    resetLoadingUi();
-    return;
-  }
-  const cloudOnly = await isCloudOnlyFile(filePath);
-  if (currentLoadId !== currentLoadingId) return;
-  if (cloudOnly) {
-    getActivePlayer()?.pause();
-    resetLoadingUi();
-    hasError.value = true;
-    errorMessage.value = $t('offline.requires_original');
-    return;
-  }
-
-  const currentPlayer = getActivePlayer();
-  if (currentPlayer) {
-    currentPlayer.pause();
-    currentPlayer.reset();
-  }
-
   // MPEG program streams can wedge the macOS WebKit media process. Never
   // assign these files to a WebView video element or start compatibility
   // processing; fail before creating a backend/player request.
@@ -555,20 +561,34 @@ const loadVideo = async (filePath: string) => {
 
   const playerId = getPlayerId(nextUpIndex);
   const backendRequestId = ++nextBackendRequestId;
-  activeBackendRequestIds[nextUpIndex] = backendRequestId;
-
-  const player = await recreatePlayer(nextUpIndex);
-  if (!player || currentLoadId !== currentLoadingId) return;
+  let player = players.value[nextUpIndex];
+  try {
+    player?.pause();
+    player?.reset();
+  } catch {
+    player = null;
+  }
+  if (!player || player.isDisposed()) player = await recreatePlayer(nextUpIndex, currentLoadId);
+  if (currentLoadId !== currentLoadingId) return;
+  if (!player) {
+    resetLoadingUi();
+    hasError.value = true;
+    errorMessage.value = getFallbackErrorMessage();
+    return;
+  }
+  const loadPlayer = player;
 
   playbackDeadlineTimer = setTimeout(() => {
     if (currentLoadId !== currentLoadingId) return;
     currentLoadingId++;
     loadAttemptCleanups[nextUpIndex]?.();
     loadAttemptCleanups[nextUpIndex] = null;
-    player.pause();
-    player.reset();
-    activeBackendRequestIds[nextUpIndex] = null;
-    void cancelVideoPrepare(playerId, backendRequestId);
+    loadPlayer.pause();
+    try { loadPlayer.reset(); } catch { /* Rebuild when this slot is next used. */ }
+    if (activeBackendRequestIds[nextUpIndex] === backendRequestId) {
+      activeBackendRequestIds[nextUpIndex] = null;
+      void cancelVideoPrepare(playerId, backendRequestId);
+    }
     resetLoadingUi();
     hasError.value = true;
     errorMessage.value = getFallbackErrorMessage();
@@ -577,9 +597,9 @@ const loadVideo = async (filePath: string) => {
   loadAttemptCleanups[nextUpIndex]?.();
   if (currentLoadId !== currentLoadingId) return;
 
-  // Sync audio state IMMEDIATELY so the UI reflects the user settings during loading
-  player.muted(config.video.muted);
-  player.volume(config.video.volume);
+  // Keep the buffer muted until its first frame is ready.
+  loadPlayer.muted(true);
+  loadPlayer.volume(config.video.volume);
   
   loadingOverlayTimer = setTimeout(() => {
     loadingOverlayTimer = null;
@@ -595,12 +615,13 @@ const loadVideo = async (filePath: string) => {
     activeBackendRequestIds[nextUpIndex] = null;
     hasError.value = false;
     resetLoadingUi();
+    frameReady.value = true;
 
     // Pause the other player
     const prevPlayer = players.value[nextUpIndex ^ 1];
     if (prevPlayer) {
       prevPlayer.pause();
-      prevPlayer.reset();
+      try { prevPlayer.reset(); } catch { /* Rebuild when this slot is next used. */ }
     }
 
     noTransition.value = true;
@@ -615,35 +636,37 @@ const loadVideo = async (filePath: string) => {
       noTransition.value = false;
     }, 100);
 
-    if (props.isActive && (config.settings.autoPlayVideo || props.isSlideShow)) {
-      // Restore user audio settings right before playback starts
-      player.volume(config.video.volume);
-      player.muted(config.video.muted);
-      player.play().catch(() => {});
-    } else {
-      player.volume(config.video.volume);
-      player.muted(config.video.muted);
+    loadPlayer.volume(config.video.volume);
+    loadPlayer.muted(!props.isActive || config.video.muted);
+    if (props.isActive && (props.playOnActivate || config.settings.autoPlayVideo || props.isSlideShow)) {
+      loadPlayer.play().catch(() => {});
     }
   };
 
   const loadPrepared = async (force: VideoPrepareMode = null) => {
-    startCompatibilityProcessing(currentLoadId);
     try {
+      if (force !== 'process') {
+        const cloudOnly = await isCloudOnlyFile(filePath);
+        if (currentLoadId !== currentLoadingId) return;
+        if (cloudOnly) {
+          resetLoadingUi();
+          hasError.value = true;
+          errorMessage.value = $t('offline.requires_original');
+          return;
+        }
+      }
+      startCompatibilityProcessing(currentLoadId);
+      activeBackendRequestIds[nextUpIndex] = backendRequestId;
       const result = await prepareVideo(filePath, playerId, force, backendRequestId);
       if (currentLoadId !== currentLoadingId) return;
       const playbackSrc = result.url;
       const isWebm = decodeURIComponent(new URL(playbackSrc).pathname).toLowerCase().endsWith('.webm');
 
-      player.reset();
-      player.src({
-        src: playbackSrc,
-        type: result.action === 'remux' ? 'video/mp4' : (isWebm ? 'video/webm' : 'video/mp4'),
-      });
-
+      loadPlayer.reset();
       let preparedAttemptSettled = false;
       const cleanupLoadAttempt = () => {
-        player.off('loadeddata', onLoaded);
-        player.off('error', onError);
+        loadPlayer.off('loadeddata', onLoaded);
+        loadPlayer.off('error', onError);
         if (loadAttemptCleanups[nextUpIndex] === cleanupLoadAttempt) {
           loadAttemptCleanups[nextUpIndex] = null;
         }
@@ -661,7 +684,7 @@ const loadVideo = async (filePath: string) => {
         preparedAttemptSettled = true;
         cleanupLoadAttempt();
         if (currentLoadId !== currentLoadingId) return;
-        const err = player.error();
+        const err = loadPlayer.error();
 
         if (force !== 'process' && err?.code !== 1) {
           console.warn('[Video] Compatible output failed playback, forcing transcode...');
@@ -674,15 +697,19 @@ const loadVideo = async (filePath: string) => {
           hasError.value = true;
           errorMessage.value = getFallbackErrorMessage();
         } else {
-          handlePlayerError(player);
+          handlePlayerError(loadPlayer);
         }
       };
 
-      player.one('loadeddata', onLoaded);
-      player.one('error', onError);
+      loadPlayer.one('loadeddata', onLoaded);
+      loadPlayer.one('error', onError);
       loadAttemptCleanups[nextUpIndex]?.();
       loadAttemptCleanups[nextUpIndex] = cleanupLoadAttempt;
-      player.load();
+      loadPlayer.src({
+        src: playbackSrc,
+        type: result.action === 'remux' ? 'video/mp4' : (isWebm ? 'video/webm' : 'video/mp4'),
+      });
+      if (!preparedAttemptSettled) loadPlayer.load();
     } catch (e) {
       if (currentLoadId !== currentLoadingId) return;
       activeBackendRequestIds[nextUpIndex] = null;
@@ -696,16 +723,14 @@ const loadVideo = async (filePath: string) => {
   const loadDirect = async (type: string | null) => {
     resetCompatibilityProcessing();
     if (currentLoadId !== currentLoadingId) return;
-    const playbackSrc = getAssetSrc(filePath);
+    const playbackSrc = getAssetSrc(filePath, props.fileVersion);
     if (!playbackSrc) {
       void loadPrepared('compatible');
       return;
     }
-    player.reset();
     const source = type
       ? { src: playbackSrc, type }
       : { src: playbackSrc };
-    player.src(source);
 
     let directLoadTimer: ReturnType<typeof setTimeout> | null = null;
     let directAttemptSettled = false;
@@ -714,8 +739,8 @@ const loadVideo = async (filePath: string) => {
         clearTimeout(directLoadTimer);
         directLoadTimer = null;
       }
-      player.off('loadeddata', onLoaded);
-      player.off('error', onError);
+      loadPlayer.off('loadeddata', onLoaded);
+      loadPlayer.off('error', onError);
       if (loadAttemptCleanups[nextUpIndex] === cleanupDirectAttempt) {
         loadAttemptCleanups[nextUpIndex] = null;
       }
@@ -726,14 +751,14 @@ const loadVideo = async (filePath: string) => {
       directAttemptSettled = true;
       cleanupDirectAttempt();
       if (currentLoadId !== currentLoadingId) return;
-      player.reset();
+      try { loadPlayer.reset(); } catch { /* A stalled source may already have reset. */ }
       console.warn('[Video] Direct playback failed, preparing a compatible source...');
       loadPrepared('compatible');
     };
 
     const onLoaded = () => {
       if (directAttemptSettled) return;
-      if (!player.videoWidth() || !player.videoHeight()) {
+      if (!loadPlayer.videoWidth() || !loadPlayer.videoHeight()) {
         fallbackToPrepared();
         return;
       }
@@ -753,12 +778,17 @@ const loadVideo = async (filePath: string) => {
       fallbackToPrepared();
     };
 
-    player.one('loadeddata', onLoaded);
-    player.one('error', onError);
+    loadPlayer.one('loadeddata', onLoaded);
+    loadPlayer.one('error', onError);
     loadAttemptCleanups[nextUpIndex]?.();
     loadAttemptCleanups[nextUpIndex] = cleanupDirectAttempt;
     directLoadTimer = setTimeout(fallbackToPrepared, DIRECT_PLAYBACK_TIMEOUT_MS);
-    player.load();
+    try {
+      loadPlayer.src(source);
+      if (!directAttemptSettled) loadPlayer.load();
+    } catch {
+      fallbackToPrepared();
+    }
   };
 
   // Matroska files can leave WebView media pipelines pending without either
@@ -939,14 +969,10 @@ function zoomAtPosition(x: number, y: number, newScale: number) {
   updateTransform();
 }
 
-onMounted(async () => {
-  await nextTick();
+onMounted(() => {
   setupPlayer(0);
   setupPlayer(1);
-  if (props.filePath) {
-    activeVideo.value = 0;
-    loadVideo(props.filePath);
-  }
+  scheduleVideoLoad(props.filePath || '', props.loadDelay);
 
   if (videoContainer.value) {
     resizeObserver = new ResizeObserver(() => {
@@ -965,9 +991,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  currentLoadingId++;
+  cancelVideoLoad();
   clearPlaybackFeedback();
-  resetLoadingUi();
   resizeObserver?.disconnect();
   if (videoContainer.value) {
     const el = videoContainer.value as HTMLElement;
@@ -986,17 +1011,11 @@ onBeforeUnmount(() => {
       }, 0);
     }
   });
-  loadAttemptCleanups.forEach((cleanup) => cleanup?.());
   players.value = [null, null];
-  activeBackendRequestIds.forEach((requestId, index) => {
-    if (requestId === null) return;
-    activeBackendRequestIds[index] = null;
-    void cancelVideoPrepare(getPlayerId(index), requestId);
-  });
 });
 
-watch(() => [props.filePath, props.originalUnavailable], ([newPath]) => {
-  if (newPath) loadVideo(String(newPath));
+watch(() => [props.filePath, props.fileVersion, props.originalUnavailable] as const, ([newPath], [oldPath]) => {
+  scheduleVideoLoad(newPath || '', newPath !== oldPath ? props.loadDelay : 0);
 });
 
 watch(() => props.rotate, (val) => {
@@ -1017,7 +1036,7 @@ watch(() => props.viewportState, (viewport) => {
 });
 
 watch(() => props.isSlideShow, (newVal) => {
-  if (newVal && props.isActive) {
+  if (newVal && props.isActive && frameReady.value) {
     const player = getActivePlayer();
     if (player && !isPlaying.value) {
       player.play();
@@ -1034,6 +1053,7 @@ watch(() => props.isActive, (isActive) => {
     player.muted(true);
     return;
   }
+  if (!frameReady.value) return;
   player.volume(config.video.volume);
   player.muted(config.video.muted);
   if (props.playOnActivate && !isPlaying.value) {
@@ -1076,6 +1096,7 @@ const rotateView = (delta = 90) => {
   updateTransform();
 };
 const togglePlay = () => {
+  if (!props.isActive || !frameReady.value) return;
   const player = getActivePlayer();
   if (!player) return;
   if (isPlaying.value) player.pause();

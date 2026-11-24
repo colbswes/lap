@@ -50,7 +50,7 @@
 
     <div class="sidebar-panel-header">
       <span class="sidebar-panel-header-title flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
-        {{ titlebar }}<template v-if="allPersonCount > 0"> ({{ allPersonCount.toLocaleString() }})</template>
+        {{ isPet ? $t('menu.person.kind_pets') : titlebar }}<template v-if="allPersonCount > 0"> ({{ allPersonCount.toLocaleString() }})</template>
       </span>
       <span class="px-1.5 h-5 inline-flex items-center rounded-box text-[10px] font-semibold tracking-[0.08em] text-warning border border-warning/30 bg-warning/10 cursor-default">
         BETA
@@ -91,7 +91,7 @@
           v-model="personSearch"
           type="text"
           :disabled="personSearchDisabled"
-          :placeholder="$t('menu.person.search')"
+          :placeholder="$t(isPet ? 'menu.person.search_pets' : 'menu.person.search')"
           class="w-full min-w-0 bg-transparent border-none focus:ring-0 px-2 text-sm placeholder-base-content/30 focus:outline-none disabled:opacity-50"
           @focus="isPersonSearchFocused = true"
           @blur="isPersonSearchFocused = false"
@@ -121,15 +121,15 @@
             :data-person-drop-id="person.id"
             :class="[
               'sidebar-item gap-2 group select-none',
-              selectedPerson && selectedPerson.id === person.id && !isRenamingPerson ? 'sidebar-item-selected' : 'sidebar-item-hover',
+              isPersonHighlighted(person) && !isRenamingPerson ? 'sidebar-item-selected' : 'sidebar-item-hover',
               {
-                'opacity-50': draggedPersonId === person.id,
+                'opacity-50': draggedPersonId === person.id || isPersonHidden(person.id),
                 'bg-primary/10 ring-1 ring-inset ring-primary/50': dropTargetPersonId === person.id,
               },
             ]"
             @pointerdown="startPersonDrag($event, person)"
             @dragstart.prevent
-            @click="handlePersonClick(person)"
+            @click="(e: MouseEvent) => handlePersonClick(person, e)"
             @contextmenu.prevent.stop="(e: MouseEvent) => handlePersonContextMenu(person, e)"
           >
             <!-- Face thumbnail -->
@@ -167,8 +167,21 @@
                 <span v-if="person.count" class="sidebar-item-count shrink-0">
                   {{ person.count.toLocaleString() }}
                 </span>
+                <button
+                  type="button"
+                  :title="isPersonHidden(person.id) ? $t(isPet ? 'menu.person.show_pet' : 'menu.person.show') : $t(isPet ? 'menu.person.hide_pet' : 'menu.person.hide')"
+                  :aria-label="isPersonHidden(person.id) ? $t(isPet ? 'menu.person.show_pet' : 'menu.person.show') : $t(isPet ? 'menu.person.hide_pet' : 'menu.person.hide')"
+                  :aria-pressed="isPersonHidden(person.id)"
+                  :class="[
+                    'p-1 rounded-box text-base-content/45 hover:text-base-content hover:bg-base-100/40 cursor-pointer shrink-0 transition-colors',
+                    isPersonHidden(person.id) ? 'flex' : 'hidden group-hover:flex',
+                  ]"
+                  @click.stop="togglePersonHidden(person)"
+                >
+                  <component :is="isPersonHidden(person.id) ? IconHide : IconUnhide" class="w-4 h-4" />
+                </button>
                 <div :class="[
-                    selectedPerson?.id === person.id ? '' : 'hidden group-hover:flex'
+                    isPersonHighlighted(person) ? '' : 'hidden group-hover:flex'
                   ]"
                 >
                   <ContextMenu
@@ -190,7 +203,7 @@
     </div>
 
     <div v-else-if="personSearch" class="sidebar-empty text-sm">
-      <span class="text-center">{{ $t('tooltip.not_found.person') }}</span>
+      <span class="text-center">{{ $t(isPet ? 'tooltip.not_found.pet' : 'tooltip.not_found.person') }}</span>
     </div>
 
     <!-- No Persons Found Message -->
@@ -203,7 +216,7 @@
     </div>
 
     <div v-else-if="!isIndexing" class="mt-2 px-2 flex flex-col items-center justify-center text-base-content/30">
-      <span class="text-sm text-center">{{ $t('tooltip.not_found.person') }}</span>
+      <span class="text-sm text-center">{{ $t(isPet ? 'tooltip.not_found.pet' : 'tooltip.not_found.person') }}</span>
     </div>
 
   </div>
@@ -211,8 +224,12 @@
   <!-- Delete person confirmation -->
   <MessageBox
     v-if="showDeletePersonMsgbox"
-    :title="$t('msgbox.delete_person.title')"
-    :message="`${$t('msgbox.delete_person.content', { person: getPersonDisplayName(deleteTargetPerson || selectedPerson) })}`"
+    :title="deleteTargetIds.length > 1
+      ? $t(isPet ? 'msgbox.delete_person.title_multiple_pet' : 'msgbox.delete_person.title_multiple')
+      : $t(isPet ? 'msgbox.delete_person.title_pet' : 'msgbox.delete_person.title')"
+    :message="deleteTargetIds.length > 1
+      ? $t('msgbox.delete_person.content_multiple', { count: deleteTargetIds.length.toLocaleString() })
+      : $t('msgbox.delete_person.content', { person: getPersonDisplayName(deleteTargetPerson || selectedPerson) })"
     :OkText="$t('msgbox.delete_person.ok')"
     :cancelText="$t('msgbox.cancel')"
     :warningOk="true"
@@ -234,8 +251,8 @@
   <!-- Drag-to-merge confirmation -->
   <MessageBox
     v-if="pendingDragMerge"
-    :title="$t('msgbox.merge_person.title')"
-    :message="$t('msgbox.merge_person.content', {
+    :title="$t(isPet ? 'msgbox.merge_person.title_pet' : 'msgbox.merge_person.title')"
+    :message="$t(isPet ? 'msgbox.merge_person.content_pet' : 'msgbox.merge_person.content', {
       source: getPersonDisplayName(pendingDragMerge.source),
       target: getPersonDisplayName(pendingDragMerge.target),
       resultName: pendingDragMerge.resultName || getPersonDisplayName(pendingDragMerge.target),
@@ -250,7 +267,7 @@
   <!-- Rename-to-existing-name merge confirmation -->
   <MessageBox
     v-if="pendingRenameMerge"
-    :title="$t('msgbox.merge_person.title')"
+    :title="$t(isPet ? 'msgbox.merge_person.title_pet' : 'msgbox.merge_person.title')"
     :message="$t('msgbox.merge_person.rename_duplicate', {
       source: pendingRenameMerge.originalName || getPersonDisplayName(pendingRenameMerge.source),
       target: getPersonDisplayName(pendingRenameMerge.target),
@@ -298,7 +315,9 @@ import { config, libConfig } from '@/common/config';
 import { getPersonsPage, renamePerson, deletePerson, mergePersons, findPersonByName, indexFaces, cancelFaceIndex, isFaceIndexing, listenFaceIndexProgress, listenFaceIndexFinished, listenClusterProgress, resetFaces, getFaceStats, importApplePets } from '@/common/api';
 import { resolveMergedPersonName } from '@/common/personMerge';
 import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
-import { listen } from '@tauri-apps/api/event';
+import { nextPersonSelection } from '@/common/personSelection';
+import { isHiddenId, normalizeHiddenIds } from '@/common/hiddenAlbums';
+import { emit as tauriEmit, listen } from '@tauri-apps/api/event';
 import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { useLibraryChangeRefresh } from '@/composables/useLibraryChangeRefresh';
@@ -307,6 +326,8 @@ import {
   IconPerson, 
   IconMore, 
   IconRename, 
+  IconHide,
+  IconUnhide,
   IconGroup,
   IconTrash,
   IconUpdate,
@@ -337,6 +358,15 @@ const uiStore = useUIStore();
 // persons
 const allPersons = ref<any[]>([]);
 const selectedPerson = ref<any>(null);
+// Cmd/Shift-click multi-selection. Empty (or one id) means just selectedPerson.
+const multiSelectedIds = ref<number[]>([]);
+let selectionAnchorId: number | null = null;
+const isPersonHighlighted = (person: any) => multiSelectedIds.value.length > 1
+  ? multiSelectedIds.value.includes(person.id)
+  : selectedPerson.value?.id === person.id;
+function clearMultiSelection() {
+  multiSelectedIds.value = [];
+}
 const personListRef = ref<HTMLElement | null>(null);
 const isRenamingPerson = ref(false);
 const originalPersonName = ref('');
@@ -359,6 +389,7 @@ const isLoadingPersons = ref(true);
 const isLoadingMorePersons = ref(false);
 const hasMorePersons = ref(false);
 const allPersonCount = ref(0);
+const pageHiddenPersonIds = ref<number[]>([]);
 const personSearch = ref('');
 const isPersonSearchFocused = ref(false);
 // Disable search only for a truly empty library; never lock it on a zero-match
@@ -372,7 +403,12 @@ let personSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let isPersonMounted = true;
 
 function handlePersonContextMenu(person: any, event: MouseEvent) {
-  selectPerson(person);
+  // Right-clicking inside a multi-selection acts on the whole selection.
+  if (!(multiSelectedIds.value.length > 1 && multiSelectedIds.value.includes(person.id))) {
+    clearMultiSelection();
+    selectionAnchorId = person.id;
+    selectPerson(person);
+  }
   personContextMenus.value[person.id]?.open?.(event.clientX, event.clientY);
 }
 const betaBadgeRef = ref<HTMLElement | null>(null);
@@ -389,7 +425,7 @@ const sortedPersons = computed(() => allPersons.value);
 
 // Computed property to format cluster progress text using i18n
 const { t } = useI18n();
-const getPersonDisplayName = (person: any) => person?.name || t('menu.person.unnamed');
+const getPersonDisplayName = (person: any) => person?.name || t(isPet.value ? 'menu.person.unnamed_pet' : 'menu.person.unnamed');
 const clusterProgressText = computed(() => {
   const { phase, current, total } = clusterProgress.value;
   switch (phase) {
@@ -408,28 +444,77 @@ const clusterProgressText = computed(() => {
   }
 });
 
+const isPersonHidden = (personId: number) =>
+  isHiddenId(libConfig.hiddenPersonIds, Number(personId));
+
+const hiddenIdsForCurrentKind = computed(() => {
+  const activeHidden = new Set(normalizeHiddenIds(libConfig.hiddenPersonIds));
+  if (activeHidden.size === 0) return [];
+  const kindHidden = new Set<number>();
+  for (const id of pageHiddenPersonIds.value) {
+    if (activeHidden.has(id)) kindHidden.add(id);
+  }
+  for (const person of allPersons.value) {
+    const id = Number(person?.id);
+    if (activeHidden.has(id)) kindHidden.add(id);
+  }
+  return Array.from(kindHidden).sort((a, b) => a - b);
+});
+
+async function togglePersonHidden(person: any) {
+  const id = Number(person?.id);
+  if (!Number.isInteger(id) || id <= 0) return;
+  await libConfig.togglePersonHidden(id);
+  pageHiddenPersonIds.value = hiddenIdsForCurrentKind.value;
+  await tauriEmit('library-total-refreshed', { source: 'hidden-filters', origin: 'person' });
+}
+
+async function setPersonsHidden(personIds: number[], hidden: boolean) {
+  const normalized = normalizeHiddenIds(personIds);
+  if (normalized.length === 0) return;
+  await libConfig.setPersonsHidden(normalized, hidden);
+  pageHiddenPersonIds.value = hiddenIdsForCurrentKind.value;
+  await tauriEmit('library-total-refreshed', { source: 'hidden-filters', origin: 'person' });
+}
+
+async function showAllPersonsForCurrentKind() {
+  const ids = hiddenIdsForCurrentKind.value;
+  if (ids.length === 0) return;
+  await libConfig.showAllPersons(ids);
+  pageHiddenPersonIds.value = [];
+  await tauriEmit('library-total-refreshed', { source: 'hidden-filters', origin: 'person' });
+}
+
 const personPanelMenuItems = computed(() => [
+  ...(hiddenIdsForCurrentKind.value.length > 0 ? [
+    {
+      label: t(isPet.value ? 'menu.person.show_all_pets' : 'menu.person.show_all'),
+      icon: IconUnhide,
+      action: () => { void showAllPersonsForCurrentKind(); },
+    },
+    { label: "-", action: null },
+  ] : []),
   {
-    label: localeMsg.value.menu.person.index_faces,
+    label: t('menu.person.index_faces'),
     icon: IconUpdate,
     action: () => clickIndexFaces(),
     disabled: isIndexing.value,
   },
   {
-    label: localeMsg.value.menu.person.rescan_faces,
+    label: t('menu.person.rescan_faces'),
     icon: IconUpdate,
     action: () => clickIndexFaces(true),
     disabled: isIndexing.value,
   },
   {
-    label: localeMsg.value.menu.person.import_apple_pets,
+    label: t('menu.person.import_apple_pets'),
     icon: IconUpdate,
     action: () => clickImportApplePets(),
     disabled: isIndexing.value || isImportingApplePets.value,
   },
   { label: "-", action: null },
   {
-    label: localeMsg.value.menu.person.reset_index,
+    label: t('menu.person.reset_index'),
     icon: IconTrash,
     action: () => clickResetFaces(),
     disabled: isIndexing.value,
@@ -439,6 +524,7 @@ const personPanelMenuItems = computed(() => [
 // message boxes & merge dialogs
 const showDeletePersonMsgbox = ref(false);
 const deleteTargetPerson = ref<any>(null);
+const deleteTargetIds = ref<number[]>([]);
 const showResetFacesMsgbox = ref(false);
 const mergeDialogSource = ref<any>(null);
 const mergeDialogError = ref('');
@@ -453,43 +539,99 @@ let dragStartState: { id: number; pointer: number; x: number; y: number } | null
 let suppressDragClick = false;
 
 // more menuitems
-const getMoreMenuItems = (person: any) => [
-  {
-    label: localeMsg.value.menu?.person?.rename || 'Rename',
-    icon: IconRename,
-    disabled: isIndexing.value || isMergingPersons.value,
-    action: () => {
-      selectPerson(person);
-      isRenamingPerson.value = true;
-      originalPersonName.value = person?.name || '';
-      nextTick(() => {
-        if (personInputRef.value && personInputRef.value[0]) {
-          personInputRef.value[0].focus();
-          personInputRef.value[0].select();
-        }
-      });
-    }
-  },
-  {
-    label: localeMsg.value.menu?.person?.merge || 'Merge into…',
-    icon: IconGroup,
-    disabled: isIndexing.value || isMergingPersons.value || (allPersonCount.value <= 1 && !personSearch.value.trim()),
-    action: () => {
-      mergeDialogError.value = '';
-      mergeDialogSource.value = person;
-    }
-  },
-  { label: "-", action: null },
-  {
-    label: localeMsg.value.menu?.person?.delete || 'Delete',
-    icon: IconTrash,
-    disabled: isIndexing.value || isMergingPersons.value,
-    action: () => {
-      deleteTargetPerson.value = person;
-      showDeletePersonMsgbox.value = true;
+const getMoreMenuItems = (person: any) => (
+  multiSelectedIds.value.length > 1 && multiSelectedIds.value.includes(person.id)
+    ? getMultiSelectionMenuItems()
+    : getSinglePersonMenuItems(person)
+);
+
+const getMultiSelectionMenuItems = () => {
+  const selectedIds = multiSelectedIds.value;
+  const anyVisible = selectedIds.some((id) => !isPersonHidden(id));
+  const anyHidden = selectedIds.some((id) => isPersonHidden(id));
+  const count = selectedIds.length.toLocaleString();
+  return [
+    ...(anyVisible ? [
+      {
+        label: t('menu.person.hide_selected', { count }),
+        icon: IconHide,
+        disabled: isIndexing.value || isMergingPersons.value,
+        action: () => { void setPersonsHidden(selectedIds, true); },
+      },
+    ] : []),
+    ...(anyHidden ? [
+      {
+        label: t('menu.person.show_selected', { count }),
+        icon: IconUnhide,
+        disabled: isIndexing.value || isMergingPersons.value,
+        action: () => { void setPersonsHidden(selectedIds, false); },
+      },
+    ] : []),
+    { label: "-", action: null },
+    {
+      label: t('menu.person.delete_selected', { count }),
+      icon: IconTrash,
+      disabled: isIndexing.value || isMergingPersons.value,
+      action: () => {
+        deleteTargetPerson.value = null;
+        deleteTargetIds.value = [...multiSelectedIds.value];
+        showDeletePersonMsgbox.value = true;
+      },
     },
-  },
-];
+  ];
+};
+
+const getSinglePersonMenuItems = (person: any) => {
+  const hidden = isPersonHidden(person.id);
+  return [
+    {
+      label: localeMsg.value.menu?.person?.rename || 'Rename',
+      icon: IconRename,
+      disabled: isIndexing.value || isMergingPersons.value,
+      action: () => {
+        selectPerson(person);
+        isRenamingPerson.value = true;
+        originalPersonName.value = person?.name || '';
+        nextTick(() => {
+          if (personInputRef.value && personInputRef.value[0]) {
+            personInputRef.value[0].focus();
+            personInputRef.value[0].select();
+          }
+        });
+      }
+    },
+    {
+      label: hidden
+        ? t(isPet.value ? 'menu.person.show_pet' : 'menu.person.show')
+        : t(isPet.value ? 'menu.person.hide_pet' : 'menu.person.hide'),
+      icon: hidden ? IconUnhide : IconHide,
+      disabled: isIndexing.value || isMergingPersons.value,
+      action: () => {
+        void togglePersonHidden(person);
+      }
+    },
+    {
+      label: localeMsg.value.menu?.person?.merge || 'Merge into…',
+      icon: IconGroup,
+      disabled: isIndexing.value || isMergingPersons.value || (allPersonCount.value <= 1 && !personSearch.value.trim()),
+      action: () => {
+        mergeDialogError.value = '';
+        mergeDialogSource.value = person;
+      }
+    },
+    { label: "-", action: null },
+    {
+      label: localeMsg.value.menu?.person?.delete || 'Delete',
+      icon: IconTrash,
+      disabled: isIndexing.value || isMergingPersons.value,
+      action: () => {
+        deleteTargetPerson.value = person;
+        deleteTargetIds.value = [person.id];
+        showDeletePersonMsgbox.value = true;
+      },
+    },
+  ];
+};
 
 onMounted(async () => {
   loadPersons();
@@ -538,7 +680,10 @@ const personKind = computed({
   get: () => (config.settings.personKind === 'pet' ? 'pet' : 'person'),
   set: (value: 'person' | 'pet') => { config.settings.personKind = value; },
 });
+const isPet = computed(() => personKind.value === 'pet');
 watch(personKind, () => {
+  clearMultiSelection();
+  pageHiddenPersonIds.value = [];
   libConfig.person.id = null;
   libConfig.person.name = null;
   void loadPersons(true);
@@ -607,6 +752,7 @@ async function loadPersons(reset = true, validateSelectedPerson = false) {
   const libraryId = libConfig._libraryId;
   const search = personSearch.value.trim();
   if (reset) {
+    clearMultiSelection();
     isLoadingPersons.value = true;
     allPersons.value = [];
     hasMorePersons.value = false;
@@ -642,6 +788,7 @@ async function loadPersons(reset = true, validateSelectedPerson = false) {
       hasMorePersons.value = page.has_more;
       // `total` is the search-filtered visible count, so the header reflects the query.
       allPersonCount.value = page.total;
+      pageHiddenPersonIds.value = normalizeHiddenIds(page.hidden_person_ids);
       if (allPersons.value.length > 0 && !selectedPersonWasFiltered) {
         const activeId = selectedPerson.value?.id ?? libConfig.person?.id;
         const index = allPersons.value.findIndex(p => p.id === activeId);
@@ -672,9 +819,24 @@ function handlePersonListScroll(event: Event) {
   void loadPersons(false);
 }
 
-function handlePersonClick(person: any) {
-  if (suppressDragClick) return;
-  selectPerson(person);
+function handlePersonClick(person: any, event?: MouseEvent) {
+  if (suppressDragClick || isRenamingPerson.value) return;
+  const current = multiSelectedIds.value.length > 0
+    ? multiSelectedIds.value
+    : selectedPerson.value ? [selectedPerson.value.id] : [];
+  const next = nextPersonSelection(
+    sortedPersons.value.map(p => p.id),
+    { ids: current, anchorId: selectionAnchorId ?? selectedPerson.value?.id ?? null },
+    person.id,
+    { shiftKey: event?.shiftKey, metaKey: event?.metaKey, ctrlKey: event?.ctrlKey },
+  );
+  selectionAnchorId = next.anchorId;
+  multiSelectedIds.value = next.ids.length > 1 ? next.ids : [];
+  // Content follows the clicked person, or the first remaining one if it was deselected.
+  const shown = next.ids.includes(person.id)
+    ? person
+    : allPersons.value.find(p => p.id === next.ids[0]);
+  if (shown) selectPerson(shown);
 }
 
 function selectPerson(person: any) {
@@ -757,13 +919,19 @@ async function executeMergePersons(
   mergeDialogError.value = '';
   const sourceDisplayName = getPersonDisplayName(sourcePerson);
 
+  const mergeFailedMessage = t(isPet.value ? 'menu.person.merge_failed_pet' : 'menu.person.merge_failed');
+
   try {
+    const hadHiddenImpact = isPersonHidden(sourcePerson.id) || isPersonHidden(targetPerson.id);
     const result = await mergePersons([sourcePerson.id], targetPerson.id, newName);
     if (!result?.target) {
-      throw new Error(t('menu.person.merge_failed'));
+      throw new Error(mergeFailedMessage);
     }
 
     await libConfig.remapMergedPersonIds([sourcePerson.id], result.target.id);
+    if (hadHiddenImpact) {
+      await tauriEmit('library-total-refreshed', { source: 'hidden-filters', origin: 'person' });
+    }
 
     selectedPerson.value = result.target;
     if (!libConfig.person) {
@@ -784,9 +952,9 @@ async function executeMergePersons(
     );
     return true;
   } catch (error: any) {
-    const msg = typeof error === 'string' ? error : (error?.message || t('menu.person.merge_failed'));
+    const msg = typeof error === 'string' ? error : (error?.message || mergeFailedMessage);
     mergeDialogError.value = msg;
-    toast.error(t('menu.person.merge_failed'));
+    toast.error(mergeFailedMessage);
     return false;
   } finally {
     isMergingPersons.value = false;
@@ -938,20 +1106,39 @@ function stopPersonDrag() {
 function cancelDeletePerson() {
   showDeletePersonMsgbox.value = false;
   deleteTargetPerson.value = null;
+  deleteTargetIds.value = [];
 }
 
 async function clickDeletePerson() {
-  const target = deleteTargetPerson.value || selectedPerson.value;
+  const fallbackId = deleteTargetPerson.value?.id ?? selectedPerson.value?.id;
+  const targetIds = deleteTargetIds.value.length > 0
+    ? deleteTargetIds.value
+    : fallbackId != null ? [fallbackId] : [];
   showDeletePersonMsgbox.value = false;
   deleteTargetPerson.value = null;
-  if (!target) return;
+  deleteTargetIds.value = [];
+  if (targetIds.length === 0) return;
 
-  const result = await deletePerson(target.id);
-  if (result) {
-    const index = allPersons.value.findIndex(p => p.id === target.id);
-    const wasSelected = selectedPerson.value?.id === target.id;
-    allPersons.value = allPersons.value.filter(p => p.id !== target.id);
-    allPersonCount.value = Math.max(0, allPersonCount.value - 1);
+  const deletedIds = new Set<number>();
+  for (const id of targetIds) {
+    if (await deletePerson(id)) deletedIds.add(id);
+  }
+  if (targetIds.length > 1 && deletedIds.size < targetIds.length) {
+    toast.error(t('menu.person.delete_selected_failed', { count: (targetIds.length - deletedIds.size).toLocaleString() }));
+  }
+  if (deletedIds.size > 0) {
+    const deletedArray = Array.from(deletedIds);
+    const deletedHidden = deletedArray.some((id) => isPersonHidden(id));
+    clearMultiSelection();
+    const index = allPersons.value.findIndex(p => deletedIds.has(p.id));
+    const wasSelected = selectedPerson.value != null && deletedIds.has(selectedPerson.value.id);
+    allPersons.value = allPersons.value.filter(p => !deletedIds.has(p.id));
+    allPersonCount.value = Math.max(0, allPersonCount.value - deletedIds.size);
+    if (deletedHidden) {
+      await libConfig.removeHiddenPersons(deletedArray);
+      pageHiddenPersonIds.value = pageHiddenPersonIds.value.filter(id => !deletedIds.has(id));
+      await tauriEmit('library-total-refreshed', { source: 'hidden-filters', origin: 'person' });
+    }
     if (wasSelected) {
       if (index > 0) {
         selectPerson(allPersons.value[index - 1]);
@@ -1019,6 +1206,11 @@ async function onResetFacesConfirm() {
   }
 
   await resetFaces();
+  if ((libConfig.hiddenPersonIds || []).length > 0) {
+    await libConfig.showAllPersons();
+    pageHiddenPersonIds.value = [];
+    await tauriEmit('library-total-refreshed', { source: 'hidden-filters', origin: 'person' });
+  }
   if (personSearch.value) {
     personSearch.value = '';
     await nextTick();
@@ -1037,10 +1229,14 @@ async function checkFaceStats() {
   }
 }
 
-useLibraryChangeRefresh(() => {
-  void loadPersons(true, true);
-  void checkFaceStats();
-});
+useLibraryChangeRefresh(
+  () => {
+    void loadPersons(true, true);
+    void checkFaceStats();
+  },
+  50,
+  (payload) => payload?.origin === 'person',
+);
 
 // Face edits made outside this panel (file info, "Not <name>") change counts and may delete persons.
 let unlistenPersonsChanged: (() => void) | null = null;

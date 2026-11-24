@@ -395,7 +395,7 @@ function scrollToPosition(value: number) {
   if (!scrollerRef.value) return;
   if (isVertical.value) scrollerRef.value.scrollTop = value;
   else scrollerRef.value.scrollLeft = value;
-  scrollOffset.value = value;
+  scrollOffset.value = isVertical.value ? scrollerRef.value.scrollTop : scrollerRef.value.scrollLeft;
 }
 
 defineExpose({

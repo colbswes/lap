@@ -178,8 +178,10 @@ const content = fs.readFileSync(new URL('../src/components/Content.vue', import.
 function contentRefresh(startAnchor, endAnchor, dependencies, name) {
   const start = content.indexOf(startAnchor);
   const end = content.indexOf(endAnchor, start);
+  const invalidationStart = content.indexOf('function invalidateRefreshedImages(');
+  const invalidation = invalidationStart < 0 ? '' : content.slice(invalidationStart, content.indexOf('// Refresh panel data', invalidationStart));
   assert.ok(start >= 0 && end > start);
-  return new Function(...Object.keys(dependencies), ts.transpile(content.slice(start, end), { target: ts.ScriptTarget.ES2022 }) +
+  return new Function(...Object.keys(dependencies), ts.transpile(invalidation + content.slice(start, end), { target: ts.ScriptTarget.ES2022 }) +
     `; return ${name};`)(...Object.values(dependencies));
 }
 
@@ -205,23 +207,35 @@ test('single-file panel refresh preserves metadata and distinguishes warnings fr
 test('single-file menu refresh reports warnings and failures for both local and skipped originals', async () => {
   for (const skipped of [false, true]) {
     for (const extra of [{ warning: 'XMP import failed' }, { warning: 'XMP import failed', error: 'Preview rebuild failed' }]) {
-      const updated = result(1, { skipped, ...extra });
-      const file = { id: 1, file_path: '/photo.jpg' };
+      const file = { id: 1, file_path: '/photo.jpg', modified_at: 42 };
+      const updated = result(1, { skipped, file: { ...file }, ...extra });
       const messages = [];
       const thumbnailLoads = [];
+      const versions = [];
+      const evictions = [];
+      const emitted = [];
       const deps = {
         requireOriginalFiles: async () => true, refreshFileInfo: async () => updated,
-        libConfig: { _libraryId: 'test' }, fileInfoRevision: ref(0), tauriEmit: async () => {}, getFileListThumb: async (...args) => thumbnailLoads.push(args),
+        libConfig: { _libraryId: 'test' }, fileInfoRevision: ref(0),
+        tauriEmit: async (name, payload) => emitted.push([name, payload]),
+        getFileListThumb: async (...args) => thumbnailLoads.push(args),
         refreshFileGeometryLayout: () => {},
         updateThumbForFile: async () => { throw new Error("Refresh must not force a second generation"); }, updateSelectedImage: async () => {}, selectedItemIndex: ref(0),
-        nextTick: async () => {}, uiStore: { clearActiveAdjustments() {} },
+        nextTick: async () => {}, uiStore: { clearActiveAdjustments() {}, updateFileVersion: path => versions.push(path) },
+        clearDecodedImages: path => evictions.push(path),
         localeMsg: ref({ tooltip: { update_image: { success: 'Updated', failed: 'Failed' } } }),
         toast: { warning: text => messages.push(['warning', text]), error: text => messages.push(['error', text]), success: text => messages.push(['success', text]) },
       };
       const refresh = contentRefresh('const updateFile = async', '// force-update the thumbnail for the file', deps, 'updateFile');
       await refresh(file, true);
       assert.equal(file.id, updated.file.id);
+      assert.equal(file.modified_at, 42);
       assert.equal(thumbnailLoads.length, skipped ? 0 : 1);
+      assert.deepEqual(versions, skipped ? [] : ['/photo.jpg']);
+      assert.deepEqual(evictions, versions);
+      assert.deepEqual(emitted.filter(([name]) => name === 'message-from-content'), skipped ? [] : [
+        ['message-from-content', { message: 'refresh-images', libraryId: 'test', filePaths: ['/photo.jpg'] }],
+      ]);
       if (!skipped) assert.deepEqual(thumbnailLoads[0][1], { bustCache: true, viewportBound: false });
       assert.deepEqual(messages, [[extra.error ? 'error' : 'warning', [extra.warning, extra.error].filter(Boolean).join('; ')]]);
     }

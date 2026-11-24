@@ -10,7 +10,7 @@ const functions = between('const FILE_TYPE_IMAGE =', 'const emptyFilesMessage ='
   + between('const activeFileTypeMask =', 'const handleSortTypeSelect =');
 function fixture(smart = false) {
   const config = reactive({ search: { fileType: 0, favoritesOnly: false } });
-  const album = { query: { rules: [{ field: 'rating', value: 5 }] } };
+  const album = { query: { rules: [{ field: 'tag', operator: 'has', value: 5 }] } };
   const deps = { config, computed, isFixedAiResultView: ref(false), isSmartAlbumView: ref(smart),
     smartAlbumFileTypeMask: ref(0), tempViewMode: ref('none'), isScanStreamingMode: ref(false),
     rememberFocusedFileForPresentationRefresh() {}, getActiveCustomSmartAlbum: () => album,

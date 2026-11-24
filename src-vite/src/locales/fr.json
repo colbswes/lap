@@ -4,7 +4,6 @@
     "library": "Bibliothèque",
     "album": "Albums",
     "search": "Recherche",
-    "rating": "Notes",
     "tag": "Tags",
     "calendar": "Calendrier",
     "location": "Lieux",
@@ -164,8 +163,6 @@
         "media_subtype": "Sous-type de média",
         "extension": "Extension",
         "favorite": "Favori",
-        "rating": "Note",
-        "culling": "Sélection",
         "date": "Date",
         "date_taken": "Date de prise",
         "date_created": "Date de création",
@@ -334,28 +331,10 @@
     "resume": "Reprendre"
   },
   "favorite": {
+    "mixed": "Mixte",
     "title": "Favoris",
     "files": "Fichiers favoris",
     "folders": "Dossiers favoris"
-  },
-  "rating": {
-    "mixed": "Mixte",
-    "title": "Notes",
-    "unrated": "Sans note",
-    "all_rated": "Tous les éléments notés",
-    "rated": "Noté",
-    "clear_rating": "Effacer la note",
-    "five_stars": "5 étoiles",
-    "four_stars": "4 étoiles",
-    "three_stars": "3 étoiles",
-    "two_stars": "2 étoiles",
-    "one_star": "1 étoile"
-  },
-  "culling": {
-    "title": "Sélection",
-    "picks": "Sélectionnées",
-    "rejected": "Rejetées",
-    "unreviewed": "Non examinées"
   },
   "assign_tags": {
     "recent_link": "Récents",
@@ -473,13 +452,12 @@
         "Dossier",
         "Jour",
         "Mois",
-        "Note",
+        "",
         "Lieu",
         "Appareil",
         "Objectif",
         "Année",
-        "Type de fichier",
-        "Sélection"
+        "Type de fichier"
       ],
       "sort_type_options": [
         "Date de prise",
@@ -1482,7 +1460,7 @@
       "title": "Métadonnées",
       "section_import": "Importer les métadonnées",
       "import": "Depuis EXIF, IPTC et XMP",
-      "import_hint": "Importer les favoris, notes, marqueurs de sélection, étiquettes et descriptions lors des analyses et actualisations, en conservant les modifications locales."
+      "import_hint": "Importer les favoris, étiquettes et descriptions lors des analyses et actualisations, en conservant les modifications locales."
     },
     "browse": {
       "section_album": "Dossier d'album",
@@ -1707,20 +1685,6 @@
         "print": "Imprimer",
         "toggle_favorite": "Ajouter / Retirer des favoris",
         "toggle_favorite_and_next": "Ajouter / Retirer des favoris → Suivant",
-        "set_clear_rating": "Note",
-        "set_clear_rating_and_next": "Note → Suivant",
-        "mark_pick": "Sélection · Sélectionnées",
-        "mark_pick_and_next": "Sélection · Sélectionnées → Suivant",
-        "mark_rejected": "Sélection · Rejetées",
-        "mark_rejected_and_next": "Sélection · Rejetées → Suivant",
-        "mark_unreviewed": "Sélection · Non examinées",
-        "mark_unreviewed_and_next": "Sélection · Non examinées → Suivant",
-        "clear_rating": "Effacer la note",
-        "rate_one": "Noter 1 étoile",
-        "rate_two": "Noter 2 étoiles",
-        "rate_three": "Noter 3 étoiles",
-        "rate_four": "Noter 4 étoiles",
-        "rate_five": "Noter 5 étoiles",
         "edit_tags": "Étiquettes",
         "edit_collections": "Collections",
         "edit_comment": "Description",
@@ -1800,7 +1764,7 @@
       "change_location": "Modifier",
       "change_location_confirm": "Choisir un dossier",
       "prechange_title": "Changer l’emplacement des données",
-      "prechange_message": "Les données de la bibliothèque contiennent les métadonnées, favoris, notes, tags et autres informations d’organisation. L’emplacement système par défaut est recommandé. Si vous le changez, utilisez un dossier local pour de meilleures performances.",
+      "prechange_message": "Les données de la bibliothèque contiennent les métadonnées, favoris, tags et autres informations d’organisation. L’emplacement système par défaut est recommandé. Si vous le changez, utilisez un dossier local pour de meilleures performances.",
       "restore_default_location": "Réinitialiser l’emplacement par défaut",
       "restore_default_confirm_title": "Réinitialiser l’emplacement par défaut",
       "restore_default_confirm_message": "Toutes les données de la bibliothèque seront replacées dans l’emplacement par défaut.",

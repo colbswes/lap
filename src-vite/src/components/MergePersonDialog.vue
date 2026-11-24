@@ -255,7 +255,7 @@ const candidates = computed(() =>
 );
 
 function getDisplayName(person: MergePersonSummary | null | undefined): string {
-  return person?.name?.trim() || t('menu.person.unnamed');
+  return person?.name?.trim() || t(isPet.value ? 'menu.person.unnamed_pet' : 'menu.person.unnamed');
 }
 
 function chooseTarget(person: MergePersonSummary) {

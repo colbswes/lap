@@ -18,25 +18,10 @@ export const LIB_ITEM = {
   ALL: 'all-files',
   FAV: 'favorites',
   TODAY: 'on-this-day',
-  RATINGS: 'ratings',
-  CULLING: 'culling',
   SUBJECTS: 'subjects',
 } as const;
 
 export type LibItem = (typeof LIB_ITEM)[keyof typeof LIB_ITEM];
-
-// rating filter enum
-export const RATE = {
-  ALL: -2,
-  NONE: -1,
-  UNRATED: 0,
-} as const;
-
-export const CULLING = {
-  PICK: 'pick',
-  REJECT: 'reject',
-  UNREVIEWED: 'unreviewed',
-} as const;
 
 // Thumbnail badge selection
 export const THUMBNAIL_BADGE = {
@@ -62,13 +47,13 @@ export const GROUP = {
   FOLDER: 1,
   DAY: 2,
   MONTH: 3,
-  RATING: 4,
+  // 4 was RATING (removed); keep numeric values stable for persisted settings.
   LOCATION: 5,
   CAMERA: 6,
   LENS: 7,
   YEAR: 8,
   FILE_TYPE: 9,
-  CULLING: 10,
+  // 10 was CULLING (removed).
 } as const;
 
 export type Group = (typeof GROUP)[keyof typeof GROUP];

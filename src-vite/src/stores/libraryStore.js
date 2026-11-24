@@ -2,19 +2,20 @@
  * Library Store - Per-library configuration
  */
 import { defineStore } from 'pinia';
-import { getCurrentLibraryState, saveLibraryState, setCollectionScope, getAppConfig } from '@/common/api';
-import { CULLING, LIB_ITEM } from '@/common/constants';
+import { getCurrentLibraryState, saveLibraryState, setHiddenFilters, getAppConfig } from '@/common/api';
+import { LIB_ITEM } from '@/common/constants';
 import { setThumbLibraryId } from '@/common/utils';
 import { resetLibraryAccessibility } from '@/common/availability';
 import {
-  SCOPE_EVERYTHING,
-  createDefaultCollectionScopeState,
-  normalizeCollectionScopeState,
-  withActiveScope,
-  withScopeAlbums,
-  withToggledAlbumInScope,
-  pruneRemovedAlbumFromScopes,
-} from '@/common/collectionScopes';
+  normalizeHiddenIds,
+  normalizeHiddenStringIds,
+  withHiddenIds,
+  withToggledHiddenId,
+  withToggledHiddenStringId,
+  withoutHiddenId,
+  withoutHiddenIds,
+  withoutHiddenStringId,
+} from '@/common/hiddenAlbums';
 import { remapSmartAlbumPersonIds } from '@/common/personMerge';
 
 // The app-level deep watcher calls save() for every store mutation. Keep the
@@ -26,10 +27,6 @@ export const createEmptyLibraryCounts = () => ({
   all: 0,
   favorite: 0,
   today: 0,
-  rated: 0,
-  unrated: 0,
-  ratings: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
-  culling: { [CULLING.PICK]: 0, [CULLING.REJECT]: 0, [CULLING.UNREVIEWED]: 0 },
 });
 
 export const useLibraryStore = defineStore('libraryStore', {
@@ -43,20 +40,26 @@ export const useLibraryStore = defineStore('libraryStore', {
     /** @type {'main' | 'collection'} */
     activePane: 'main',
 
-    /** @type {{ item: 'all-files' | 'favorites' | 'ratings' | 'culling' | 'subjects' | 'on-this-day', smartId: string | null, ratingsExpanded: boolean, cullingExpanded: boolean, subjectsExpanded: boolean, subjectCounts: Record<string, number>, counts: { all: number, favorite: number, today: number, rated: number, unrated: number, ratings: Record<number, number>, culling: Record<string, number> } }} */
+    /** @type {{ item: 'all-files' | 'favorites' | 'subjects' | 'on-this-day', smartId: string | null, subjectsExpanded: boolean, subjectCounts: Record<string, number>, counts: { all: number, favorite: number, today: number } }} */
     library: {
       item: LIB_ITEM.ALL,
       smartId: null,
-      ratingsExpanded: true,
-      cullingExpanded: true,
       subjectsExpanded: true,
       activateTick: 0,
       subjectCounts: {},
       counts: createEmptyLibraryCounts(),
     },
 
-    collectionScope: createDefaultCollectionScopeState(),
-    collectionScopeVersion: 0,
+    /** @type {number[]} */
+    hiddenAlbumIds: [],
+    /** @type {number[]} */
+    hiddenCollectionIds: [],
+    /** @type {number[]} */
+    hiddenTagIds: [],
+    /** @type {number[]} */
+    hiddenPersonIds: [],
+    /** @type {string[]} */
+    hiddenSmartAlbumIds: [],
 
     /** @type {{ id: number, folderId: number | null, folderPath: string, selected: boolean, activateTick: number, counts: Record<string, number> }} */
     album: {
@@ -83,15 +86,6 @@ export const useLibraryStore = defineStore('libraryStore', {
       selectedId: null,      // selected collection id
       activateTick: 0,
       counts: {},
-    },
-
-    /** @type {{ item: number | null }} */
-    rating: {
-      item: null,             // 0: unrated, 1-5: rated files
-    },
-
-    culling: {
-      item: 'pick',
     },
 
     /** @type {{ id: number | null, multi: boolean, previousId: number | null, selectedIds: number[], matchAny: boolean, collapsedTagIds: number[], assignCollapsedTagIds: number[], activateTick: number, counts: Record<string, number> }} */
@@ -189,7 +183,17 @@ export const useLibraryStore = defineStore('libraryStore', {
             }
           });
         }
-        this.collectionScope = normalizeCollectionScopeState(this.collectionScope);
+        // Drop state left over from the removed ratings/culling library items.
+        delete this.library.ratingsExpanded;
+        delete this.library.cullingExpanded;
+        if (!Object.values(LIB_ITEM).includes(this.library.item)) {
+          this.library.item = LIB_ITEM.ALL;
+        }
+        this.hiddenAlbumIds = normalizeHiddenIds(backendState?.hiddenAlbumIds);
+        this.hiddenCollectionIds = normalizeHiddenIds(backendState?.hiddenCollectionIds);
+        this.hiddenTagIds = normalizeHiddenIds(backendState?.hiddenTagIds);
+        this.hiddenPersonIds = normalizeHiddenIds(backendState?.hiddenPersonIds);
+        this.hiddenSmartAlbumIds = normalizeHiddenStringIds(backendState?.hiddenSmartAlbumIds);
         this.index.status = Number(this.index.status || 0);
         this.index.phase = this.index.phase || 'discovering';
         this.index.pausedAlbumIds = Array.isArray(this.index.pausedAlbumIds)
@@ -278,16 +282,18 @@ export const useLibraryStore = defineStore('libraryStore', {
             activateTick: _personActivateTick,
             ...personState
           } = this.person;
-            const stateToSave = {
+          const stateToSave = {
             library: libraryState,
-            collectionScope: normalizeCollectionScopeState(this.collectionScope),
+            hiddenAlbumIds: normalizeHiddenIds(this.hiddenAlbumIds),
+            hiddenCollectionIds: normalizeHiddenIds(this.hiddenCollectionIds),
+            hiddenTagIds: normalizeHiddenIds(this.hiddenTagIds),
+            hiddenPersonIds: normalizeHiddenIds(this.hiddenPersonIds),
+            hiddenSmartAlbumIds: normalizeHiddenStringIds(this.hiddenSmartAlbumIds),
             album: albumState,
             smartAlbum: this.smartAlbum,
             smartAlbums: this.smartAlbums,
             dedupPreferredFolderIds: this.dedupPreferredFolderIds,
             collection: collectionState,
-            rating: this.rating,
-            culling: this.culling,
             tag: tagState,
             calendar: this.calendar,
             camera: this.camera,
@@ -321,44 +327,153 @@ export const useLibraryStore = defineStore('libraryStore', {
       }
     },
 
-    async applyCollectionScope(nextScope) {
-      const normalized = normalizeCollectionScopeState(nextScope);
-      const previous = JSON.stringify(this.collectionScope);
-      this.collectionScope = normalized;
+    async applyHiddenFilters(next = {}) {
+      const payload = {
+        albumIds: normalizeHiddenIds(next.albumIds ?? this.hiddenAlbumIds),
+        collectionIds: normalizeHiddenIds(next.collectionIds ?? this.hiddenCollectionIds),
+        tagIds: normalizeHiddenIds(next.tagIds ?? this.hiddenTagIds),
+        personIds: normalizeHiddenIds(next.personIds ?? this.hiddenPersonIds),
+        smartAlbumIds: normalizeHiddenStringIds(next.smartAlbumIds ?? this.hiddenSmartAlbumIds),
+      };
+      const previous = JSON.stringify({
+        albumIds: this.hiddenAlbumIds,
+        collectionIds: this.hiddenCollectionIds,
+        tagIds: this.hiddenTagIds,
+        personIds: this.hiddenPersonIds,
+        smartAlbumIds: this.hiddenSmartAlbumIds,
+      });
+      this.hiddenAlbumIds = payload.albumIds;
+      this.hiddenCollectionIds = payload.collectionIds;
+      this.hiddenTagIds = payload.tagIds;
+      this.hiddenPersonIds = payload.personIds;
+      this.hiddenSmartAlbumIds = payload.smartAlbumIds;
       const libraryId = this._libraryId;
       if (libraryId) {
-        const persisted = await setCollectionScope(libraryId, normalized);
+        const persisted = await setHiddenFilters(libraryId, payload);
         if (persisted) {
-          this.collectionScope = normalizeCollectionScopeState(persisted);
+          this.hiddenAlbumIds = normalizeHiddenIds(persisted.albumIds);
+          this.hiddenCollectionIds = normalizeHiddenIds(persisted.collectionIds);
+          this.hiddenTagIds = normalizeHiddenIds(persisted.tagIds);
+          this.hiddenPersonIds = normalizeHiddenIds(persisted.personIds);
+          this.hiddenSmartAlbumIds = normalizeHiddenStringIds(persisted.smartAlbumIds);
         }
       }
-      if (JSON.stringify(this.collectionScope) !== previous) {
+      const current = JSON.stringify({
+        albumIds: this.hiddenAlbumIds,
+        collectionIds: this.hiddenCollectionIds,
+        tagIds: this.hiddenTagIds,
+        personIds: this.hiddenPersonIds,
+        smartAlbumIds: this.hiddenSmartAlbumIds,
+      });
+      if (current !== previous) {
         this.clearLazySidebarCounts();
-        this.collectionScopeVersion += 1;
       }
-      return this.collectionScope;
+      return {
+        albumIds: this.hiddenAlbumIds,
+        collectionIds: this.hiddenCollectionIds,
+        tagIds: this.hiddenTagIds,
+        personIds: this.hiddenPersonIds,
+        smartAlbumIds: this.hiddenSmartAlbumIds,
+      };
     },
 
-    async setActiveScope(scopeId) {
-      return await this.applyCollectionScope(withActiveScope(this.collectionScope, scopeId));
+    async toggleAlbumHidden(albumId) {
+      return await this.applyHiddenFilters({
+        albumIds: withToggledHiddenId(this.hiddenAlbumIds, albumId),
+      });
     },
 
-    async setScopeAlbums(scopeId, albumIds) {
-      return await this.applyCollectionScope(withScopeAlbums(this.collectionScope, scopeId, albumIds));
+    async showAllAlbums() {
+      return await this.applyHiddenFilters({ albumIds: [] });
     },
 
-    async toggleAlbumInScope(scopeId, albumId) {
-      return await this.applyCollectionScope(withToggledAlbumInScope(this.collectionScope, scopeId, albumId));
+    async removeHiddenAlbum(albumId) {
+      return await this.applyHiddenFilters({
+        albumIds: withoutHiddenId(this.hiddenAlbumIds, albumId),
+      });
     },
 
-    async assignNewAlbumToActiveScope(albumId) {
-      const activeId = this.collectionScope?.activeId || SCOPE_EVERYTHING;
-      if (activeId === SCOPE_EVERYTHING) return this.collectionScope;
-      return await this.toggleAlbumInScope(activeId, albumId);
+    async toggleCollectionHidden(collectionId) {
+      return await this.applyHiddenFilters({
+        collectionIds: withToggledHiddenId(this.hiddenCollectionIds, collectionId),
+      });
     },
 
-    async removeAlbumFromScopes(albumId) {
-      return await this.applyCollectionScope(pruneRemovedAlbumFromScopes(this.collectionScope, albumId));
+    async showAllCollections() {
+      return await this.applyHiddenFilters({ collectionIds: [] });
+    },
+
+    async removeHiddenCollection(collectionId) {
+      return await this.applyHiddenFilters({
+        collectionIds: withoutHiddenId(this.hiddenCollectionIds, collectionId),
+      });
+    },
+
+    async toggleTagHidden(tagId) {
+      return await this.applyHiddenFilters({
+        tagIds: withToggledHiddenId(this.hiddenTagIds, tagId),
+      });
+    },
+
+    async showAllTags() {
+      return await this.applyHiddenFilters({ tagIds: [] });
+    },
+
+    async removeHiddenTag(tagId) {
+      return await this.applyHiddenFilters({
+        tagIds: withoutHiddenId(this.hiddenTagIds, tagId),
+      });
+    },
+
+    async toggleSmartAlbumHidden(smartAlbumId) {
+      return await this.applyHiddenFilters({
+        smartAlbumIds: withToggledHiddenStringId(this.hiddenSmartAlbumIds, smartAlbumId),
+      });
+    },
+
+    async showAllSmartAlbums() {
+      return await this.applyHiddenFilters({ smartAlbumIds: [] });
+    },
+
+    async removeHiddenSmartAlbum(smartAlbumId) {
+      return await this.applyHiddenFilters({
+        smartAlbumIds: withoutHiddenStringId(this.hiddenSmartAlbumIds, smartAlbumId),
+      });
+    },
+
+    async togglePersonHidden(personId) {
+      return await this.applyHiddenFilters({
+        personIds: withToggledHiddenId(this.hiddenPersonIds, personId),
+      });
+    },
+
+    async setPersonsHidden(personIds, hidden) {
+      return await this.applyHiddenFilters({
+        personIds: hidden
+          ? withHiddenIds(this.hiddenPersonIds, personIds)
+          : withoutHiddenIds(this.hiddenPersonIds, personIds),
+      });
+    },
+
+    async showAllPersons(personIds = null) {
+      if (Array.isArray(personIds)) {
+        return await this.applyHiddenFilters({
+          personIds: withoutHiddenIds(this.hiddenPersonIds, personIds),
+        });
+      }
+      return await this.applyHiddenFilters({ personIds: [] });
+    },
+
+    async removeHiddenPerson(personId) {
+      return await this.applyHiddenFilters({
+        personIds: withoutHiddenId(this.hiddenPersonIds, personId),
+      });
+    },
+
+    async removeHiddenPersons(personIds) {
+      return await this.applyHiddenFilters({
+        personIds: withoutHiddenIds(this.hiddenPersonIds, personIds),
+      });
     },
 
     async remapMergedPersonIds(sourceIds, targetId) {
@@ -366,6 +481,11 @@ export const useLibraryStore = defineStore('libraryStore', {
       if (changed) {
         this.smartAlbums = albums;
         await this.save();
+      }
+      const removedSourceIds = normalizeHiddenIds(sourceIds).filter((id) => id !== Number(targetId));
+      const nextHidden = withoutHiddenIds(this.hiddenPersonIds, removedSourceIds);
+      if (nextHidden.length !== this.hiddenPersonIds.length) {
+        await this.applyHiddenFilters({ personIds: nextHidden });
       }
     },
   },

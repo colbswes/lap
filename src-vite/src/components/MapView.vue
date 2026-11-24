@@ -61,14 +61,14 @@ import markerShadow from 'leaflet/dist/images/marker-shadow.png'
 // Props: lat/lon from parent; no geolocation fallback
 const props = defineProps({
   lat: {
-    type: Number, 
+    type: [Number, null],
     required: false,
-    default: 0,
+    default: null,
   },
   lon: {
-    type: Number, 
+    type: [Number, null],
     required: false,
-    default: 0,
+    default: null,
   },
   zoom: {
     type: Number, 
@@ -78,7 +78,13 @@ const props = defineProps({
     type: String,
     default: 'Lap',
   },
+  // Clicking the map emits `pick` with the clicked coordinates.
+  pickable: {
+    type: Boolean,
+    default: false,
+  },
 })
+const emit = defineEmits(['pick'])
 
 const { t } = useI18n()
 const uiStore = useUIStore()
@@ -101,7 +107,7 @@ onMounted(() => {
     keyboard: false,
     zoomControl: false,
     // Scrolling the info sidebar should not change the map zoom.
-    scrollWheelZoom: false,
+    scrollWheelZoom: props.pickable,
     maxZoom: 19,
   })
   map.attributionControl.setPrefix('')
@@ -109,6 +115,13 @@ onMounted(() => {
   map.on('zoomend', () => {
     zoom.value = map.getZoom()
   })
+  if (props.pickable) {
+    mapEl.value.style.cursor = 'crosshair'
+    map.on('click', event => {
+      const { lat, lng } = event.latlng.wrap()
+      emit('pick', { lat, lon: lng })
+    })
+  }
 
   // delete default marker icon
   delete L.Icon.Default.prototype._getIconUrl

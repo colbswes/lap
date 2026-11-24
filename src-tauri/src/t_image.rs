@@ -24,8 +24,9 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::UNIX_EPOCH;
+use tokio::sync::{Semaphore, watch};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -1794,7 +1795,108 @@ pub fn get_dimensions_with_sips(file_path: &str) -> Result<Option<(u32, u32)>, S
     }
 }
 
-const FILE_IMAGE_RESULT_CACHE_MAX: usize = 8;
+const FILE_IMAGE_RESULT_CACHE_MAX: usize = 16;
+const RAW_PREVIEW_CACHE_MAX: usize = 16;
+const DECODED_PREVIEW_DISK_MAX: u64 = 512 * 1024 * 1024;
+
+static FILE_PREVIEW_PERMITS: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(2)));
+static PREFETCH_PREVIEW_PERMITS: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(1)));
+type PreviewCancellation = watch::Sender<bool>;
+static PREVIEW_REQUESTS: Lazy<Mutex<HashMap<String, Weak<PreviewCancellation>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone)]
+pub(crate) struct PreviewRequest {
+    cancellation: Option<Arc<PreviewCancellation>>,
+    prefetch: bool,
+}
+
+impl PreviewRequest {
+    pub(crate) fn new(viewer: Option<&str>, prefetch: bool) -> Self {
+        let cancellation = viewer
+            .filter(|viewer| !viewer.is_empty() && !prefetch)
+            .map(|viewer| {
+                let active = Arc::new(watch::Sender::new(false));
+                if let Ok(mut requests) = PREVIEW_REQUESTS.lock() {
+                    requests.retain(|_, request| request.strong_count() > 0);
+                    if let Some(previous) = requests
+                        .insert(viewer.to_string(), Arc::downgrade(&active))
+                        .and_then(|request| request.upgrade())
+                    {
+                        previous.send_replace(true);
+                    }
+                }
+                active
+            });
+        Self {
+            cancellation,
+            prefetch,
+        }
+    }
+
+    pub(crate) fn check_active(&self) -> Result<(), String> {
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(|token| *token.borrow())
+        {
+            Err("Preview superseded".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn wait_for<F: std::future::Future>(
+        &self,
+        work: F,
+    ) -> Result<F::Output, String> {
+        let Some(token) = &self.cancellation else {
+            return Ok(work.await);
+        };
+        let mut cancelled = token.subscribe();
+        tokio::select! {
+            biased;
+            _ = cancelled.wait_for(|cancelled| *cancelled) => Err("Preview superseded".to_string()),
+            result = work => Ok(result),
+        }
+    }
+
+    async fn permit(
+        &self,
+        active_permits: &Arc<Semaphore>,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        let permits = if self.prefetch {
+            &*PREFETCH_PREVIEW_PERMITS
+        } else {
+            active_permits
+        };
+        self.wait_for(permits.clone().acquire_owned())
+            .await?
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) async fn decode<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        self.decode_with_permits(&FILE_PREVIEW_PERMITS, work).await
+    }
+
+    async fn decode_with_permits<T: Send + 'static>(
+        &self,
+        permits: &Arc<Semaphore>,
+        work: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let permit = self.permit(permits).await?;
+        let request = self.clone();
+        let task = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
+            request.check_active()?;
+            work()
+        });
+        self.wait_for(task).await?.map_err(|e| e.to_string())?
+    }
+}
 
 #[derive(Clone)]
 struct FileImageCacheEntry {
@@ -1893,22 +1995,44 @@ fn get_file_signature(file_path: &str) -> Result<(u64, u128), String> {
         .map_err(|e| format!("Failed to read file modified time for cache: {}", e))?
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("Invalid file modified time for cache: {}", e))?
-        .as_millis();
+        .as_nanos();
     Ok((metadata.len(), modified))
 }
 
-pub async fn get_file_image_bytes_cached(
+fn decoded_preview_disk_path(path: &str, signature: (u64, u128)) -> Option<PathBuf> {
+    let key = blake3::hash(format!("decoded-preview-v1:{path}:{signature:?}").as_bytes());
+    Some(
+        crate::t_config::get_app_cache_dir()
+            .ok()?
+            .join("decoded-previews")
+            .join(key.to_hex().as_str()),
+    )
+}
+
+fn preview_is_jpeg(data: &[u8]) -> bool {
+    data.starts_with(&[0xff, 0xd8]) && data.ends_with(&[0xff, 0xd9])
+}
+
+pub(crate) async fn get_file_image_bytes_cached(
     file_path: &str,
     prefer_embedded_raw_preview: RawDisplayOptions,
+    request: &PreviewRequest,
 ) -> Result<Vec<u8>, String> {
     let file_type = t_utils::get_file_type(file_path).unwrap_or(0);
-    let cache_signature = if should_generate_preview_for_file(file_path, file_type) {
-        Some(get_file_signature(file_path)?)
+    let signature = if should_generate_preview_for_file(file_path, file_type) {
+        let path = file_path.to_string();
+        Some(
+            request
+                .wait_for(tauri::async_runtime::spawn_blocking(move || {
+                    get_file_signature(&path)
+                }))
+                .await?
+                .map_err(|e| e.to_string())??,
+        )
     } else {
         None
     };
-
-    if let Some(signature) = cache_signature {
+    if let Some(signature) = signature {
         if let Ok(mut cache) = FILE_IMAGE_RESULT_CACHE.lock() {
             if let Some(cached) = cache.get(file_path, signature, prefer_embedded_raw_preview) {
                 return Ok(cached);
@@ -1916,51 +2040,82 @@ pub async fn get_file_image_bytes_cached(
         }
     }
 
-    t_utils::require_local_content(Path::new(file_path)).map_err(|e| e.to_string())?;
-    let image_data = if file_type == 3 {
-        get_raw_preview_image(file_path, prefer_embedded_raw_preview)?
-            .ok_or_else(|| format!("Failed to resolve RAW preview image: {}", file_path))?
-    } else if crate::t_affinity::is_affinity_path(file_path) {
-        let path = file_path.to_string();
-        tauri::async_runtime::spawn_blocking(move || {
-            crate::t_affinity::preview_png(&path).unwrap_or_else(|| {
-                include_bytes!("../../src-vite/src/assets/images/image-file.png").to_vec()
-            })
+    let path = file_path.to_string();
+    request
+        .wait_for(tauri::async_runtime::spawn_blocking(move || {
+            t_utils::require_local_content(Path::new(&path)).map_err(|e| e.to_string())
+        }))
+        .await?
+        .map_err(|e| e.to_string())??;
+
+    let disk = signature
+        .filter(|_| {
+            file_type != 3
+                && (t_jxl::is_jxl_path(file_path)
+                    || is_heic_path(file_path)
+                    || crate::t_libraw::is_tiff_path(file_path))
         })
-        .await
-        .map_err(|e| e.to_string())?
-    } else if t_jxl::is_jxl_path(file_path) {
-        t_jxl::get_jxl_preview_image(file_path, 4096)?
-            .ok_or_else(|| format!("Failed to resolve JXL preview image: {}", file_path))?
-    } else if is_heic_path(file_path) {
-        crate::t_heif::get_heif_preview(file_path, get_image_orientation(file_path), 4096)?
-            .ok_or_else(|| format!("Failed to resolve HEIC preview image: {}", file_path))?
-    } else if is_ffmpeg_backed_image_path(file_path) {
-        crate::t_video::get_video_thumbnail(file_path, 4096, None, None)
+        .and_then(|signature| decoded_preview_disk_path(file_path, signature));
+    let disk_hit = if let Some(disk) = &disk {
+        request
+            .wait_for(tokio::fs::read(disk))
             .await?
-            .ok_or_else(|| {
-                format!(
-                    "Failed to resolve FFmpeg-backed preview image: {}",
-                    file_path
-                )
-            })?
-    } else if cfg!(target_os = "linux") && is_avif_path(file_path) {
-        get_image_thumbnail(file_path, get_image_orientation(file_path), 4096)?
-            .ok_or_else(|| format!("Failed to resolve AVIF preview image: {}", file_path))?
-    } else if crate::t_libraw::is_tiff_path(file_path) {
-        match get_raw_preview_image(file_path, RawDisplayOptions::rendered_bright()) {
-            Ok(Some(data)) => data,
-            _ => tokio::fs::read(file_path)
-                .await
-                .map_err(|e| format!("Failed to read the image: {}", e))?,
-        }
+            .ok()
+            .filter(|data| preview_is_jpeg(data))
     } else {
-        tokio::fs::read(file_path)
-            .await
-            .map_err(|e| format!("Failed to read the image: {}", e))?
+        None
+    };
+    let image_data = if let Some(data) = disk_hit {
+        data
+    } else if is_ffmpeg_backed_image_path(file_path) {
+        let _permit = request.permit(&FILE_PREVIEW_PERMITS).await?;
+        request
+            .wait_for(crate::t_video::get_video_thumbnail(
+                file_path, 4096, None, None,
+            ))
+            .await??
+            .ok_or_else(|| format!("Failed to resolve FFmpeg-backed preview image: {file_path}"))?
+    } else if signature.is_some() && (cfg!(target_os = "linux") || !is_avif_path(file_path)) {
+        let path = file_path.to_string();
+        request
+            .decode(move || {
+                let path = path.as_str();
+                let data = if file_type == 3 {
+                    get_raw_preview_image(path, prefer_embedded_raw_preview)?
+                } else if crate::t_affinity::is_affinity_path(path) {
+                    Some(crate::t_affinity::preview_png(path).unwrap_or_else(|| {
+                        include_bytes!("../../src-vite/src/assets/images/image-file.png").to_vec()
+                    }))
+                } else if t_jxl::is_jxl_path(path) {
+                    t_jxl::get_jxl_preview_image(path, 4096)?
+                } else if is_heic_path(path) {
+                    crate::t_heif::get_heif_preview(path, get_image_orientation(path), 4096)?
+                } else if is_avif_path(path) {
+                    get_image_thumbnail(path, get_image_orientation(path), 4096)?
+                } else {
+                    match get_raw_preview_image(path, RawDisplayOptions::rendered_bright()) {
+                        Ok(Some(data)) => Some(data),
+                        _ => {
+                            return fs::read(path)
+                                .map_err(|e| format!("Failed to read the image: {e}"));
+                        }
+                    }
+                }
+                .ok_or_else(|| format!("Failed to resolve preview image: {path}"))?;
+                if let Some(disk) = disk.filter(|_| preview_is_jpeg(&data)) {
+                    write_preview_disk(&disk, &data);
+                }
+                Ok(data)
+            })
+            .await?
+    } else {
+        request
+            .wait_for(tokio::fs::read(file_path))
+            .await?
+            .map_err(|e| format!("Failed to read the image: {e}"))?
     };
 
-    if let Some(signature) = cache_signature {
+    if let Some(signature) = signature {
         if let Ok(mut cache) = FILE_IMAGE_RESULT_CACHE.lock() {
             cache.insert(
                 file_path.to_string(),
@@ -2034,22 +2189,13 @@ fn get_raw_preview_with_source(path: &str, options: RawDisplayOptions, full_size
 // Keep decoder work off the async runtime and bound concurrent full RAW previews.
 type RawPreviewResult = (Vec<u8>, &'static str, bool);
 static RAW_PREVIEW_CACHE: Lazy<Mutex<VecDeque<(String, (u64, u128), RawDisplayOptions, RawPreviewResult, bool)>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
-static RAW_PREVIEW_PERMITS: Lazy<Vec<std::sync::Arc<tokio::sync::Semaphore>>> = Lazy::new(|| (0..2).map(|_| std::sync::Arc::new(tokio::sync::Semaphore::new(1))).collect());
-static RAW_PREVIEW_LOCKS: Lazy<Vec<tokio::sync::Mutex<()>>> = Lazy::new(|| (0..64).map(|_| tokio::sync::Mutex::new(())).collect());
-static RAW_PREVIEW_REQUESTS: Lazy<Mutex<HashMap<String, std::sync::Weak<std::sync::atomic::AtomicBool>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-
-pub fn register_raw_preview_request(viewer: &str) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-    let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    if let Ok(mut requests) = RAW_PREVIEW_REQUESTS.lock() {
-        requests.retain(|_, request| request.strong_count() > 0);
-        if let Some(previous) = requests.insert(viewer.to_string(), std::sync::Arc::downgrade(&active)).and_then(|request| request.upgrade()) {
-            previous.store(false, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-    active
-}
+static RAW_PREVIEW_PERMITS: Lazy<[Arc<Semaphore>; 2]> =
+    Lazy::new(|| std::array::from_fn(|_| Arc::new(Semaphore::new(1))));
+static RAW_PREVIEW_LOCKS: Lazy<[tokio::sync::Mutex<()>; 64]> =
+    Lazy::new(|| std::array::from_fn(|_| tokio::sync::Mutex::new(())));
 
 fn raw_preview_disk_path(path: &str, signature: (u64, u128), options: RawDisplayOptions, full_size: bool) -> Result<std::path::PathBuf, String> {
+    let signature = (signature.0, signature.1 / 1_000_000);
     let key = blake3::hash(format!("raw-preview-v6:{}:{path}:{signature:?}:{options:?}:{full_size}", options.cache_tag()).as_bytes());
     Ok(crate::t_config::get_app_cache_dir()?.join("raw-previews").join(key.to_hex().as_str()))
 }
@@ -2059,15 +2205,28 @@ fn read_raw_preview_disk(path: &std::path::Path) -> Option<RawPreviewResult> {
     let source = match *bytes.first()? { 1 => "embedded", 2 => "rendered", 3 => "brightened", 4 => "image", _ => return None };
     let unavailable = *bytes.get(1)? != 0;
     let data = bytes.get(2..)?;
-    if !data.starts_with(&[0xff, 0xd8]) || !data.ends_with(&[0xff, 0xd9]) { return None; }
+    if !preview_is_jpeg(data) {
+        return None;
+    }
     Some((data.to_vec(), source, unavailable))
 }
 
 fn write_raw_preview_disk(path: &std::path::Path, result: &RawPreviewResult) {
-    let Some(dir) = path.parent() else { return; };
-    if fs::create_dir_all(dir).is_err() { return; }
     let mut bytes = vec![match result.1 { "embedded" => 1, "brightened" => 3, "image" => 4, _ => 2 }, result.2 as u8];
     bytes.extend_from_slice(&result.0);
+    write_preview_disk(path, &bytes);
+}
+
+fn write_preview_disk(path: &Path, bytes: &[u8]) {
+    if bytes.len() as u64 > DECODED_PREVIEW_DISK_MAX {
+        return;
+    }
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(dir).is_err() {
+        return;
+    }
     let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     if fs::write(&temp, bytes).is_ok() { let _ = fs::rename(&temp, path); }
     let _ = fs::remove_file(&temp);
@@ -2079,49 +2238,92 @@ fn write_raw_preview_disk(path: &std::path::Path, result: &RawPreviewResult) {
     let mut size: u64 = entries.iter().map(|entry| entry.1).sum();
     entries.sort_by_key(|entry| entry.2);
     for (file, len, _) in entries {
-        if size <= 512 * 1024 * 1024 { break; }
-        if fs::remove_file(file).is_ok() { size = size.saturating_sub(len); }
+        if size <= DECODED_PREVIEW_DISK_MAX {
+            break;
+        }
+        if fs::remove_file(file).is_ok() {
+            size = size.saturating_sub(len);
+        }
     }
 }
 
-pub async fn get_raw_preview_cached(path: &str, options: RawDisplayOptions, full_size: bool, active: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<RawPreviewResult, String> {
-    let signature = get_file_signature(path)?;
+pub(crate) async fn get_raw_preview_cached(
+    path: &str,
+    options: RawDisplayOptions,
+    full_size: bool,
+    request: &PreviewRequest,
+) -> Result<RawPreviewResult, String> {
+    let source = path.to_string();
+    let signature = request
+        .wait_for(tauri::async_runtime::spawn_blocking(move || {
+            get_file_signature(&source)
+        }))
+        .await?
+        .map_err(|e| e.to_string())??;
     let disk = raw_preview_disk_path(path, signature, options, full_size).ok();
-    let hash = blake3::hash(format!("{path}:{options:?}:{full_size}").as_bytes());
-    let _request = RAW_PREVIEW_LOCKS[hash.as_bytes()[0] as usize % 64].lock().await;
-    let check_active = || {
-        if active.as_ref().is_some_and(|active| !active.load(std::sync::atomic::Ordering::Relaxed)) {
-            Err("RAW preview superseded".to_string())
-        } else { Ok(()) }
+
+    // A speculative request must never hold a lock needed by an active viewer.
+    let _active_lock = if request.prefetch {
+        None
+    } else {
+        let hash = blake3::hash(format!("{path}:{options:?}:{full_size}").as_bytes());
+        Some(
+            request
+                .wait_for(
+                    RAW_PREVIEW_LOCKS[hash.as_bytes()[0] as usize % RAW_PREVIEW_LOCKS.len()].lock(),
+                )
+                .await?,
+        )
     };
-    check_active()?;
-    if let Ok(cache) = RAW_PREVIEW_CACHE.lock() {
-        if let Some(entry) = cache.iter().find(|entry| entry.0 == path && entry.1 == signature && entry.2 == options && entry.4 == full_size) {
-            return Ok(entry.3.clone());
+    request.check_active()?;
+    if let Ok(mut cache) = RAW_PREVIEW_CACHE.lock() {
+        if let Some(position) = cache.iter().position(|entry| {
+            entry.0 == path && entry.1 == signature && entry.2 == options && entry.4 == full_size
+        }) {
+            let entry = cache.remove(position).unwrap();
+            let result = entry.3.clone();
+            cache.push_back(entry);
+            return Ok(result);
         }
     }
     let cached = if let Some(disk) = disk.clone() {
-        tauri::async_runtime::spawn_blocking(move || read_raw_preview_disk(&disk)).await.map_err(|e| e.to_string())?
-    } else { None };
-    let result = if let Some(cached) = cached { cached } else {
-        let permit = RAW_PREVIEW_PERMITS[full_size as usize].clone().acquire_owned().await.map_err(|e| e.to_string())?;
-        check_active()?;
-        let path = path.to_string();
-        tauri::async_runtime::spawn_blocking(move || {
-            let _permit = permit;
-            t_utils::require_local_content(Path::new(&path)).map_err(|e| e.to_string())?;
-            let result = get_raw_preview_with_source(&path, options, full_size)?;
-            if options.embedded() || result.1 != "embedded" {
-                if let Some(disk) = disk { write_raw_preview_disk(&disk, &result); }
-            }
-            Ok::<_, String>(result)
-        }).await.map_err(|e| e.to_string())??
+        request
+            .wait_for(tauri::async_runtime::spawn_blocking(move || {
+                read_raw_preview_disk(&disk)
+            }))
+            .await?
+            .map_err(|e| e.to_string())?
+    } else {
+        None
     };
-    if !options.embedded() && result.1 == "embedded" { return Ok(result); }
+    let result = if let Some(cached) = cached {
+        cached
+    } else {
+        let path = path.to_string();
+        let request_for_decode = request.clone();
+        request
+            .decode_with_permits(&RAW_PREVIEW_PERMITS[full_size as usize], move || {
+                t_utils::require_local_content(Path::new(&path)).map_err(|e| e.to_string())?;
+                request_for_decode.check_active()?;
+                let result = get_raw_preview_with_source(&path, options, full_size)?;
+                if options.embedded() || result.1 != "embedded" {
+                    if let Some(disk) = disk {
+                        write_raw_preview_disk(&disk, &result);
+                    }
+                }
+                Ok(result)
+            })
+            .await?
+    };
+    if !options.embedded() && result.1 == "embedded" {
+        return Ok(result);
+    }
     if let Ok(mut cache) = RAW_PREVIEW_CACHE.lock() {
         cache.retain(|entry| entry.0 != path || (entry.1 == signature && (entry.2 != options || entry.4 != full_size)));
         cache.push_back((path.to_string(), signature, options, result.clone(), full_size));
-        while cache.len() > 8 { cache.pop_front(); }
+        while cache.len() > RAW_PREVIEW_CACHE_MAX {
+            cache.pop_front();
+        }
     }
     Ok(result)
 }
@@ -2133,9 +2335,12 @@ mod offline_preview_tests {
     #[test]
     fn raw_preview_disk_cache_invalidates_legacy_orientation_results() {
         let path = "/fixture/pentax/sample.pef";
-        let signature = (123, 456);
+        let signature = (123, 456_000_000);
         let options = RawDisplayOptions::default();
-        let legacy = blake3::hash(format!("raw-preview-v6:{path}:{signature:?}:{options:?}:false").as_bytes());
+        let legacy_signature = (123, 456);
+        let legacy = blake3::hash(
+            format!("raw-preview-v6:{path}:{legacy_signature:?}:{options:?}:false").as_bytes(),
+        );
         let current = raw_preview_disk_path(path, signature, options, false).unwrap();
         assert_ne!(current.file_name().unwrap().to_str().unwrap(), legacy.to_hex().as_str());
         assert_ne!(current, raw_preview_disk_path(path, signature, options, true).unwrap());
@@ -2160,7 +2365,17 @@ mod offline_preview_tests {
                 let (preview, source) = if t_utils::get_file_type(path) == Some(3) {
                     let (data, source, _) = get_raw_preview_with_source(path, options, false).unwrap();
                     (data, source)
-                } else { (tauri::async_runtime::block_on(get_file_image_bytes_cached(path, options)).unwrap(), "tiff") };
+                } else {
+                    (
+                        tauri::async_runtime::block_on(get_file_image_bytes_cached(
+                            path,
+                            options,
+                            &PreviewRequest::new(None, false),
+                        ))
+                        .unwrap(),
+                        "tiff",
+                    )
+                };
                 let a = image::load_from_memory(&thumb).unwrap();
                 let b = image::load_from_memory(&preview).unwrap();
                 println!("  {mode:?}: thumb={}x{} preview={}x{} source={source}",a.width(),a.height(),b.width(),b.height());
@@ -2243,13 +2458,57 @@ mod offline_preview_tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn preview_supersession_drops_queued_work_and_isolates_prefetch() {
+        let viewer = uuid::Uuid::new_v4().to_string();
+        let previous = PreviewRequest::new(Some(&viewer), false);
+        let prefetch = PreviewRequest::new(Some(&viewer), true);
+        assert!(previous.check_active().is_ok());
+        let permits = Arc::new(Semaphore::new(0));
+        let queued = previous.permit(&permits);
+        tokio::pin!(queued);
+        tokio::select! {
+            biased;
+            _ = &mut queued => panic!("decode should be queued"),
+            _ = std::future::ready(()) => (),
+        }
+        let current = PreviewRequest::new(Some(&viewer), false);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), queued)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(current.check_active().is_ok());
+        assert!(prefetch.check_active().is_ok());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), prefetch.permit(&permits))
+                .await
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn decoded_preview_cache_key_includes_source_signature() {
+        let path = "fixture.heic";
+        let original = decoded_preview_disk_path(path, (123, 456)).unwrap();
+        assert_ne!(
+            decoded_preview_disk_path(path, (123, 457)).unwrap(),
+            original
+        );
+        assert_ne!(
+            decoded_preview_disk_path(path, (124, 456)).unwrap(),
+            original
+        );
+        assert_ne!(
+            decoded_preview_disk_path("other.heic", (123, 456)).unwrap(),
+            original
+        );
+    }
+
     #[test]
     fn raw_disk_cache_preserves_source_and_rejects_incomplete_data() {
-        let viewer = uuid::Uuid::new_v4().to_string();
-        let previous = register_raw_preview_request(&viewer);
-        let current = register_raw_preview_request(&viewer);
-        assert!(!previous.load(std::sync::atomic::Ordering::Relaxed));
-        assert!(current.load(std::sync::atomic::Ordering::Relaxed));
         let dir = std::env::temp_dir().join(format!("lap-raw-cache-{}", uuid::Uuid::new_v4()));
         let path = dir.join("preview");
         let pixels = image::RgbImage::new(2, 2);

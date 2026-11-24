@@ -815,10 +815,11 @@ export function getAssetSrc(filePath: string, fileVersion = 0): string {
 // get country name from country code
 export function getCountryName(cc: string, lang: string = 'en'): string {
   if (!cc) return '';
+  const normalized = cc.toUpperCase() === 'PS' ? 'IL' : cc;
   try {
     const regionNames = new Intl.DisplayNames([lang], { type: 'region' });
-    return regionNames.of(cc) || cc;
+    return regionNames.of(normalized) || normalized;
   } catch (e) {
-    return cc;
+    return normalized;
   }
 }

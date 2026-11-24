@@ -4,7 +4,6 @@
     "library": "Biblioteca",
     "album": "Álbumes",
     "search": "Buscar",
-    "rating": "Valoraciones",
     "tag": "Etiquetas",
     "calendar": "Calendario",
     "location": "Ubicaciones",
@@ -164,8 +163,6 @@
         "media_subtype": "Subtipo de medio",
         "extension": "Extensión",
         "favorite": "Favorito",
-        "rating": "Valoración",
-        "culling": "Selección",
         "date": "Fecha",
         "date_taken": "Fecha de captura",
         "date_created": "Fecha de creación",
@@ -334,28 +331,10 @@
     "resume": "Reanudar"
   },
   "favorite": {
+    "mixed": "Variado",
     "title": "Favoritos",
     "files": "Archivos favoritos",
     "folders": "Carpetas favoritas"
-  },
-  "rating": {
-    "mixed": "Variado",
-    "title": "Valoraciones",
-    "unrated": "Sin valorar",
-    "all_rated": "Todo valorado",
-    "rated": "Valorado",
-    "clear_rating": "Quitar valoración",
-    "five_stars": "5 estrellas",
-    "four_stars": "4 estrellas",
-    "three_stars": "3 estrellas",
-    "two_stars": "2 estrellas",
-    "one_star": "1 estrella"
-  },
-  "culling": {
-    "title": "Selección",
-    "picks": "Seleccionadas",
-    "rejected": "Rechazadas",
-    "unreviewed": "Sin revisar"
   },
   "assign_tags": {
     "recent_link": "Recientes",
@@ -473,13 +452,12 @@
         "Carpeta",
         "Día",
         "Mes",
-        "Calificación",
+        "",
         "Ubicación",
         "Cámara",
         "Objetivo",
         "Año",
-        "Tipo de archivo",
-        "Selección"
+        "Tipo de archivo"
       ],
       "sort_type_options": [
         "Fecha de toma",
@@ -1482,7 +1460,7 @@
       "title": "Metadatos",
       "section_import": "Importar metadatos",
       "import": "Desde EXIF, IPTC y XMP",
-      "import_hint": "Importar favoritos, valoraciones, marcas de selección, etiquetas y descripciones durante los escaneos y actualizaciones, conservando las ediciones locales."
+      "import_hint": "Importar favoritos, etiquetas y descripciones durante los escaneos y actualizaciones, conservando las ediciones locales."
     },
     "browse": {
       "section_album": "Carpeta de álbum",
@@ -1707,20 +1685,6 @@
         "print": "Imprimir",
         "toggle_favorite": "Añadir / Quitar de favoritos",
         "toggle_favorite_and_next": "Añadir / Quitar de favoritos → Siguiente",
-        "set_clear_rating": "Valoración",
-        "set_clear_rating_and_next": "Valoración → Siguiente",
-        "mark_pick": "Selección · Seleccionadas",
-        "mark_pick_and_next": "Selección · Seleccionadas → Siguiente",
-        "mark_rejected": "Selección · Rechazadas",
-        "mark_rejected_and_next": "Selección · Rechazadas → Siguiente",
-        "mark_unreviewed": "Selección · Sin revisar",
-        "mark_unreviewed_and_next": "Selección · Sin revisar → Siguiente",
-        "clear_rating": "Quitar valoración",
-        "rate_one": "Calificar 1 estrella",
-        "rate_two": "Calificar 2 estrellas",
-        "rate_three": "Calificar 3 estrellas",
-        "rate_four": "Calificar 4 estrellas",
-        "rate_five": "Calificar 5 estrellas",
         "edit_tags": "Etiquetas",
         "edit_collections": "Colecciones",
         "edit_comment": "Descripción",
@@ -1800,7 +1764,7 @@
       "change_location": "Cambiar",
       "change_location_confirm": "Elegir carpeta",
       "prechange_title": "Cambiar ubicación de datos",
-      "prechange_message": "Los datos de la biblioteca guardan metadatos, favoritos, calificaciones, etiquetas y otra información de organización. Se recomienda la ubicación predeterminada del sistema. Si la cambias, usa una carpeta local para obtener mejor rendimiento.",
+      "prechange_message": "Los datos de la biblioteca guardan metadatos, favoritos, etiquetas y otra información de organización. Se recomienda la ubicación predeterminada del sistema. Si la cambias, usa una carpeta local para obtener mejor rendimiento.",
       "restore_default_location": "Restablecer ubicación predeterminada",
       "restore_default_confirm_title": "Restablecer ubicación predeterminada",
       "restore_default_confirm_message": "Todos los archivos de datos de la biblioteca volverán a la ubicación predeterminada.",

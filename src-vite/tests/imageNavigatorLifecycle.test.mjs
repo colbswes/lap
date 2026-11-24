@@ -7,13 +7,13 @@ import ts from 'typescript';
 // without requiring a Tauri window or asynchronous image decoding.
 const source = fs.readFileSync(new URL('../src/components/Image.vue', import.meta.url), 'utf8');
 const ready = source.slice(source.indexOf('const onImageReady ='), source.indexOf('const rotateView ='));
-const viewport = source.slice(source.indexOf('function getViewportState()'), source.indexOf('// Expose methods'));
+const viewport = source.slice(source.indexOf('function getViewportState()'), source.indexOf('// Image resource lifecycle'));
 const script = ts.transpile(ready + viewport, { target: ts.ScriptTarget.ES2022 });
 
 function setup(deferred = false) {
   const ref = value => ({ value });
   const state = {
-    activeImage: ref(0),
+    activeImage: ref(0), currentLoadingId: ref(1),
     imageSize: ref([{ width: 4000, height: 2000 }, { width: 2000, height: 1000 }]),
     imageSizeRotated: ref([{ width: 4000, height: 2000 }, { width: 2000, height: 1000 }]),
     imageRotate: ref([0, 0]),
@@ -31,7 +31,7 @@ function setup(deferred = false) {
     requestAnimationFrame: () => {}, setTimeout: () => {}, clearTimeout: () => {},
     watch: (_, callback) => { resize = callback; return () => {}; },
   };
-  const readyImage = new Function(...Object.keys(dependencies), script + '; return onImageReady;')(...Object.values(dependencies));
+  const readyImage = new Function(...Object.keys(dependencies), 'let hasManualZoom = false; ' + script + '; return onImageReady;')(...Object.values(dependencies));
   return { state, events, readyImage, resize() {
     state.containerSize.value = { width: 1000, height: 800 };
     resize(state.containerSize.value);
@@ -45,7 +45,7 @@ test('non-fit buffer switch publishes the new file viewport after silent restore
   assert.equal(t.events.length, 1);
   assert.equal(t.events[0].event, 'viewport-change');
   assert.deepEqual(t.events[0].value, {
-    fileId: 42, scale: 1, normX: 0.4, normY: 0.6, sourceWidth: 2000, sourceHeight: 1000,
+    fileId: 42, scale: 1, isZoomFit: false, normX: 0.4, normY: 0.6, sourceWidth: 2000, sourceHeight: 1000,
     viewportWidth: 1000, viewportHeight: 800, rotate: 0, pannable: true,
   });
 });

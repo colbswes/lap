@@ -79,6 +79,7 @@
           :class="isDrawingFace ? 'cursor-crosshair' : (isGrabbing ? (isDraggingImage ? 'cursor-grabbing' : 'cursor-grab') : (hoveredFaceId !== null ? 'cursor-pointer' : 'cursor-default'))"
           :style="getImageStyle(index)"
           draggable="false"
+          @load="updateThumbnailLayout(index, $event)"
           @mousedown="handleImageMouseDown"
           @mousemove="handleImageMouseMove"
           @mouseup="handleImageMouseUp"
@@ -146,7 +147,7 @@
               transformOrigin: 'top center',
             }"
           >
-            <template v-if="face.person_id">{{ face.person_name || t('menu.person.unnamed') }}</template>
+            <template v-if="face.person_id">{{ face.person_name || t(face.kind === 'pet' ? 'menu.person.unnamed_pet' : 'menu.person.unnamed') }}</template>
             <template v-else>{{ t(face.kind === 'pet' ? 'menu.person.unknown_pet' : 'menu.person.unknown_face') }} · <span class="text-white/70">{{ t('menu.person.click_to_name') }}</span></template>
           </div>
         </div>
@@ -252,7 +253,11 @@
 
 <script setup lang="ts">
 import { loadNativeJxl, loadBrowserImage } from '@/common/nativeJxl';
-import { ref, shallowRef, triggerRef, watch, onMounted, onBeforeUnmount, computed, nextTick } from 'vue';
+import {
+  cacheDecodedImage, clearDecodedImages, getDecodedImage, queueImagePrefetch,
+  releaseImageSlot, releaseRawUrl, retainImageSlot, type LoadedImage, type PrefetchFile,
+} from '@/common/viewerImages';
+import { ref, shallowRef, triggerRef, watch, onMounted, onBeforeUnmount, computed, nextTick, type PropType } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, emit as tauriEmit } from '@tauri-apps/api/event';
 import { useUIStore } from '@/stores/uiStore';
@@ -262,14 +267,13 @@ import {
   getAssetSrc,
   getPreviewUrl,
   shouldUseBackendPreview,
-  getFileExtension,
   getThumbUrl,
   getThumbnailDataUrl,
   getThumbnailDataUrlInflight,
   isWin,
   setThumbnailDataUrlInflight,
 } from '@/common/utils';
-import { getFacesForFile, getFaceThumbnail, getFileThumbById, getFfmpegBackedImageExtensions, scanFileFaces } from '@/common/api';
+import { getFacesForFile, getFaceThumbnail, getFileThumbById, scanFileFaces } from '@/common/api';
 import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
 import AssignFaceDialog, { type AssignFaceTarget } from '@/components/AssignFaceDialog.vue';
 import { BBox, RawFace, Face } from '@/common/types';
@@ -294,6 +298,8 @@ const props = defineProps({
     type: String,
     required: false,
   },
+  prefetchFiles: { type: Array as PropType<PrefetchFile[]>, default: () => [] },
+  loadDelay: { type: Number, default: 0 },
   nextFilePath: {
     type: String,
     default: '',
@@ -548,8 +554,6 @@ watch([isLoading, currentLoadingId], ([loading]) => {
 });
 
 const activeImageEl = ref<HTMLImageElement | null>(null);
-type LoadedImage = { src: string; naturalWidth: number; naturalHeight: number; raw?: { source: RawPreviewSource; unavailable: boolean; pair: string | null } };
-const preloadCache = new Map<string, Promise<LoadedImage>>();
 const rawOverride = ref<RawDisplayOptions | null>(null);
 const rawSource = ref<RawPreviewSource>('');
 const rawRequestPending = ref(false);
@@ -616,8 +620,8 @@ function selectRawPair() {
   rawOverride.value = { ...requestedRawOptions.value, preferPair: true };
 }
 let rawAbortController: AbortController | null = null;
-const rawObjectUrls = new Set<string>();
-watch([() => props.filePath, () => props.fileVersion], () => {
+let imageLoadController: AbortController | undefined;
+watch([() => props.filePath, () => props.fileVersion, () => props.rawPairPath], () => {
   rawEmbeddedUnavailable.value = false;
   failedRawModes.value.clear();
 }, { flush: 'sync' });
@@ -639,30 +643,34 @@ async function loadRawImage(filePath: string, fullSize = false): Promise<LoadedI
   rawAbortController?.abort();
   const controller = new AbortController();
   rawAbortController = controller;
-  const url = new URL(getPreviewUrl(props.fileId, filePath, false, props.fileVersion));
-  const options = requestedRawOptions.value;
+  return fetchRawImage(
+    { id: props.fileId, file_path: filePath, file_type: 3, modified_at: props.fileVersion },
+    requestedRawOptions.value, controller.signal, false, fullSize,
+  );
+}
+
+async function fetchRawImage(file: PrefetchFile, options: RawDisplayOptions, signal: AbortSignal, prefetch: boolean, fullSize = false): Promise<LoadedImage> {
+  const url = previewRequestUrl(file, prefetch);
   appendRawDisplayParams(url.searchParams, options);
-  url.searchParams.set('rawViewerId', rawViewerId);
+  if (!prefetch) url.searchParams.set('rawViewerId', rawViewerId);
   if (fullSize) url.searchParams.set('rawFullSize', 'true');
-  const response = await fetch(url.toString(), { signal: controller.signal });
+  const response = await fetch(url.toString(), { signal });
   if (!response.ok) throw new Error('RAW preview failed');
   const blob = await response.blob();
-  if (controller.signal.aborted) throw new Error('RAW preview cancelled');
+  if (signal.aborted) throw new Error('RAW preview cancelled');
   const src = URL.createObjectURL(blob);
-  rawObjectUrls.add(src);
   try {
     const img = new Image();
     img.src = src;
     await img.decode();
-    if (controller.signal.aborted) throw new Error('RAW preview cancelled');
-    return { src, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, raw: {
+    if (signal.aborted) throw new Error('RAW preview cancelled');
+    return { src, decoded: img, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, raw: {
       source: (response.headers.get('X-Raw-Source') || '') as RawPreviewSource,
       unavailable: response.headers.get('X-Raw-Embedded-Unavailable') === 'true',
       pair: options.preferPair ? response.headers.get('X-Raw-Pair') || '' : null,
     } };
   } catch (error) {
     URL.revokeObjectURL(src);
-    rawObjectUrls.delete(src);
     throw error;
   }
 }
@@ -692,22 +700,19 @@ watch(() => [scale.value[activeImage.value], rawSource.value, rawRequestPending.
     try {
       const loaded = await loadRawImage(filePath, true);
       if (loadingId !== currentLoadingId.value || selectionVersion !== rawSelectionVersion.value) {
-        URL.revokeObjectURL(loaded.src);
-        rawObjectUrls.delete(loaded.src);
+        releaseRawUrl(loaded.src);
         return;
       }
       // A full-size render that fell back to the embedded preview must not
       // replace the sharper rendered preview or flip the user's selected mode.
       if (loaded.raw && loaded.raw.source !== 'rendered' && loaded.raw.source !== 'brightened') {
-        URL.revokeObjectURL(loaded.src);
-        rawObjectUrls.delete(loaded.src);
+        releaseRawUrl(loaded.src);
         rawUpgradeFailed = true;
         rawUpgradeRetryAt = Date.now() + 5000;
         return;
       }
       const slot = activeImage.value;
       const size = imageSize.value[slot];
-      const previous = imageSrc.value[slot];
       const rotate = imageRotate.value[slot];
       // setImageSlot recomputes imageSizeRotated from props.rotate; preserve the
       // viewer's in-place rotation (and its rotated box) across the swap.
@@ -720,7 +725,6 @@ watch(() => [scale.value[activeImage.value], rawSource.value, rawRequestPending.
         rawEmbeddedUnavailable.value ||= loaded.raw.unavailable;
         rawFullSize.value = loaded.raw.source === 'rendered' || loaded.raw.source === 'brightened';
       }
-      if (rawObjectUrls.delete(previous)) URL.revokeObjectURL(previous);
     } catch {
       if (loadingId === currentLoadingId.value && selectionVersion === rawSelectionVersion.value) {
         rawUpgradeFailed = true;
@@ -735,29 +739,11 @@ watch(() => [scale.value[activeImage.value], rawSource.value, rawRequestPending.
 
 let resizeObserver: ResizeObserver | null = null;
 const suppressViewportEmit = ref(false);
-let warmImageTimeout: NodeJS.Timeout | null = null;
-let warmImageIdleId: number | null = null;
 const resolvedThumbnailSrc = ref('');
 const resolvedThumbnailFileId = ref(0);
-const displayThumbnailSrc = computed(() => props.thumbnailSrc || resolvedThumbnailSrc.value);
-
-// Keep this list in Rust, alongside the preview implementation, so adding a
-// new FFmpeg-backed format cannot reintroduce the placeholder/preview race.
-let ffmpegBackedPreviewExtensions: Promise<Set<string>> | null = null;
-
-function getFfmpegBackedPreviewExtensions() {
-  if (!ffmpegBackedPreviewExtensions) {
-    ffmpegBackedPreviewExtensions = getFfmpegBackedImageExtensions()
-      .then((extensions: string[]) => new Set(extensions.map((extension) => extension.toLowerCase())));
-  }
-  return ffmpegBackedPreviewExtensions;
-}
-
-function waitForNextPaint() {
-  return new Promise<void>((resolve) => {
-    requestAnimationFrame(() => resolve());
-  });
-}
+const displayThumbnailSrc = computed(() => props.thumbnailSrc
+  || (resolvedThumbnailFileId.value === props.fileId && resolvedThumbnailSrc.value)
+  || getThumbUrl(props.fileId, false, config.settings.thumbnailSize, props.fileVersion));
 
 // inline loading for formats that require backend preview decoding
 const showInlineLoading = computed(() =>
@@ -846,157 +832,83 @@ const adjustmentStyle = computed(() => (src: string) => {
   return '';
 });
 
-function loadImageResource(filePath?: string) {
-  if (!filePath) {
-    return Promise.reject(new Error('Missing file path'));
-  }
-
-  if (Number(props.fileType) === 3) return loadRawImage(filePath);
-
-  const cached = preloadCache.get(filePath);
-  if (cached) {
-    return cached;
-  }
-
-  if (/\.jxl$/i.test(filePath)) {
-    const previewUrl = getPreviewUrl(props.fileId, filePath, false, props.fileVersion);
-    const loadPromise = loadNativeJxl(
-      getAssetSrc(filePath, props.fileVersion),
-      () => previewUrl,
-      loadBrowserImage,
-    ).catch(error => { preloadCache.delete(filePath); throw error; });
-    preloadCache.set(filePath, loadPromise);
-    return loadPromise;
-  }
-
-  const loadPromise = new Promise<{ src: string; naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
-    let src = '';
-
-    const img = new Image();
-    img.decoding = 'async';
-
-    img.onload = () => {
-      img.decode()
-        .then(() => {
-          resolve({
-            src,
-            naturalWidth: img.naturalWidth,
-            naturalHeight: img.naturalHeight,
-          });
-        })
-        .catch(() => {
-          resolve({
-            src,
-            naturalWidth: img.naturalWidth,
-            naturalHeight: img.naturalHeight,
-          });
-        });
-    };
-
-    img.onerror = () => {
-      preloadCache.delete(filePath);
-      reject(new Error(`Error loading image: ${filePath}`));
-    };
-
-    if (shouldUseBackendPreview(filePath, Number(props.fileType || 0))) {
-      src = getPreviewUrl(
-        props.fileId,
-        filePath,
-        false,
-        props.fileVersion,
-      );
-      if (!src) {
-        preloadCache.delete(filePath);
-        reject(new Error(`Failed to resolve RAW/TIFF preview source: ${filePath}`));
-        return;
-      }
-      img.src = src;
-      return;
-    }
-
-    try {
-      src = getAssetSrc(filePath, props.fileVersion);
-    } catch (error) {
-      preloadCache.delete(filePath);
-      reject(error);
-      return;
-    }
-
-    if (!src) {
-      preloadCache.delete(filePath);
-      reject(new Error('Failed to resolve asset source'));
-      return;
-    }
-
-    img.src = src;
-  });
-
-  preloadCache.set(filePath, loadPromise);
-  return loadPromise;
+function previewRequestUrl(file: PrefetchFile, prefetch: boolean) {
+  const url = new URL(getPreviewUrl(file.id, file.file_path, false, file.modified_at));
+  if (prefetch) url.searchParams.set('prefetch', 'true');
+  else if (file.file_type !== 3) url.searchParams.set('viewerId', rawViewerId);
+  return url;
 }
 
-let warmImageRequest = 0;
-function warmImage(filePath?: string) {
-  if (!filePath || filePath === props.filePath || shouldUseBackendPreview(filePath, Number(props.fileType || 0))) {
-    return;
-  }
-
-  if (warmImageTimeout) {
-    clearTimeout(warmImageTimeout);
-    warmImageTimeout = null;
-  }
-  if (warmImageIdleId !== null && typeof window !== 'undefined' && 'cancelIdleCallback' in window) {
-    window.cancelIdleCallback(warmImageIdleId);
-    warmImageIdleId = null;
-  }
-
-  const request = ++warmImageRequest;
-  warmImageTimeout = setTimeout(() => {
-    warmImageTimeout = null;
-    if (props.nextFilePath !== filePath || filePath === props.filePath) return;
-
-    const runWarmup = () => {
-      warmImageIdleId = null;
-      if (props.nextFilePath !== filePath || filePath === props.filePath) return;
-
-      if (request !== warmImageRequest || props.nextFilePath !== filePath || filePath === props.filePath) return;
-      void loadImageResource(filePath).catch(() => {
-        // Ignore preload failures and let the main load path surface errors.
-      });
-    };
-
-    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-      warmImageIdleId = window.requestIdleCallback(runWarmup, { timeout: 300 });
-      return;
-    }
-
-    queueMicrotask(runWarmup);
-  }, 150);
+function decodedImageKey(file: PrefetchFile, options: RawDisplayOptions) {
+  const path = file.file_path;
+  const backendPreview = shouldUseBackendPreview(path, file.file_type);
+  const pairPath = file.live_photo_video_path || '';
+  return JSON.stringify([
+    libConfig._libraryId, path, file.modified_at || 0, uiStore.getFileVersion(path), file.file_type,
+    backendPreview ? file.id : null,
+    file.file_type === 3 ? [
+      options.mode, options.autoBright, options.preferPair, pairPath, uiStore.getFileVersion(pairPath),
+    ] : null,
+  ]);
 }
+
+function currentImageFile(filePath: string): PrefetchFile {
+  return {
+    id: props.fileId, file_path: filePath, file_type: Number(props.fileType),
+    modified_at: props.fileVersion, live_photo_video_path: props.rawPairPath,
+  };
+}
+
+function loadImageResource(file: PrefetchFile, options: RawDisplayOptions, signal: AbortSignal, prefetch = false) {
+  const path = file.file_path;
+  if (file.file_type === 3) {
+    return prefetch ? fetchRawImage(file, options, signal, true) : loadRawImage(path);
+  }
+  const preview = () => previewRequestUrl(file, prefetch).toString();
+  if (/\.jxl$/i.test(path)) {
+    return loadNativeJxl(getAssetSrc(path, file.modified_at), preview, src => loadBrowserImage(src, signal), signal);
+  }
+  const src = shouldUseBackendPreview(path, file.file_type) ? preview() : getAssetSrc(path, file.modified_at);
+  return loadBrowserImage(src, signal, false);
+}
+
+function isEmbeddedRawFallback(loaded: LoadedImage, options: RawDisplayOptions) {
+  return loaded.raw?.source === 'embedded' && !options.preferPair && options.mode !== 'embedded';
+}
+
+let prefetchTimer: ReturnType<typeof setTimeout> | undefined;
+let prefetchController: AbortController | undefined;
 
 function cancelWarmImageScheduling() {
-  warmImageRequest++;
-  if (warmImageTimeout) {
-    clearTimeout(warmImageTimeout);
-    warmImageTimeout = null;
-  }
-  if (warmImageIdleId !== null && typeof window !== 'undefined' && 'cancelIdleCallback' in window) {
-    window.cancelIdleCallback(warmImageIdleId);
-    warmImageIdleId = null;
-  }
+  clearTimeout(prefetchTimer);
+  prefetchController?.abort();
 }
 
-function clearStalePreloadEntries(activeFilePath?: string, nextFilePath?: string) {
-  const keep = new Set<string>();
-  if (activeFilePath) keep.add(activeFilePath);
-  if (nextFilePath) keep.add(nextFilePath);
-
-  for (const key of preloadCache.keys()) {
-    if (!keep.has(key)) {
-      preloadCache.delete(key);
+function warmImages() {
+  cancelWarmImageScheduling();
+  const files = props.prefetchFiles.length ? props.prefetchFiles : props.nextFilePath
+    ? [{ file_path: props.nextFilePath, file_type: 1 }]
+    : [];
+  if (!props.filePath || !files.length) return;
+  const { signal } = prefetchController = new AbortController();
+  const options = getRawDisplayOptions();
+  const libraryId = libConfig._libraryId;
+  prefetchTimer = setTimeout(async () => {
+    for (const file of files) {
+      if (signal.aborted || libraryId !== libConfig._libraryId) return;
+      if (file.file_path === props.filePath || ![1, 3].includes(file.file_type)) continue;
+      await queueImagePrefetch(signal, async () => {
+        const key = decodedImageKey(file, options);
+        if (getDecodedImage(key)) return;
+        const loaded = await loadImageResource(file, options, signal, true);
+        if (signal.aborted || key !== decodedImageKey(file, options) || isEmbeddedRawFallback(loaded, options)) {
+          if (loaded.raw) releaseRawUrl(loaded.src);
+          return;
+        }
+        cacheDecodedImage(key, file.file_path, loaded);
+      });
     }
-  }
-
+  }, 40);
 }
 
 function loadPlaceholderResource(src?: string) {
@@ -1045,7 +957,12 @@ function setImageSlot(
   layoutHeight: number = naturalHeight,
 ) {
   imageNaturalSize.value[slotIndex] = { width: naturalWidth, height: naturalHeight };
-  imageSrc.value[slotIndex] = src;
+  const previousSrc = imageSrc.value[slotIndex];
+  if (previousSrc !== src) {
+    retainImageSlot(src);
+    imageSrc.value[slotIndex] = src;
+    if (previousSrc.startsWith('blob:')) void nextTick(() => releaseImageSlot(previousSrc));
+  }
   imageFilePath.value[slotIndex] = filePath;
   imageRotate.value[slotIndex] = props.rotate;
   imageSize.value[slotIndex] = {
@@ -1118,9 +1035,11 @@ onBeforeUnmount(() => {
   document.documentElement.removeEventListener('mouseleave', trackImageDragOut);
   document.removeEventListener('mouseup', handleImageMouseUp, true);
   rawAbortController?.abort();
-  for (const url of rawObjectUrls) URL.revokeObjectURL(url);
+  imageLoadController?.abort();
+  currentLoadingId.value++;
+  const displayed = [...imageSrc.value];
+  void nextTick(() => displayed.forEach(releaseImageSlot));
   if (rawUpgradeTimer) clearTimeout(rawUpgradeTimer);
-  rawObjectUrls.clear();
   cancelAnimationFrame(resizeTransitionFrame);
   if (debounceTimeout) clearTimeout(debounceTimeout);
   if (rawLoadingTimer) clearTimeout(rawLoadingTimer);
@@ -1148,7 +1067,7 @@ onBeforeUnmount(() => {
 
 function handleGlobalPinchWheel(event: WheelEvent) {
   if (!event.ctrlKey) return;
-  if (!container.value) return;
+  if (!props.filePath || !container.value) return;
   const rect = (container.value as HTMLElement).getBoundingClientRect();
   if (
     event.clientX < rect.left || event.clientX > rect.right ||
@@ -1303,371 +1222,6 @@ const updatePosition = () => {
   }
 };
 
-// Preloaded next images must not retain a different RAW display policy.
-watch(rawDisplayKey, () => preloadCache.clear(), { flush: 'sync' });
-
-async function showOfflinePreview(filePath: string, loadingId: number) {
-  if (loadingId !== currentLoadingId.value) return;
-  if (loadingTimeout) { clearTimeout(loadingTimeout); loadingTimeout = null; }
-  isLoading.value = false;
-  rawRequestPending.value = false;
-  if (imageFilePath.value[activeImage.value] === filePath && imageSrc.value[activeImage.value]) {
-    offlinePreview.value = true;
-    const size = imageNaturalSize.value[activeImage.value];
-    maxScale.value = Math.max(scale.value[activeImage.value], Math.min(1, size.width / (imageSize.value[activeImage.value].width || 1)));
-    return;
-  }
-  let loaded: LoadedImage | null = null;
-  try {
-    const cached = await preloadCache.get(filePath);
-    if (cached) loaded = await loadPlaceholderResource(cached.src);
-  } catch { /* Try thumbnail next. */ }
-  if (!loaded && props.fileId) {
-    const preview = getPreviewUrl(props.fileId, filePath, false, props.fileVersion);
-    try { loaded = await loadPlaceholderResource(`${preview}${preview.includes('?') ? '&' : '?'}cachedOnly=true`); } catch { /* Try thumbnail next. */ }
-  }
-  if (!loaded) {
-    try { loaded = await loadPlaceholderResource(await getEffectiveThumbnailSrc()); } catch { /* No local preview. */ }
-  }
-  if (loadingId !== currentLoadingId.value) return;
-  offlinePreview.value = true;
-  if (!loaded) {
-    imageSrc.value = ['', ''];
-    imageFilePath.value = ['', ''];
-    loadError.value = true;
-    return;
-  }
-  const slot = activeImage.value ^ 1;
-  setImageSlot(slot, filePath, loaded.src, loaded.naturalWidth, loaded.naturalHeight);
-  scale.value[slot] = 1;
-  position.value[slot] = { x: 0, y: 0 };
-  isZoomFit.value = true;
-  maxScale.value = 1;
-  onImageReady(slot);
-}
-
-// Watch file changes and the selected RAW preview source.
-watch([
-  () => props.filePath,
-  () => props.fileVersion,
-  () => Number(props.fileType || 0) === 3 ? `${rawDisplayKey()}:${rawSelectionVersion.value}:${JSON.stringify(rawOverride.value)}` : '',
-  () => props.originalUnavailable,
-], async ([newFilePath, newFileVersion, newRawThumbnailSource], [oldFilePath, oldFileVersion, oldRawThumbnailSource, oldUnavailable]) => {
-  // Cancel previous loading
-  if (rawUpgradeTimer) { clearTimeout(rawUpgradeTimer); rawUpgradeTimer = null; }
-  rawAbortController?.abort();
-  currentLoadingId.value++;
-  const loadingId = currentLoadingId.value;
-  cancelWarmImageScheduling();
-  if (
-    newFilePath
-    && newFilePath === oldFilePath
-    && (newFileVersion !== oldFileVersion || newRawThumbnailSource !== oldRawThumbnailSource || (oldUnavailable && !props.originalUnavailable))
-  ) {
-    preloadCache.delete(newFilePath);
-  }
-  clearStalePreloadEntries(newFilePath || '', props.nextFilePath || '');
-
-  if (loadingTimeout) {
-    clearTimeout(loadingTimeout);
-    loadingTimeout = null;
-  }
-
-  loadError.value = false; // Reset error state
-  cloudLoadError.value = false;
-  offlinePreview.value = false;
-  maxScale.value = 8 / (window.devicePixelRatio || 1);
-
-  if (!newFilePath) {
-    isLoading.value = false;
-    return;
-  }
-
-  if (props.originalUnavailable) {
-    await showOfflinePreview(String(newFilePath), loadingId);
-    return;
-  }
-  if (Number(props.fileType) === 3) isLoading.value = true;
-
-  // Set timeout to show loading overlay if loading takes too long
-  loadingTimeout = setTimeout(() => {
-    isLoading.value = true;
-  }, 500);
-
-  const usesBackendPreview = shouldUseBackendPreview(newFilePath, Number(props.fileType || 0));
-  const ffmpegExtensionsPromise = getFfmpegBackedPreviewExtensions();
-  const isRawPreview = Number(props.fileType || 0) === 3;
-  const requested = requestedRawOptions.value;
-  const attemptedMode: RawMode | null = isRawPreview && !requested.preferPair
-    ? requested.mode === 'embedded' ? 'embedded' : requested.autoBright ? 'brightened' : 'rendered'
-    : null;
-
-  try {
-    const usesRealtimePreview = (await ffmpegExtensionsPromise).has(getFileExtension(newFilePath).toLowerCase());
-    if (loadingId !== currentLoadingId.value) return;
-    const cloudOnly = await isCloudOnlyFile(newFilePath);
-    if (loadingId !== currentLoadingId.value) return;
-    if (cloudOnly) {
-      clearTimeout(loadingTimeout);
-      loadingTimeout = null;
-      isLoading.value = false;
-      rawRequestPending.value = false;
-      cloudLoadError.value = true;
-      loadError.value = true;
-      return;
-    }
-    const imageResultPromise = loadImageResource(newFilePath)
-      .then((loaded) => ({ kind: 'image' as const, loaded }));
-    const keepCurrentRaw = isRawPreview && newFilePath === oldFilePath && !!rawSource.value;
-    const thumbnailResultPromise = !keepCurrentRaw && (!isRawPreview || requestedRawOptions.value.mode === 'embedded' || requestedRawOptions.value.preferPair) && !usesRealtimePreview && (usesBackendPreview || props.showThumbnailPlaceholder)
-      ? getEffectiveThumbnailSrc()
-        .then(async (src) => {
-          if (!src) return { kind: 'thumbnail' as const, placeholder: null };
-          try {
-            return { kind: 'thumbnail' as const, placeholder: await loadPlaceholderResource(src) };
-          } catch {
-            return { kind: 'thumbnail' as const, placeholder: null };
-          }
-        })
-        .catch(() => ({ kind: 'thumbnail' as const, placeholder: null }))
-      : Promise.resolve({ kind: 'thumbnail' as const, placeholder: null });
-    const firstResult = await Promise.race([imageResultPromise, thumbnailResultPromise]);
-    let hasPreviewPlaceholder = false;
-
-    if (firstResult.kind === 'thumbnail' && firstResult.placeholder) {
-      if (loadingId !== currentLoadingId.value) return;
-      const nextImageIndex = activeImage.value ^ 1;
-      const layout = getCompatibleLayout(
-        firstResult.placeholder.naturalWidth,
-        firstResult.placeholder.naturalHeight,
-        props.imageWidth,
-        props.imageHeight,
-      );
-      setImageSlot(
-        nextImageIndex,
-        newFilePath,
-        firstResult.placeholder.src,
-        firstResult.placeholder.naturalWidth,
-        firstResult.placeholder.naturalHeight,
-        layout.width,
-        layout.height,
-      );
-      onImageReady(nextImageIndex, true);
-      hasPreviewPlaceholder = true;
-      await nextTick();
-      await waitForNextPaint();
-    }
-
-    const loaded = firstResult.kind === 'image'
-      ? firstResult.loaded
-      : (await imageResultPromise).loaded;
-    if (loadingId !== currentLoadingId.value) {
-      if (loaded.raw) { URL.revokeObjectURL(loaded.src); rawObjectUrls.delete(loaded.src); }
-      return;
-    }
-
-    if (loadingTimeout) {
-      clearTimeout(loadingTimeout);
-      loadingTimeout = null;
-    }
-    isLoading.value = false;
-
-    nextTick(() => {
-      if (loadingId !== currentLoadingId.value) {
-        if (loaded.raw) { URL.revokeObjectURL(loaded.src); rawObjectUrls.delete(loaded.src); }
-        return;
-      }
-      if (loaded.raw) {
-        rawRequestPending.value = false;
-        rawSource.value = loaded.raw.source;
-        // RAW-only requests do not query companions; retain the known pair.
-        if (loaded.raw.pair !== null) resolvedRawPairLabel.value = loaded.raw.pair;
-        rawEmbeddedUnavailable.value ||= loaded.raw.unavailable;
-        if (attemptedMode && loaded.raw.source !== attemptedMode && loaded.raw.source !== 'image') {
-          failedRawModes.value.add(attemptedMode);
-        }
-      }
-      isZoomFit.value = props.isZoomFit;
-      const activeIndex = activeImage.value;
-      const showingPlaceholderForCurrentFile = hasPreviewPlaceholder
-        && imageFilePath.value[activeIndex] === newFilePath;
-
-      if (showingPlaceholderForCurrentFile) {
-        noTransition.value = true;
-        // Reuse the placeholder layout so replacing source pixels does not
-        // change the displayed geometry. In particular, RAW thumbnails use
-        // the complete image dimensions, preserving their scale on replacement.
-        const placeholderLayout = getCompatibleLayout(
-          loaded.naturalWidth,
-          loaded.naturalHeight,
-          imageSize.value[activeIndex].width,
-          imageSize.value[activeIndex].height,
-        );
-        setImageSlot(
-          activeIndex,
-          newFilePath,
-          loaded.src,
-          loaded.naturalWidth,
-          loaded.naturalHeight,
-          placeholderLayout.width,
-          placeholderLayout.height,
-        );
-
-        if (containerSize.value.width > 0 && isZoomFit.value) {
-          // Orientation/aspect differences can change the placeholder layout.
-          updateZoomFit(true);
-        } else if (isRawPreview && containerSize.value.width > 0) {
-          clampPosition(true);
-        }
-
-        setTimeout(() => {
-          noTransition.value = false;
-        }, 150);
-      } else {
-        const nextImageIndex = activeIndex ^ 1;
-        scale.value[nextImageIndex] = 1;
-        position.value[nextImageIndex] = { x: 0, y: 0 };
-        const layout = isRawPreview
-          ? getCompatibleLayout(loaded.naturalWidth, loaded.naturalHeight, props.imageWidth, props.imageHeight)
-          : { width: loaded.naturalWidth, height: loaded.naturalHeight };
-        setImageSlot(
-          nextImageIndex,
-          newFilePath,
-          loaded.src,
-          loaded.naturalWidth,
-          loaded.naturalHeight,
-          layout.width,
-          layout.height,
-        );
-        onImageReady(nextImageIndex);
-      }
-      for (const url of rawObjectUrls) {
-        if (!imageSrc.value.includes(url)) { URL.revokeObjectURL(url); rawObjectUrls.delete(url); }
-      }
-      warmImage(props.nextFilePath);
-    });
-  } catch (e) {
-    console.error("Error getting asset source:", e);
-    if (loadingId !== currentLoadingId.value) return;
-    if (loadingTimeout) {
-      clearTimeout(loadingTimeout);
-      loadingTimeout = null;
-    }
-    isLoading.value = false;
-    rawRequestPending.value = false;
-    const cloudOnly = await isCloudOnlyFile(newFilePath);
-    if (loadingId !== currentLoadingId.value) return;
-    if (cloudOnly) {
-      cloudLoadError.value = true;
-      loadError.value = true;
-      return;
-    }
-    try {
-      if (!await checkFileAccessibility(String(newFilePath))) {
-        if (loadingId !== currentLoadingId.value) return;
-        setFileAccessibility(String(newFilePath), false);
-        await showOfflinePreview(String(newFilePath), loadingId);
-        return;
-      }
-    } catch { /* Keep the decoding error if access could not be checked. */ }
-    if (loadingId !== currentLoadingId.value) return;
-    // Keep the displayed RAW preview and allow retrying a failed request.
-    if (!isRawPreview || newFilePath !== oldFilePath || !rawSource.value) {
-      loadError.value = true;
-    }
-  }
-}, { immediate: true });
-
-watch(() => props.fileId, () => {
-  resolvedThumbnailSrc.value = '';
-  resolvedThumbnailFileId.value = 0;
-});
-
-// watch thumbnail source changes to update placeholder if original is still loading
-watch(displayThumbnailSrc, async (newThumbSrc) => {
-  if (props.originalUnavailable || offlinePreview.value) return;
-  if (Number(props.fileType) === 3) return;
-  if (!newThumbSrc) return;
-  const currentFilePath = props.filePath;
-  if (!currentFilePath) return;
-  const loadingId = currentLoadingId.value;
-
-  const usesBackendPreview = shouldUseBackendPreview(currentFilePath, Number(props.fileType || 0));
-  const ffmpegExtensions = await getFfmpegBackedPreviewExtensions();
-  if (loadingId !== currentLoadingId.value || props.filePath !== currentFilePath) return;
-  if (!usesBackendPreview || ffmpegExtensions.has(getFileExtension(currentFilePath).toLowerCase())) return;
-
-  // Only update if we are still waiting for the full image OR if we are currently showing a stale placeholder
-  const activeIndex = activeImage.value;
-  
-  // We check if it's the full original image by checking the src. 
-  // For backend preview, the full image src is from getPreviewUrl.
-  const fullImageSrc = getPreviewUrl(
-    props.fileId,
-    currentFilePath,
-    false,
-    props.fileVersion,
-  );
-  const originalJxlSrc = /\.jxl$/i.test(currentFilePath)
-    ? getAssetSrc(currentFilePath, props.fileVersion) : '';
-  const hasFullImage = () => imageSrc.value.includes(fullImageSrc)
-    || (!!originalJxlSrc && imageSrc.value.includes(originalJxlSrc));
-  
-  if (hasFullImage()) return;
-
-  try {
-    const placeholder = await loadPlaceholderResource(newThumbSrc);
-    // Never downgrade a full image that finished loading while the placeholder was decoding.
-    if (loadingId !== currentLoadingId.value || props.filePath !== currentFilePath || offlinePreview.value || hasFullImage()) return;
-    const layout = getCompatibleLayout(
-      placeholder.naturalWidth,
-      placeholder.naturalHeight,
-      props.imageWidth,
-      props.imageHeight,
-    );
-    // Check if we haven't switched files since we started loading the placeholder
-    if (props.filePath === currentFilePath) {
-      // If we are currently showing a placeholder for this file, just update it in place
-      if (imageFilePath.value[activeIndex] === currentFilePath) {
-        noTransition.value = true;
-        setImageSlot(
-          activeIndex,
-          currentFilePath,
-          placeholder.src,
-          placeholder.naturalWidth,
-          placeholder.naturalHeight,
-          layout.width,
-          layout.height,
-        );
-        // Important: update layout after size change
-        if (isZoomFit.value) {
-          updateZoomFit(true);
-        } else {
-          clampPosition(true);
-        }
-        setTimeout(() => { noTransition.value = false; }, 150);
-      } else {
-        // We might be in a slot transition, but showing the other slot's placeholder?
-        // Let's just update the target slot if it's assigned to this file
-        const targetIndex = imageFilePath.value[0] === currentFilePath ? 0 : (imageFilePath.value[1] === currentFilePath ? 1 : -1);
-        if (targetIndex !== -1) {
-          setImageSlot(
-            targetIndex,
-            currentFilePath,
-            placeholder.src,
-            placeholder.naturalWidth,
-            placeholder.naturalHeight,
-            layout.width,
-            layout.height,
-          );
-        }
-      }
-    }
-  } catch {
-    // ignore
-  }
-});
-
 // Declared before the immediate watcher below, which resets them on load.
 const hoveredFaceId = ref<number | null>(null);
 const assignFace = ref<AssignFaceTarget | null>(null);
@@ -1693,19 +1247,6 @@ async function loadFaces(fileId: number | undefined, enabled: boolean) {
   }).filter((f: Face | null) => f);
 }
 
-watch(() => [props.fileId, config.settings.face.enabled], ([newFileId, faceEnabled]) => {
-  cancelDrawFace();
-  pendingManualBox.value = null;
-  void loadFaces(newFileId as number | undefined, Boolean(faceEnabled));
-}, { immediate: true });
-
-watch(showAllFaces, (visible) => {
-  if (!visible) {
-    cancelDrawFace();
-    pendingManualBox.value = null;
-  }
-});
-
 // --- Manual face/pet box drawing & single-photo scan ---
 interface NormBox {
   x: number;
@@ -1721,6 +1262,27 @@ const isScanningFaces = ref(false);
 
 let drawFaceOrigin: { clientX: number; clientY: number; nx: number; ny: number } | null = null;
 let unlistenPersonsChanged: (() => void) | null = null;
+
+// Must come after the drawing state above: the immediate run calls cancelDrawFace()
+// during setup, and touching those bindings earlier throws (TDZ), so the first
+// photo opened would never load its faces.
+watch(() => [props.fileId, config.settings.face.enabled] as const, ([newFileId, faceEnabled], _previous, onCleanup) => {
+  cancelDrawFace();
+  pendingManualBox.value = null;
+  facesRequestSeq++;
+  faces.value = [];
+  hoveredFaceId.value = null;
+  if (!newFileId || !faceEnabled) return;
+  const timer = setTimeout(() => void loadFaces(newFileId, faceEnabled), 150);
+  onCleanup(() => clearTimeout(timer));
+}, { immediate: true });
+
+watch(showAllFaces, (visible) => {
+  if (!visible) {
+    cancelDrawFace();
+    pendingManualBox.value = null;
+  }
+});
 
 function clientToImageNorm(clientX: number, clientY: number): { nx: number; ny: number } | null {
   const root = container.value as HTMLElement | null;
@@ -1796,8 +1358,8 @@ function onDrawFaceWindowMove(event: MouseEvent) {
 function onDrawFaceWindowUp(event: MouseEvent) {
   const origin = drawFaceOrigin;
   drawFaceOrigin = null;
-  window.removeEventListener('mousemove', onDrawFaceWindowMove);
-  window.removeEventListener('mouseup', onDrawFaceWindowUp);
+  window.removeEventListener('mousemove', onDrawFaceWindowMove, true);
+  window.removeEventListener('mouseup', onDrawFaceWindowUp, true);
 
   const box = draftFaceBox.value;
   draftFaceBox.value = null;
@@ -1815,7 +1377,7 @@ function onDrawFaceWindowUp(event: MouseEvent) {
     person_id: null,
     person_name: null,
     thumbnail,
-    kind: 'person',
+    kind: config.main.sidebarIndex === SIDEBAR.PERSON && config.settings.personKind === 'pet' ? 'pet' : 'person',
     manual: true,
     norm_bbox: box,
   };
@@ -1841,8 +1403,8 @@ function startDrawFace() {
 function cancelDrawFace() {
   drawFaceOrigin = null;
   draftFaceBox.value = null;
-  window.removeEventListener('mousemove', onDrawFaceWindowMove);
-  window.removeEventListener('mouseup', onDrawFaceWindowUp);
+  window.removeEventListener('mousemove', onDrawFaceWindowMove, true);
+  window.removeEventListener('mouseup', onDrawFaceWindowUp, true);
   if (isDrawingFace.value) {
     isDrawingFace.value = false;
     window.removeEventListener('keydown', onDrawFaceKeyDown, true);
@@ -1959,8 +1521,10 @@ function onFaceMouseDown(event: MouseEvent) {
     if (!pt) return;
     drawFaceOrigin = { clientX: event.clientX, clientY: event.clientY, nx: pt.nx, ny: pt.ny };
     draftFaceBox.value = { x: pt.nx, y: pt.ny, width: 0, height: 0 };
-    window.addEventListener('mousemove', onDrawFaceWindowMove);
-    window.addEventListener('mouseup', onDrawFaceWindowUp);
+    // Capture phase: onFaceMouseUp stops mouseup propagation at the container while
+    // drawing, so a bubble-phase window listener would never see the release.
+    window.addEventListener('mousemove', onDrawFaceWindowMove, true);
+    window.addEventListener('mouseup', onDrawFaceWindowUp, true);
     return;
   }
   const faceId = event.button === 0 ? faceAt(event.clientX, event.clientY) : null;
@@ -2016,6 +1580,7 @@ function onFaceChanged(payload: { personId: number | null; message: string }) {
 }
 
 onBeforeUnmount(() => {
+  facesRequestSeq++;
   cancelPendingFaceClick();
   cancelDrawFace();
   unlistenPersonsChanged?.();
@@ -2158,6 +1723,7 @@ const onImageReady = (nextIndex: number, preserveLoading: boolean = false) => {
   // A viewport belongs to the image content, not to its pixel dimensions.
   // Capture it before switching buffers so the next image can convert the
   // normalized viewport to its own rendered position.
+  const loadingId = currentLoadingId.value;
   const previousViewport = getViewportState();
   const previousImageIndex = activeImage.value;
   const hasPreviousImage = imageSize.value[previousImageIndex].width > 0
@@ -2226,6 +1792,7 @@ const onImageReady = (nextIndex: number, preserveLoading: boolean = false) => {
     applyZoom();
   } else {
     const unwatch = watch(containerSize, (newSize) => {
+      if (loadingId !== currentLoadingId.value) { unwatch(); return; }
       if (newSize.width > 0) {
         applyZoom();
         unwatch();
@@ -2754,6 +2321,210 @@ function clampPosition(force: boolean = false) {
   }
 };
 
+// Image resource lifecycle
+let placeholderLoadId = -1;
+let readyLoadId = -1;
+function showThumbnail(src: string, filePath: string, loadingId: number) {
+  if (!src || loadingId !== placeholderLoadId) return;
+  const active = activeImage.value;
+  const sameFile = imageFilePath.value[active] === filePath;
+  const slot = sameFile ? active : active ^ 1;
+  const width = props.imageWidth || containerSize.value.width || 1;
+  const height = props.imageHeight || containerSize.value.height || 1;
+  isZoomFit.value = props.isZoomFit;
+  setImageSlot(slot, filePath, src, width, height);
+  if (!sameFile) onImageReady(slot, true);
+
+}
+
+function updateThumbnailLayout(slot: number, event: Event) {
+  if (placeholderLoadId !== currentLoadingId.value || slot !== activeImage.value) return;
+  const img = event.target as HTMLImageElement;
+  const { naturalWidth, naturalHeight } = img;
+  if (!naturalWidth || !naturalHeight || img.currentSrc !== img.src || img.getAttribute('src') !== imageSrc.value[slot]) return;
+  const layout = getCompatibleLayout(naturalWidth, naturalHeight, props.imageWidth, props.imageHeight);
+  setImageSlot(slot, imageFilePath.value[slot], imageSrc.value[slot], naturalWidth, naturalHeight, layout.width, layout.height);
+  if (isZoomFit.value && containerSize.value.width > 0) updateZoomFit(true);
+}
+
+async function showOfflinePreview(filePath: string, loadingId: number) {
+  if (loadingId !== currentLoadingId.value) return;
+  if (loadingTimeout) { clearTimeout(loadingTimeout); loadingTimeout = null; }
+  isLoading.value = false;
+  rawRequestPending.value = false;
+  if (imageFilePath.value[activeImage.value] === filePath && imageSrc.value[activeImage.value]) {
+    offlinePreview.value = true;
+    const size = imageNaturalSize.value[activeImage.value];
+    maxScale.value = Math.max(scale.value[activeImage.value], Math.min(1, size.width / (imageSize.value[activeImage.value].width || 1)));
+    return;
+  }
+  let loaded: LoadedImage | null | undefined = getDecodedImage(decodedImageKey(currentImageFile(filePath), requestedRawOptions.value));
+  if (!loaded && props.fileId) {
+    const preview = getPreviewUrl(props.fileId, filePath, false, props.fileVersion);
+    try { loaded = await loadPlaceholderResource(`${preview}${preview.includes('?') ? '&' : '?'}cachedOnly=true`); } catch { /* Try thumbnail next. */ }
+  }
+  if (!loaded && loadingId === currentLoadingId.value) {
+    try { loaded = await loadPlaceholderResource(await getEffectiveThumbnailSrc()); } catch { /* No local preview. */ }
+  }
+  if (loadingId !== currentLoadingId.value) return;
+  offlinePreview.value = true;
+  if (!loaded) {
+    setImageSlot(0, '', '', 0, 0);
+    setImageSlot(1, '', '', 0, 0);
+    imageFilePath.value = ['', ''];
+    loadError.value = true;
+    return;
+  }
+  const slot = activeImage.value ^ 1;
+  setImageSlot(slot, filePath, loaded.src, loaded.naturalWidth, loaded.naturalHeight);
+  scale.value[slot] = 1;
+  position.value[slot] = { x: 0, y: 0 };
+  isZoomFit.value = true;
+  maxScale.value = 1;
+  onImageReady(slot);
+}
+
+// Watch file changes and the selected RAW preview source.
+watch([
+  () => props.filePath,
+  () => props.fileId,
+  () => props.fileVersion,
+  () => props.rawPairPath ? [props.rawPairPath, uiStore.getFileVersion(props.rawPairPath)].join(':') : '',
+  () => props.filePath ? uiStore.getFileVersion(props.filePath) : 0,
+  () => libConfig._libraryId,
+  () => Number(props.fileType) === 3 ? `${rawDisplayKey()}:${rawSelectionVersion.value}:${JSON.stringify(rawOverride.value)}` : '',
+  () => props.originalUnavailable,
+], async ([filePath], [oldFilePath]) => {
+  if (rawUpgradeTimer) { clearTimeout(rawUpgradeTimer); rawUpgradeTimer = null; }
+  rawAbortController?.abort();
+  imageLoadController?.abort();
+  const { signal } = imageLoadController = new AbortController();
+  const loadingId = ++currentLoadingId.value;
+  placeholderLoadId = -1;
+  cancelWarmImageScheduling();
+  if (loadingTimeout) clearTimeout(loadingTimeout);
+  loadingTimeout = null;
+  isLoading.value = false;
+  loadError.value = false;
+  cloudLoadError.value = false;
+  offlinePreview.value = false;
+  maxScale.value = 8 / (window.devicePixelRatio || 1);
+  if (!filePath) return;
+
+  if (props.originalUnavailable) {
+    await showOfflinePreview(filePath, loadingId);
+    return;
+  }
+
+  const file = currentImageFile(filePath);
+  const isRawPreview = file.file_type === 3;
+  const requested = requestedRawOptions.value;
+  const key = decodedImageKey(file, requested);
+  const attemptedMode = isRawPreview && !requested.preferPair
+    ? requested.mode === 'embedded' ? 'embedded' : requested.autoBright ? 'brightened' : 'rendered'
+    : null;
+
+  try {
+    let loaded = getDecodedImage(key);
+    if (!loaded) {
+      const keepCurrentRaw = isRawPreview && filePath === oldFilePath && !!rawSource.value;
+      if (!keepCurrentRaw && (props.showThumbnailPlaceholder || shouldUseBackendPreview(filePath, file.file_type))) {
+        placeholderLoadId = loadingId;
+        showThumbnail(displayThumbnailSrc.value, filePath, loadingId);
+        if (isWin && !props.thumbnailSrc && !displayThumbnailSrc.value.startsWith('data:')) {
+          void getEffectiveThumbnailSrc().catch(() => {});
+        }
+      }
+      isLoading.value = isRawPreview;
+      loadingTimeout = setTimeout(() => { isLoading.value = true; }, 500);
+      if (filePath !== oldFilePath && props.loadDelay > 0) {
+        await new Promise<void>(resolve => {
+          const finish = () => {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', finish);
+            resolve();
+          };
+          const timer = setTimeout(finish, props.loadDelay);
+          signal.addEventListener('abort', finish, { once: true });
+        });
+        if (signal.aborted) return;
+      }
+      loaded = await loadImageResource(file, requested, signal);
+      if (signal.aborted) {
+        if (loaded.raw) releaseRawUrl(loaded.src);
+        return;
+      }
+      if (!isEmbeddedRawFallback(loaded, requested)) cacheDecodedImage(key, filePath, loaded);
+    }
+
+    const showingPlaceholder = placeholderLoadId === loadingId && imageFilePath.value[activeImage.value] === filePath;
+    placeholderLoadId = -1;
+    if (loadingTimeout) clearTimeout(loadingTimeout);
+    loadingTimeout = null;
+    isLoading.value = false;
+    if (loaded.raw) {
+      rawRequestPending.value = false;
+      rawSource.value = loaded.raw.source;
+      if (loaded.raw.pair !== null) resolvedRawPairLabel.value = loaded.raw.pair;
+      rawEmbeddedUnavailable.value ||= loaded.raw.unavailable;
+      if (attemptedMode && loaded.raw.source !== attemptedMode && loaded.raw.source !== 'image') {
+        failedRawModes.value.add(attemptedMode);
+      }
+    }
+
+    isZoomFit.value = props.isZoomFit;
+    const index = showingPlaceholder ? activeImage.value : activeImage.value ^ 1;
+    const preferred = showingPlaceholder ? imageSize.value[index] : { width: props.imageWidth, height: props.imageHeight };
+    const layout = showingPlaceholder || isRawPreview
+      ? getCompatibleLayout(loaded.naturalWidth, loaded.naturalHeight, preferred.width, preferred.height)
+      : { width: loaded.naturalWidth, height: loaded.naturalHeight };
+    if (!showingPlaceholder) {
+      scale.value[index] = 1;
+      position.value[index] = { x: 0, y: 0 };
+    }
+    setImageSlot(index, filePath, loaded.src, loaded.naturalWidth, loaded.naturalHeight, layout.width, layout.height);
+    if (!showingPlaceholder) onImageReady(index);
+    else if (containerSize.value.width > 0) {
+      if (isZoomFit.value) updateZoomFit(true);
+      else clampPosition(true);
+    }
+    readyLoadId = loadingId;
+    warmImages();
+  } catch (error) {
+    if (signal.aborted) return;
+    console.error('Error getting asset source:', error);
+    if (loadingTimeout) clearTimeout(loadingTimeout);
+    loadingTimeout = null;
+    isLoading.value = false;
+    rawRequestPending.value = false;
+    const cloudOnly = await isCloudOnlyFile(filePath);
+    if (signal.aborted) return;
+    if (cloudOnly) {
+      cloudLoadError.value = true;
+      loadError.value = true;
+      return;
+    }
+    try {
+      if (!await checkFileAccessibility(filePath)) {
+        if (signal.aborted) return;
+        setFileAccessibility(filePath, false);
+        await showOfflinePreview(filePath, loadingId);
+        return;
+      }
+    } catch { /* Keep the decoding error if access could not be checked. */ }
+    if (signal.aborted) return;
+    if (!isRawPreview || filePath !== oldFilePath || !rawSource.value) loadError.value = true;
+  }
+}, { immediate: true });
+
+watch(displayThumbnailSrc, src => {
+  if (props.filePath && !props.originalUnavailable) showThumbnail(src, props.filePath, currentLoadingId.value);
+});
+
+watch(() => [props.prefetchFiles, props.nextFilePath], () => {
+  if (readyLoadId === currentLoadingId.value) warmImages();
+});
+
 // Expose methods
 defineExpose({
   cycleRawPreview,
@@ -2769,13 +2540,7 @@ defineExpose({
   navigateImage,
   toggleZoomFit,
   getCurrentImageSrc: () => imageSrc.value[activeImage.value] || '',
-  clearPreloadCache: (filePath?: string) => {
-    if (filePath) {
-      preloadCache.delete(filePath);
-    } else {
-      preloadCache.clear();
-    }
-  },
+  clearPreloadCache: clearDecodedImages,
 });
 
 </script>

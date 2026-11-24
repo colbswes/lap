@@ -31,7 +31,34 @@
           </div>
         </Transition>
       </div>
+      <TButton
+        v-if="hiddenTagCount > 0"
+        :icon="IconUnhide"
+        buttonSize="small"
+        :tooltip="$t('tag.show_all')"
+        @click="showAllTags"
+      />
       <SortMenuButton v-model="config.settings.tagSort" kind="category" />
+    </div>
+    <div
+      v-if="libConfig.tag.multi && selectedTagObjects.length > 0"
+      class="mx-1 mb-1.5 px-1.5 py-1 rounded-box bg-primary/10 border border-primary/20 flex items-center justify-between gap-1 text-[11px]"
+    >
+      <button
+        type="button"
+        class="flex items-center gap-1 text-primary hover:underline cursor-pointer truncate"
+        @click="createSmartFromSelectedTags"
+      >
+        <IconFolderCog class="w-3.5 h-3.5 shrink-0" />
+        <span class="truncate">{{ $t("collection.create_smart_collection") }}</span>
+      </button>
+      <button
+        type="button"
+        class="text-base-content/65 hover:text-primary cursor-pointer shrink-0"
+        @click="saveSelectedTagsAsCollection"
+      >
+        {{ $t("collection.save_as_collection") }}
+      </button>
     </div>
     <div v-if="tags.length > 0" class="mx-1 mb-2 px-1 shrink-0">
       <div
@@ -88,7 +115,7 @@
             :class="[
               isTagSelected(tag.id) ? 'sidebar-item-selected' : 'sidebar-item-hover',
               {
-                'opacity-50': dragged === tag.id,
+                'opacity-50': dragged === tag.id || isTagHidden(tag.id),
                 'bg-primary/10 ring-1 ring-inset ring-primary/40':
                   dropTarget === tag.id,
               },
@@ -133,19 +160,35 @@
             <span v-else class="sidebar-item-label">{{
               search ? tag.path : tag.name
             }}</span>
-            <span v-if="Number(tag.count) > 0" class="sidebar-item-count">{{
-              Number(tag.count).toLocaleString()
-            }}</span>
-            <div
-              v-if="!editor"
-              class="ml-auto hidden group-hover:block"
-              @click.stop
-            >
-              <ContextMenu
-                :iconMenu="IconMore"
-                :menuItems="() => tagMenu(tag)"
-                :smallIcon="true"
-              />
+            <div class="ml-auto flex flex-row items-center text-base-content/30">
+              <span v-if="Number(tag.count) > 0" class="sidebar-item-count shrink-0">{{
+                Number(tag.count).toLocaleString()
+              }}</span>
+              <button
+                v-if="!editor && tag.id > 0"
+                type="button"
+                :title="isTagHidden(tag.id) ? $t('tag.show') : $t('tag.hide')"
+                :aria-label="isTagHidden(tag.id) ? $t('tag.show') : $t('tag.hide')"
+                :aria-pressed="isTagHidden(tag.id)"
+                :class="[
+                  'p-1 rounded-box text-base-content/45 hover:text-base-content hover:bg-base-100/40 cursor-pointer shrink-0 transition-colors',
+                  isTagHidden(tag.id) ? 'flex' : 'hidden group-hover:flex',
+                ]"
+                @click.stop="toggleTagHidden(tag)"
+              >
+                <component :is="isTagHidden(tag.id) ? IconHide : IconUnhide" class="w-4 h-4" />
+              </button>
+              <div
+                v-if="!editor"
+                class="hidden group-hover:block"
+                @click.stop
+              >
+                <ContextMenu
+                  :iconMenu="IconMore"
+                  :menuItems="() => tagMenu(tag)"
+                  :smallIcon="true"
+                />
+              </div>
             </div>
           </div>
         </li>
@@ -196,12 +239,19 @@ import { SIDEBAR } from "@/common/constants";
 import {
   getAllTags,
   getTagCounts,
+  getQueryFileIds,
   createTag,
   renameTag,
   deleteTag,
   moveTag,
   getTagSubtreeInfo,
 } from "@/common/api";
+import { isHiddenId } from "@/common/hiddenAlbums";
+import {
+  buildSmartDraftFromTags,
+  makeDefaultQueryParams,
+  saveFilesAsNewCollection,
+} from "@/common/collectionActions";
 import {
   tagRows,
   ancestorIds,
@@ -211,6 +261,9 @@ import {
 } from "@/common/tagTree";
 import {
   IconClose,
+  IconCollection,
+  IconFolderCog,
+  IconHide,
   IconMultiSelect,
   IconMore,
   IconSearch,
@@ -219,6 +272,7 @@ import {
   IconRight,
   IconRename,
   IconTrash,
+  IconUnhide,
 } from "@/common/icons";
 import ContextMenu from "./ContextMenu.vue";
 import TButton from "./TButton.vue";
@@ -399,7 +453,70 @@ async function saveEditor(value: string) {
     saving.value = false;
   }
 }
+const isTagHidden = (tagId: number) =>
+  isHiddenId(libConfig.hiddenTagIds, Number(tagId));
+
+const hiddenTagCount = computed(() =>
+  tags.value.filter((tag) => isTagHidden(tag.id)).length,
+);
+
+const selectedTagObjects = computed(() => {
+  const selected = new Set((libConfig.tag.selectedIds || []).map((id: any) => Number(id)));
+  return tags.value.filter((tag) => selected.has(Number(tag.id)));
+});
+
+async function toggleTagHidden(tag: LibraryTag) {
+  await libConfig.toggleTagHidden(Number(tag.id));
+  await emitEvent("library-total-refreshed", { source: "hidden-filters" });
+}
+
+async function showAllTags() {
+  await libConfig.showAllTags();
+  await emitEvent("library-total-refreshed", { source: "hidden-filters" });
+}
+
+function createSmartFromTag(tag: LibraryTag) {
+  void emitEvent("create-smart-album-from-draft", buildSmartDraftFromTags([tag], false));
+}
+
+function createSmartFromSelectedTags() {
+  if (!selectedTagObjects.value.length) return;
+  void emitEvent(
+    "create-smart-album-from-draft",
+    buildSmartDraftFromTags(selectedTagObjects.value, Boolean(libConfig.tag.matchAny)),
+  );
+}
+
+async function saveTagAsCollection(tag: LibraryTag) {
+  const fileIds = await getQueryFileIds(makeDefaultQueryParams({ tagId: Number(tag.id) }));
+  const created = await saveFilesAsNewCollection(tag.name, fileIds || []);
+  if (created) {
+    toast.success(t("collection.saved_as_collection_toast", {
+      name: created.collection.name,
+      count: created.addedCount.toLocaleString(),
+    }));
+  }
+}
+
+async function saveSelectedTagsAsCollection() {
+  if (!selectedTagObjects.value.length) return;
+  const ids = selectedTagObjects.value.map((tag) => Number(tag.id));
+  const matchAny = Boolean(libConfig.tag.matchAny);
+  const fileIds = await getQueryFileIds(
+    makeDefaultQueryParams({ tagFilter: { ids, any: matchAny } }),
+  );
+  const baseName = selectedTagObjects.value.map((tag) => tag.name).join(matchAny ? " / " : " + ");
+  const created = await saveFilesAsNewCollection(baseName, fileIds || []);
+  if (created) {
+    toast.success(t("collection.saved_as_collection_toast", {
+      name: created.collection.name,
+      count: created.addedCount.toLocaleString(),
+    }));
+  }
+}
+
 function tagMenu(tag: LibraryTag): any[] {
+  const hidden = isTagHidden(tag.id);
   return [
     {
       label: t("msgbox.new_tag.title"),
@@ -407,6 +524,22 @@ function tagMenu(tag: LibraryTag): any[] {
       action: () => clickAddTag(tag.id),
     },
     { label: t("menu.tag.rename"), icon: IconRename, action: () => edit(tag) },
+    {
+      label: hidden ? t("tag.show") : t("tag.hide"),
+      icon: hidden ? IconUnhide : IconHide,
+      action: () => { void toggleTagHidden(tag); },
+    },
+    { label: "-", action: null },
+    {
+      label: t("collection.create_smart_collection"),
+      icon: IconFolderCog,
+      action: () => createSmartFromTag(tag),
+    },
+    {
+      label: t("collection.save_as_collection"),
+      icon: IconCollection,
+      action: () => { void saveTagAsCollection(tag); },
+    },
     { label: "-", action: null },
     {
       label: t("tag.delete_tag"),
@@ -533,9 +666,18 @@ async function confirmDelete() {
   if (!deleteTarget.value || saving.value) return;
   saving.value = true;
   try {
+    const removedIds = subtreeIds(tags.value, deleteTarget.value.id);
     if (!(await deleteTag(deleteTarget.value.id)))
       throw new Error("delete failed");
+    const remainingHidden = (libConfig.hiddenTagIds || []).filter(
+      (id: number) => !removedIds.has(Number(id)),
+    );
+    const hadHiddenRemoved = remainingHidden.length !== (libConfig.hiddenTagIds || []).length;
     deleteTarget.value = null;
+    if (hadHiddenRemoved) {
+      await libConfig.applyHiddenFilters({ tagIds: remainingHidden });
+      await emitEvent("library-total-refreshed", { source: "hidden-filters" });
+    }
     await load();
     await notifyChanged();
   } catch {

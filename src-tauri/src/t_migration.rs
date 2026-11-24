@@ -118,9 +118,10 @@ fn get_migrations() -> Vec<Migration> {
                 CREATE INDEX IF NOT EXISTS idx_similarity_items_file ON similarity_group_items(file_id);
             ",
         },
+        // Culling was removed again by migration 27; the column is no longer added.
         Migration {
             version: 11,
-            description: "Add file culling status",
+            description: "Add file culling status (superseded by 27)",
             sql: "",
         },
         Migration {
@@ -211,6 +212,16 @@ fn get_migrations() -> Vec<Migration> {
             description: "Keep at most one face of a person per photo",
             sql: "",
         },
+        Migration {
+            version: 27,
+            description: "Remove star ratings and culling flags",
+            sql: "",
+        },
+        Migration {
+            version: 28,
+            description: "Re-geocode PS locations to IL",
+            sql: "",
+        },
     ]
 }
 
@@ -270,6 +281,142 @@ fn migrate_unique_album_files(conn: &Connection) -> Result<(), String> {
 
     tx.commit()
         .map_err(|e| format!("Migration 9 (deduplicate album files) failed committing transaction: {}", e))
+}
+
+/// Columns removed by migration 27, with their former single-column indexes.
+const REMOVED_AFILES_COLUMNS: [(&str, &str); 2] = [
+    ("rating", "idx_afiles_rating"),
+    ("culling_flag", "idx_afiles_culling_flag"),
+];
+/// Former rating (1) and culling (2) catalog dirty bits; never reused.
+const REMOVED_DIRTY_BITS: i32 = 1 | 2;
+
+fn mentions_removed_column(sql: &str) -> bool {
+    sql.to_ascii_lowercase()
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|word| REMOVED_AFILES_COLUMNS.iter().any(|(column, _)| word == *column))
+}
+
+/// Drops `afiles.rating` / `afiles.culling_flag` and everything that references them.
+/// Each step is guarded, so an interrupted run can simply be repeated.
+fn drop_rating_and_culling(conn: &Connection) -> Result<(), String> {
+    let fail = |e: rusqlite::Error| format!("Migration 27 failed: {e}");
+    let tx = conn.unchecked_transaction().map_err(fail)?;
+    // DROP COLUMN refuses columns that any index, trigger or view still uses.
+    // Lap's own triggers (local-edit tracking, legacy auto-writeback) did.
+    let dependents: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL
+                AND ((type = 'index' AND tbl_name = 'afiles') OR type IN ('trigger', 'view'))")
+            .map_err(fail)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .map_err(fail)?;
+        let mut dependents = Vec::new();
+        for row in rows {
+            let (kind, name, sql) = row.map_err(fail)?;
+            let known = REMOVED_AFILES_COLUMNS.iter().any(|(_, index)| *index == name);
+            if known || mentions_removed_column(&sql) {
+                dependents.push((kind, name));
+            }
+        }
+        dependents
+    };
+    for (kind, name) in dependents {
+        let kind = match kind.as_str() {
+            "index" => "INDEX",
+            "trigger" => "TRIGGER",
+            _ => "VIEW",
+        };
+        tx.execute_batch(&format!("DROP {kind} IF EXISTS \"{}\";", name.replace('"', "\"\"")))
+            .map_err(fail)?;
+    }
+    for (column, index) in REMOVED_AFILES_COLUMNS {
+        tx.execute_batch(&format!("DROP INDEX IF EXISTS {index};")).map_err(fail)?;
+        if table_has_column(&tx, "afiles", column)? {
+            tx.execute_batch(&format!("ALTER TABLE afiles DROP COLUMN {column};"))
+                .map_err(fail)?;
+        }
+    }
+    if table_has_column(&tx, "axmp_imports", "dirty")? {
+        tx.execute(
+            "UPDATE axmp_imports SET dirty = dirty & ~?1 WHERE dirty & ?1 != 0",
+            [REMOVED_DIRTY_BITS],
+        )
+        .map_err(fail)?;
+    }
+    tx.pragma_update(None, "user_version", 27).map_err(fail)?;
+    tx.commit().map_err(fail)
+}
+
+/// Re-geocode existing `PS` / `West Bank` / `Gaza Strip` rows using the updated `IL` dataset.
+fn normalize_ps_locations(conn: &Connection) -> Result<(), String> {
+    let fail = |e: rusqlite::Error| format!("Migration 28 failed: {e}");
+    let tx = conn.unchecked_transaction().map_err(fail)?;
+    let has_geo_cols = table_has_column(&tx, "afiles", "geo_cc")?
+        && table_has_column(&tx, "afiles", "geo_admin1")?
+        && table_has_column(&tx, "afiles", "geo_admin2")?
+        && table_has_column(&tx, "afiles", "geo_name")?;
+    if has_geo_cols {
+        let has_gps = table_has_column(&tx, "afiles", "gps_latitude")?
+            && table_has_column(&tx, "afiles", "gps_longitude")?;
+        let rows: Vec<(i64, Option<f64>, Option<f64>, Option<String>, Option<String>)> = {
+            let sql = if has_gps {
+                "SELECT id, gps_latitude, gps_longitude, geo_name, geo_admin1
+                 FROM afiles
+                 WHERE UPPER(COALESCE(geo_cc, '')) = 'PS'
+                    OR geo_admin1 IN ('West Bank', 'Gaza Strip')"
+            } else {
+                "SELECT id, NULL, NULL, geo_name, geo_admin1
+                 FROM afiles
+                 WHERE UPPER(COALESCE(geo_cc, '')) = 'PS'
+                    OR geo_admin1 IN ('West Bank', 'Gaza Strip')"
+            };
+            let mut stmt = tx.prepare(sql).map_err(fail)?;
+            let iter = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .map_err(fail)?;
+            let mut out = Vec::new();
+            for item in iter {
+                out.push(item.map_err(fail)?);
+            }
+            out
+        };
+
+        for (id, lat, lon, geo_name, geo_admin1) in rows {
+            if let (Some(lat), Some(lon)) = (lat, lon) {
+                let (name, admin1, admin2, cc) = crate::t_sqlite::AFile::geocode(Some(lat), Some(lon));
+                tx.execute(
+                    "UPDATE afiles SET geo_name = ?1, geo_admin1 = ?2, geo_admin2 = ?3, geo_cc = ?4 WHERE id = ?5",
+                    rusqlite::params![name, admin1, admin2, cc, id],
+                )
+                .map_err(fail)?;
+            } else {
+                let new_admin1 = match geo_name.as_deref() {
+                    Some("Old City" | "East Jerusalem") => Some("Jerusalem".to_string()),
+                    _ => match geo_admin1.as_deref() {
+                        Some("West Bank" | "Gaza Strip") => Some(String::new()),
+                        _ => geo_admin1,
+                    },
+                };
+                tx.execute(
+                    "UPDATE afiles SET geo_admin1 = ?1, geo_cc = 'IL' WHERE id = ?2",
+                    rusqlite::params![new_admin1, id],
+                )
+                .map_err(fail)?;
+            }
+        }
+    }
+    tx.pragma_update(None, "user_version", 28).map_err(fail)?;
+    tx.commit().map_err(fail)
 }
 
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
@@ -463,18 +610,7 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
                         ON folder_scan_state(scanner, version);",
                 ).map_err(|e| format!("Migration 9 failed creating folder scan state: {}", e))?;
             } else if migration.version == 11 {
-                if !table_has_column(conn, "afiles", "culling_flag")? {
-                    conn.execute(
-                        "ALTER TABLE afiles ADD COLUMN culling_flag INTEGER NOT NULL DEFAULT 0",
-                        [],
-                    )
-                    .map_err(|e| format!("Migration 11 failed adding culling_flag: {}", e))?;
-                }
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_afiles_culling_flag ON afiles(culling_flag)",
-                    [],
-                )
-                .map_err(|e| format!("Migration 11 failed adding culling_flag index: {}", e))?;
+                // No-op: the culling column it used to add is dropped by migration 27.
             } else if migration.version == 12 {
                 if !table_has_column(conn, "afolders", "has_subfolders")? {
                     conn.execute("ALTER TABLE afolders ADD COLUMN has_subfolders INTEGER", [])
@@ -595,6 +731,10 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
                     let removed = crate::t_sqlite::Person::dedupe_all_per_photo(conn)?;
                     println!("Unassigned {} duplicate faces of the same person in one photo", removed);
                 }
+            } else if migration.version == 27 {
+                drop_rating_and_culling(conn)?;
+            } else if migration.version == 28 {
+                normalize_ps_locations(conn)?;
             } else if migration.version == 21 {
                 migrate_tag_tree(conn)?;
             } else if !migration.sql.trim().is_empty() {
@@ -698,11 +838,11 @@ mod album_filter_migration_tests {
         assert!(!has_exclusion_index(&conn));
         check_and_migrate(&conn).unwrap();
         assert!(has_exclusion_index(&conn));
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 26);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 28);
         // Running again changes nothing.
         check_and_migrate(&conn).unwrap();
         assert!(has_exclusion_index(&conn));
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 26);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 28);
     }
 
     #[test]
@@ -764,7 +904,7 @@ mod album_filter_migration_tests {
         // Simulate migration completing before the version was persisted.
         conn.execute_batch("PRAGMA user_version=17;").unwrap();
         check_and_migrate(&conn).unwrap();
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),26);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),28);
     }
 
     #[test]
@@ -779,7 +919,7 @@ mod album_filter_migration_tests {
         // Simulate migration completing before the version was persisted.
         conn.execute_batch("PRAGMA user_version=18;").unwrap();
         check_and_migrate(&conn).unwrap();
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 28);
     }
 
     #[test]
@@ -794,7 +934,7 @@ mod album_filter_migration_tests {
         conn.execute_batch("UPDATE afiles SET e_title='Existing'; PRAGMA user_version=21;").unwrap();
         check_and_migrate(&conn).unwrap();
         assert_eq!(conn.query_row("SELECT e_title FROM afiles", [], |r| r.get::<_,String>(0)).unwrap(), "Existing");
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_,i32>(0)).unwrap(), 26);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_,i32>(0)).unwrap(), 28);
     }
 }
 
@@ -942,6 +1082,177 @@ mod tag_tree_migration_tests {
                 .get::<_, i64>(0))
                 .unwrap(),
             2
+        );
+    }
+}
+
+#[cfg(test)]
+mod rating_culling_removal_tests {
+    use super::*;
+
+    /// A version-26 library: rating/culling columns, their indexes, and the
+    /// local-edit triggers older builds created on them.
+    fn v26_library() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE afiles(id INTEGER PRIMARY KEY, name TEXT, is_favorite INTEGER DEFAULT 0,
+                rating INTEGER NOT NULL DEFAULT 0, culling_flag INTEGER NOT NULL DEFAULT 0, comments TEXT);
+             CREATE INDEX idx_afiles_rating ON afiles(rating);
+             CREATE INDEX idx_afiles_culling_flag ON afiles(culling_flag);
+             CREATE INDEX idx_afiles_is_favorite ON afiles(is_favorite);
+             CREATE TABLE axmp_imports(file_id INTEGER PRIMARY KEY, fingerprint TEXT, dirty INTEGER NOT NULL DEFAULT 0);
+             CREATE TRIGGER axmp_local_rating AFTER UPDATE OF rating ON afiles WHEN NEW.rating IS NOT OLD.rating
+                BEGIN INSERT INTO axmp_imports(file_id, dirty) VALUES(NEW.id, 1)
+                ON CONFLICT(file_id) DO UPDATE SET dirty = dirty | 1; END;
+             CREATE TRIGGER axmp_local_culling_flag AFTER UPDATE OF culling_flag ON afiles WHEN NEW.culling_flag IS NOT OLD.culling_flag
+                BEGIN INSERT INTO axmp_imports(file_id, dirty) VALUES(NEW.id, 2)
+                ON CONFLICT(file_id) DO UPDATE SET dirty = dirty | 2; END;
+             CREATE TRIGGER axmp_local_is_favorite AFTER UPDATE OF is_favorite ON afiles WHEN NEW.is_favorite IS NOT OLD.is_favorite
+                BEGIN INSERT INTO axmp_imports(file_id, dirty) VALUES(NEW.id, 16)
+                ON CONFLICT(file_id) DO UPDATE SET dirty = dirty | 16; END;
+             INSERT INTO afiles VALUES(1, 'a.jpg', 1, 5, 1, 'kept'), (2, 'b.jpg', 0, 0, 2, NULL);
+             INSERT INTO axmp_imports VALUES(1, 'fp', 1 | 2 | 4 | 16 | 32), (2, NULL, 2 | 8);
+             PRAGMA user_version=26;",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn schema_names(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT name FROM sqlite_master WHERE type IN ('index','trigger') ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    fn assert_removed(conn: &Connection) {
+        assert!(!table_has_column(conn, "afiles", "rating").unwrap());
+        assert!(!table_has_column(conn, "afiles", "culling_flag").unwrap());
+        assert_eq!(
+            schema_names(conn),
+            ["axmp_local_is_favorite", "idx_afiles_is_favorite"]
+        );
+        let rows: Vec<(i64, String, i64, Option<String>)> = conn
+            .prepare("SELECT id, name, is_favorite, comments FROM afiles ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            rows,
+            [(1, "a.jpg".into(), 1, Some("kept".into())), (2, "b.jpg".into(), 0, None)]
+        );
+        // Bits 1 and 2 are cleared; the remaining dirty bits keep their meaning.
+        let dirty: Vec<i32> = conn
+            .prepare("SELECT dirty FROM axmp_imports ORDER BY file_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(dirty, [4 | 16 | 32, 8]);
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            28
+        );
+    }
+
+    #[test]
+    fn migration_27_drops_rating_and_culling_with_dependents() {
+        let conn = v26_library();
+        check_and_migrate(&conn).unwrap();
+        assert_removed(&conn);
+        // Favorite edit tracking still works after the table rewrite.
+        conn.execute("UPDATE afiles SET is_favorite=1 WHERE id=2", []).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT dirty FROM axmp_imports WHERE file_id=2", [], |r| r.get::<_, i32>(0))
+                .unwrap(),
+            8 | 16
+        );
+    }
+
+    #[test]
+    fn migration_27_is_restartable_after_partial_progress() {
+        let conn = v26_library();
+        // Simulate an interrupted earlier run that only got part of the way.
+        conn.execute_batch(
+            "DROP TRIGGER axmp_local_rating; DROP INDEX idx_afiles_rating; ALTER TABLE afiles DROP COLUMN rating;",
+        )
+        .unwrap();
+        check_and_migrate(&conn).unwrap();
+        assert_removed(&conn);
+        // Re-running with a stale version is harmless.
+        conn.execute_batch("PRAGMA user_version=26;").unwrap();
+        check_and_migrate(&conn).unwrap();
+        assert_removed(&conn);
+    }
+
+    #[test]
+    fn migration_27_tolerates_libraries_without_the_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE afiles(id INTEGER PRIMARY KEY, name TEXT); PRAGMA user_version=26;")
+            .unwrap();
+        check_and_migrate(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(),
+            28
+        );
+    }
+}
+
+#[cfg(test)]
+mod ps_location_migration_tests {
+    use super::*;
+
+    #[test]
+    fn migration_28_regeocodes_ps_locations_to_il() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE afiles(
+                id INTEGER PRIMARY KEY,
+                gps_latitude REAL,
+                gps_longitude REAL,
+                geo_name TEXT,
+                geo_admin1 TEXT,
+                geo_admin2 TEXT,
+                geo_cc TEXT
+             );
+             INSERT INTO afiles VALUES
+                (1, 31.77667, 35.23417, 'Old City', 'West Bank', '', 'PS'),
+                (2, 31.7216, 35.19243, 'Khallat Hamamah', '', '', 'PS'),
+                (3, NULL, NULL, 'Old City', 'West Bank', '', 'PS'),
+                (4, NULL, NULL, 'Bethlehem', 'West Bank', '', 'PS'),
+                (5, 32.0853, 34.7818, 'Tel Aviv', 'Tel Aviv', '', 'IL');
+             PRAGMA user_version = 27;",
+        )
+        .unwrap();
+
+        check_and_migrate(&conn).unwrap();
+
+        let rows: Vec<(i64, String, String, String)> = conn
+            .prepare("SELECT id, geo_name, geo_admin1, geo_cc FROM afiles ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (1, "Old City".into(), "Jerusalem".into(), "IL".into()),
+                (2, "Khallat Hamamah".into(), "".into(), "IL".into()),
+                (3, "Old City".into(), "Jerusalem".into(), "IL".into()),
+                (4, "Bethlehem".into(), "".into(), "IL".into()),
+                (5, "Tel Aviv".into(), "Tel Aviv".into(), "IL".into()),
+            ]
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            28
         );
     }
 }

@@ -4,7 +4,6 @@
     "library": "라이브러리",
     "album": "앨범",
     "search": "검색",
-    "rating": "평점",
     "tag": "태그",
     "calendar": "달력",
     "location": "위치",
@@ -164,8 +163,6 @@
         "media_subtype": "미디어 하위 유형",
         "extension": "확장자",
         "favorite": "즐겨찾기",
-        "rating": "평점",
-        "culling": "선별",
         "date": "날짜",
         "date_taken": "촬영일",
         "date_created": "생성일",
@@ -334,28 +331,10 @@
     "resume": "인덱싱 재개"
   },
   "favorite": {
+    "mixed": "혼합",
     "title": "즐겨찾기",
     "files": "즐겨찾는 파일",
     "folders": "즐겨찾는 폴더"
-  },
-  "rating": {
-    "mixed": "혼합",
-    "title": "평점",
-    "unrated": "별점 없음",
-    "all_rated": "모든 평점 있음",
-    "rated": "평점 있음",
-    "clear_rating": "별점 지우기",
-    "five_stars": "5점",
-    "four_stars": "4점",
-    "three_stars": "3점",
-    "two_stars": "2점",
-    "one_star": "1점"
-  },
-  "culling": {
-    "title": "선별",
-    "picks": "선택됨",
-    "rejected": "제외됨",
-    "unreviewed": "미선별"
   },
   "assign_tags": {
     "recent_link": "최근",
@@ -473,13 +452,12 @@
         "폴더",
         "일",
         "월",
-        "평점",
+        "",
         "위치",
         "카메라",
         "렌즈",
         "년",
-        "파일 유형",
-        "선별"
+        "파일 유형"
       ],
       "sort_type_options": [
         "촬영일",
@@ -1482,7 +1460,7 @@
       "title": "메타데이터",
       "section_import": "메타데이터 가져오기",
       "import": "EXIF, IPTC 및 XMP에서 가져오기",
-      "import_hint": "스캔 및 새로 고침 시 즐겨찾기, 별점, 선별 표시, 태그와 설명을 가져오며 로컬 편집은 유지합니다."
+      "import_hint": "스캔 및 새로 고침 시 즐겨찾기, 태그와 설명을 가져오며 로컬 편집은 유지합니다."
     },
     "browse": {
       "section_album": "앨범 폴더",
@@ -1707,20 +1685,6 @@
         "print": "인쇄",
         "toggle_favorite": "즐겨찾기 추가 / 해제",
         "toggle_favorite_and_next": "즐겨찾기 추가 / 해제 → 다음",
-        "set_clear_rating": "별점",
-        "set_clear_rating_and_next": "별점 → 다음",
-        "mark_pick": "선별 · 선택됨",
-        "mark_pick_and_next": "선별 · 선택됨 → 다음",
-        "mark_rejected": "선별 · 제외됨",
-        "mark_rejected_and_next": "선별 · 제외됨 → 다음",
-        "mark_unreviewed": "선별 · 미선별",
-        "mark_unreviewed_and_next": "선별 · 미선별 → 다음",
-        "clear_rating": "별점 지우기",
-        "rate_one": "별점 1개",
-        "rate_two": "별점 2개",
-        "rate_three": "별점 3개",
-        "rate_four": "별점 4개",
-        "rate_five": "별점 5개",
         "edit_tags": "태그",
         "edit_collections": "컬렉션",
         "edit_comment": "설명",
@@ -1800,7 +1764,7 @@
       "change_location": "변경",
       "change_location_confirm": "폴더 선택",
       "prechange_title": "데이터 위치 변경",
-      "prechange_message": "라이브러리 데이터에는 메타데이터, 즐겨찾기, 평점, 태그 및 기타 정리 정보가 포함됩니다. 기본 시스템 위치 사용을 권장합니다. 위치를 바꾸려면 성능을 위해 로컬 폴더를 사용하세요.",
+      "prechange_message": "라이브러리 데이터에는 메타데이터, 즐겨찾기, 태그 및 기타 정리 정보가 포함됩니다. 기본 시스템 위치 사용을 권장합니다. 위치를 바꾸려면 성능을 위해 로컬 폴더를 사용하세요.",
       "restore_default_location": "기본 위치로 재설정",
       "restore_default_confirm_title": "기본 위치로 재설정",
       "restore_default_confirm_message": "모든 라이브러리 데이터 파일이 기본 위치로 다시 이동됩니다.",

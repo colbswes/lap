@@ -10,7 +10,7 @@
  
 <script setup>
 import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
-import { emit } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useConfigStore } from '@/stores/configStore';
@@ -21,6 +21,7 @@ import { isMac, SCALE_VALUES } from '@/common/utils';
 import { useAppTheme } from '@/composables/useAppearance';
 import { matchesShortcut } from '@/common/shortcuts';
 import ToastContainer from '@/components/ToastContainer.vue';
+import { selectAllInFocusedTextField } from '@/common/textSelectAll';
 
 const libConfig = useLibraryStore();
 const isReady = ref(false);
@@ -30,6 +31,7 @@ const uiStore = useUIStore();
 const isMainWindow = getCurrentWebviewWindow().label === 'main';
 let unlistenMainCloseRequested = null;
 let isHandlingMainClose = false;
+let unlistenMenuSelectAll = null;
 
 // Auto-save library state when any config changes
 watch(() => libConfig.$state, () => {
@@ -60,6 +62,11 @@ watch(
 
 onMounted(async () => {
   const win = getCurrentWebviewWindow();
+  // The native Edit > Select All item owns Cmd-A on macOS, so text fields in
+  // every window need the menu event routed back to them.
+  unlistenMenuSelectAll = await listen('menu-select-all', () => {
+    if (document.hasFocus()) selectAllInFocusedTextField();
+  });
   if (win.label === 'main') {
     window.addEventListener('keydown', handleKeyDown, { capture: true });
     applyMainWindowScale(Number(config.settings.scale || 1));
@@ -148,6 +155,8 @@ onUnmounted(async () => {
   }
   unlistenMainCloseRequested?.();
   unlistenMainCloseRequested = null;
+  unlistenMenuSelectAll?.();
+  unlistenMenuSelectAll = null;
 });
 
 const handleKeyDown = (event) => {

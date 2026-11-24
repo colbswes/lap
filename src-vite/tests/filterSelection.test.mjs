@@ -26,9 +26,9 @@ const code = [
 function fixture(index = 1) {
   const config = reactive({ main: { sidebarIndex: 9 }, camera: { isCamera: false },
     calendar: { view: 0 }, search: { fileType: 0, sortType: 0 }, settings: { showSubfolderFiles: false } });
-  const libConfig = reactive({ _libraryId: 'test', activePane: 'content', collection: {}, library: {},
+  const libConfig = reactive({ _libraryId: 'test', activePane: 'content', collection: {}, event: {}, library: {},
     album: {}, smartAlbum: {}, person: {}, calendar: {}, tag: {}, location: {},
-    camera: { lensMake: 'Nikon', lensModel: 'Lens 1' }, search: { searchText: '' }, rating: {}, culling: {} });
+    camera: { lensMake: 'Nikon', lensModel: 'Lens 1' }, search: { searchText: '' } });
   const selectedItemIndex = ref(index);
   const fileList = ref([1, 2, 3, 4].map(id => ({ id })));
   const contentReady = ref(true);
@@ -126,7 +126,7 @@ test('changing query scope resets focus and multi-selection', async () => {
   for (const change of [f => { f.config.main.sidebarIndex++; },
     f => { f.libConfig.activePane = 'collection'; }, f => { f.libConfig._libraryId = 'other'; },
     f => { f.libConfig.camera.lensModel = 'Lens 2'; }, f => { f.libConfig.album.folderId = 2; },
-    f => { f.libConfig.tag.id = 2; }, f => { f.libConfig.rating.item = 4; },
+    f => { f.libConfig.tag.id = 2; }, f => { f.libConfig.library.item = 'favorites'; },
     f => { f.libConfig.search.searchText = 'new'; }]) {
     const f = fixture(3);
     f.seedMulti();
