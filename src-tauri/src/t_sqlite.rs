@@ -10489,7 +10489,7 @@ impl DerefMut for PooledConn {
 }
 
 fn setup_conn(conn: &Connection) -> Result<(), String> {
-    conn.busy_timeout(Duration::from_secs(5))
+    conn.busy_timeout(Duration::from_secs(15))
         .map_err(|e| format!("Failed to set SQLite busy timeout: {}", e))?;
     conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
         row.get::<_, String>(0)

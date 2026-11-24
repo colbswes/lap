@@ -2,7 +2,7 @@
 use super::keywords::push_keyword;
 use super::model::{XmpImportMode, XmpMetadata};
 use super::schema::CatalogField;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 #[cfg(test)]
 pub(super) fn apply_xmp_metadata_to_db(
@@ -34,7 +34,8 @@ pub(super) fn apply_with_source_text(
     capture: Option<super::model::SourceCapture>,
     tag_source: impl Fn(&str) -> &'static str,
 ) -> Result<bool, String> {
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
     let dirty: i32 = tx
         .query_row(
             "SELECT dirty FROM axmp_imports WHERE file_id = ?1",

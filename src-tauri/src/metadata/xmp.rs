@@ -1704,7 +1704,8 @@ fn write_one(conn: &Connection, file_id: i64, cache: &mut ExportIndex) -> Result
     {
         return Ok(());
     }
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
     for ((column, _, bit), value) in schema::EDITABLE_XMP_TEXT.iter().zip(&values) {
         if dirty & bit == 0 || value.is_none() {
             continue;

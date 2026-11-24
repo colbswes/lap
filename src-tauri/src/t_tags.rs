@@ -157,7 +157,8 @@ pub fn clear_deleted_subtree(conn: &Connection, id: i64) -> Result<(), String> {
 }
 
 pub fn move_on(conn: &Connection, id: i64, parent: Option<i64>) -> Result<(), String> {
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
     ensure_parent(&tx, parent)?;
     let (name, old_parent): (String, Option<i64>) = tx
         .query_row("SELECT name,parent_id FROM atags WHERE id=?1", [id], |r| {
