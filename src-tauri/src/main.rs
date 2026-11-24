@@ -16,6 +16,7 @@ use tauri_plugin_aptabase::EventTracker;
 mod metadata;
 mod t_ai;
 mod t_ai_png;
+mod t_apple_photos;
 mod t_batch_rename;
 mod t_cluster;
 mod t_cmds;
@@ -115,6 +116,7 @@ async fn main() {
         )))
         .manage(t_dedup::DedupState::default())
         .manage(t_similar::SimilarState::default())
+        .manage(std::sync::Arc::new(t_apple_photos::ApplePhotosExportState::default()))
         .setup(|_app| {
             t_startup::mark(&_app.handle(), "setup-started");
             t_video::init_ffmpeg_path(&_app.handle());
@@ -236,6 +238,10 @@ async fn main() {
             t_cmds::is_database_corrupted,
             t_cmds::get_library_info,
             t_cmds::save_library_state,
+            t_cmds::set_collection_scope,
+            t_cmds::check_apple_photos_export_ready,
+            t_cmds::run_apple_photos_export,
+            t_cmds::cancel_apple_photos_export,
             t_cmds::get_library_state,
             t_cmds::get_current_library_state,
             // album

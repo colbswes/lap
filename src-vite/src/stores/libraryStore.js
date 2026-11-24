@@ -2,10 +2,19 @@
  * Library Store - Per-library configuration
  */
 import { defineStore } from 'pinia';
-import { getCurrentLibraryState, saveLibraryState, getAppConfig } from '@/common/api';
+import { getCurrentLibraryState, saveLibraryState, setCollectionScope, getAppConfig } from '@/common/api';
 import { CULLING, LIB_ITEM } from '@/common/constants';
 import { setThumbLibraryId } from '@/common/utils';
 import { resetLibraryAccessibility } from '@/common/availability';
+import {
+  SCOPE_EVERYTHING,
+  createDefaultCollectionScopeState,
+  normalizeCollectionScopeState,
+  withActiveScope,
+  withScopeAlbums,
+  withToggledAlbumInScope,
+  pruneRemovedAlbumFromScopes,
+} from '@/common/collectionScopes';
 
 // The app-level deep watcher calls save() for every store mutation. Keep the
 // last actual payload per library so runtime-only count refreshes do not turn
@@ -44,6 +53,9 @@ export const useLibraryStore = defineStore('libraryStore', {
       subjectCounts: {},
       counts: createEmptyLibraryCounts(),
     },
+
+    collectionScope: createDefaultCollectionScopeState(),
+    collectionScopeVersion: 0,
 
     /** @type {{ id: number, folderId: number | null, folderPath: string, selected: boolean, activateTick: number, counts: Record<string, number> }} */
     album: {
@@ -175,6 +187,7 @@ export const useLibraryStore = defineStore('libraryStore', {
             }
           });
         }
+        this.collectionScope = normalizeCollectionScopeState(this.collectionScope);
         this.index.status = Number(this.index.status || 0);
         this.index.phase = this.index.phase || 'discovering';
         this.index.pausedAlbumIds = Array.isArray(this.index.pausedAlbumIds)
@@ -261,6 +274,7 @@ export const useLibraryStore = defineStore('libraryStore', {
           } = this.tag;
             const stateToSave = {
             library: libraryState,
+            collectionScope: normalizeCollectionScopeState(this.collectionScope),
             album: albumState,
             smartAlbum: this.smartAlbum,
             smartAlbums: this.smartAlbums,
@@ -299,6 +313,46 @@ export const useLibraryStore = defineStore('libraryStore', {
           console.error('Failed to save library state:', error);
         }
       }
+    },
+
+    async applyCollectionScope(nextScope) {
+      const normalized = normalizeCollectionScopeState(nextScope);
+      const previous = JSON.stringify(this.collectionScope);
+      this.collectionScope = normalized;
+      const libraryId = this._libraryId;
+      if (libraryId) {
+        const persisted = await setCollectionScope(libraryId, normalized);
+        if (persisted) {
+          this.collectionScope = normalizeCollectionScopeState(persisted);
+        }
+      }
+      if (JSON.stringify(this.collectionScope) !== previous) {
+        this.clearLazySidebarCounts();
+        this.collectionScopeVersion += 1;
+      }
+      return this.collectionScope;
+    },
+
+    async setActiveScope(scopeId) {
+      return await this.applyCollectionScope(withActiveScope(this.collectionScope, scopeId));
+    },
+
+    async setScopeAlbums(scopeId, albumIds) {
+      return await this.applyCollectionScope(withScopeAlbums(this.collectionScope, scopeId, albumIds));
+    },
+
+    async toggleAlbumInScope(scopeId, albumId) {
+      return await this.applyCollectionScope(withToggledAlbumInScope(this.collectionScope, scopeId, albumId));
+    },
+
+    async assignNewAlbumToActiveScope(albumId) {
+      const activeId = this.collectionScope?.activeId || SCOPE_EVERYTHING;
+      if (activeId === SCOPE_EVERYTHING) return this.collectionScope;
+      return await this.toggleAlbumInScope(activeId, albumId);
+    },
+
+    async removeAlbumFromScopes(albumId) {
+      return await this.applyCollectionScope(pruneRemovedAlbumFromScopes(this.collectionScope, albumId));
     },
   },
 });

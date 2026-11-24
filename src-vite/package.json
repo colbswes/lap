@@ -16,6 +16,7 @@
     "test:dedup": "node --test tests/dedupKeep.test.mjs tests/importPairing.test.mjs",
     "test:shortcuts": "node --test tests/shortcutsLayout.test.mjs",
     "test:tags": "node --test tests/tagTree.test.mjs",
+    "test:scopes": "node --test tests/collectionScopes.test.mjs",
     "test:searchable": "node --test tests/searchableOptions.test.mjs tests/searchableSelectState.test.mjs",
     "test:location": "node --test tests/locationBreadcrumb.test.mjs",
     "test:file-actions": "node --test tests/fileActions.test.mjs",

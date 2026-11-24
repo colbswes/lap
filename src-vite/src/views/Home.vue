@@ -105,6 +105,11 @@
             :class="leftPanelVisualExpanded ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 pointer-events-none'"
             :style="{ width: `calc(${Number(config.leftPanel.width || 260) / 16}rem - 4rem)` }"
           >
+            <CollectionScopeBar
+              v-if="databaseCorrupted === false && !libraryEmpty"
+              @select="handleSelectCollectionScope"
+              @configure="openCollectionScopeDialog()"
+            />
 
             <!-- Component panel (flex-1 to fill remaining space) -->
             <div
@@ -177,6 +182,21 @@
       @updated="onManageLibrariesUpdated"
       @cancel="showManageLibraries = false"
     />
+
+    <!-- Collection Scope Dialog -->
+    <CollectionScopeDialog
+      v-if="showCollectionScopeDialog"
+      :initialScopeId="collectionScopeDialogInitialId"
+      @changed="notifyCollectionScopeChanged"
+      @close="showCollectionScopeDialog = false"
+    />
+
+    <!-- Apple Photos Import Dialog (macOS) -->
+    <ApplePhotosImportDialog
+      v-if="showApplePhotosImportDialog"
+      @imported="void checkLibraryEmpty()"
+      @close="showApplePhotosImportDialog = false"
+    />
   </div>
 
 </template>
@@ -213,7 +233,11 @@ import TButton from '@/components/TButton.vue';
 import Content from '@/components/Content.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import CollectionTray from '@/components/CollectionTray.vue';
+import CollectionScopeBar from '@/components/CollectionScopeBar.vue';
+const CollectionScopeDialog = defineAsyncComponent(() => import('@/components/CollectionScopeDialog.vue'));
+const ApplePhotosImportDialog = defineAsyncComponent(() => import('@/components/ApplePhotosImportDialog.vue'));
 const ManageLibraries = defineAsyncComponent(() => import('@/components/ManageLibraries.vue'));
+import { getActiveScopeAlbumIds } from '@/common/collectionScopes';
 import iconLogo from '@/assets/images/icon.png';
 
 import {
@@ -347,7 +371,35 @@ const currentLibrary = computed(() =>
 
 // Manage Libraries dialog state
 const showManageLibraries = ref(false);
+const showCollectionScopeDialog = ref(false);
+const showApplePhotosImportDialog = ref(false);
+const collectionScopeDialogInitialId = ref<string | undefined>(undefined);
 const showDesktopTitleBar = isWin || isLinux;
+
+function openCollectionScopeDialog(scopeId?: string) {
+  collectionScopeDialogInitialId.value = scopeId || libConfig.collectionScope?.activeId;
+  showCollectionScopeDialog.value = true;
+}
+
+async function notifyCollectionScopeChanged() {
+  const activeAlbumIds = getActiveScopeAlbumIds(libConfig.collectionScope);
+  if (
+    activeAlbumIds !== null &&
+    libConfig.album.id > 0 &&
+    !activeAlbumIds.includes(Number(libConfig.album.id))
+  ) {
+    libConfig.album.id = 0;
+    libConfig.album.folderId = null;
+    libConfig.album.folderPath = '';
+    libConfig.album.selected = false;
+  }
+  await emit('library-total-refreshed', { source: 'collection-scope' });
+}
+
+async function handleSelectCollectionScope(scopeId: string) {
+  await libConfig.setActiveScope(scopeId);
+  await notifyCollectionScopeChanged();
+}
 
 /// Splitter for resizing the left pane
 const isDraggingSplitter = ref(false);
@@ -360,6 +412,8 @@ let unlistenOpenAbout: (() => void) | null = null;
 let unlistenAlbumsRefreshed: (() => void) | null = null;
 let unlistenAddAlbumRequested: (() => void) | null = null;
 let unlistenEditAlbumRequested: (() => void) | null = null;
+let unlistenConfigureScopes: (() => void) | null = null;
+let unlistenImportApplePhotos: (() => void) | null = null;
 // Native Edit menu "Select All" routes to the photo selection via the backend event.
 let unlistenMenuSelectAll: (() => void) | null = null;
 const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
@@ -455,6 +509,14 @@ const libraryMenuItems = computed(() => {
     label: "-",
     action: () => {}
   });
+  if (isMac) {
+    items.push({
+      label: localeMsg.value.apple_photos?.menu_label || 'Import from Apple Photos…',
+      action: () => {
+        showApplePhotosImportDialog.value = true;
+      }
+    });
+  }
   items.push({
     label: localeMsg.value.menu.library.manage,
     // icon: IconEdit,
@@ -514,6 +576,16 @@ onMounted(async () => {
     (panelRef.value as any)?.openAlbumEdit?.(albumId);
   });
 
+  unlistenConfigureScopes = await listen('configure-collection-scopes', (event: any) => {
+    openCollectionScopeDialog(event?.payload?.scopeId);
+  });
+
+  unlistenImportApplePhotos = await listen('import-apple-photos-requested', () => {
+    if (isMac) {
+      showApplePhotosImportDialog.value = true;
+    }
+  });
+
   unlistenAlbumsRefreshed = await listen('albums-refreshed', async (event: any) => {
     const libraryId = event.payload?.libraryId || libConfig._libraryId;
     if (libraryId !== libConfig._libraryId) return;
@@ -553,6 +625,10 @@ onBeforeUnmount(() => {
   unlistenAddAlbumRequested = null;
   unlistenEditAlbumRequested?.();
   unlistenEditAlbumRequested = null;
+  unlistenConfigureScopes?.();
+  unlistenConfigureScopes = null;
+  unlistenImportApplePhotos?.();
+  unlistenImportApplePhotos = null;
 });
 
 function handleHomeKeyDown(event: KeyboardEvent) {

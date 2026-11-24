@@ -1785,11 +1785,12 @@ impl ACollection {
              FROM acollections_files cf
              JOIN afiles a ON a.id = cf.file_id
              JOIN afolders b ON b.id = a.folder_id
-             WHERE {}{} AND {}
+             WHERE {}{} AND {} AND {}
              GROUP BY cf.collection_id",
             AFile::live_photo_companion_exclusion_condition(),
             AFile::album_filter_sql("a"),
             AFile::search_exclusion_condition("b"),
+            AFile::collection_scope_condition("b"),
         );
         let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
         let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
@@ -2351,16 +2352,65 @@ impl AFile {
                 db_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             ).map_err(|e| e.to_string())?;
-            return Self::get_library_visible_counts_on(&conn);
+            return Self::get_library_visible_counts_on_with_scope(&conn, false);
         }
         let conn = open_conn()?;
-        Self::get_library_visible_counts_on(&conn)
+        Self::get_library_visible_counts_on_with_scope(&conn, true)
     }
 
+    #[cfg(test)]
     fn get_library_visible_counts_on(conn: &Connection) -> Result<LibraryVisibleCounts, String> {
+        Self::get_library_visible_counts_on_with_scope(conn, true)
+    }
+
+    fn get_library_visible_counts_on_with_scope(conn: &Connection, apply_scope: bool) -> Result<LibraryVisibleCounts, String> {
         let today = chrono::Local::now().format("%m-%d").to_string();
-        let query = format!("SELECT COUNT(*), COALESCE(SUM(a.is_favorite=1),0), COALESCE(SUM(strftime('%m-%d',a.taken_date,'unixepoch','localtime')=?1),0), COALESCE(SUM(a.rating>0),0), COALESCE(SUM(a.rating=0),0), COALESCE(SUM(a.rating=1),0), COALESCE(SUM(a.rating=2),0), COALESCE(SUM(a.rating=3),0), COALESCE(SUM(a.rating=4),0), COALESCE(SUM(a.rating=5),0), COALESCE(SUM(a.culling_flag=1),0), COALESCE(SUM(a.culling_flag=2),0), COALESCE(SUM(a.culling_flag=0),0) FROM afiles a JOIN afolders b ON b.id=a.folder_id WHERE {} AND {}{}", Self::search_exclusion_condition("b"), Self::live_photo_companion_exclusion_condition(), Self::album_filter_sql("a"));
+        let scope_clause = if apply_scope {
+            format!(" AND {}", Self::collection_scope_condition("b"))
+        } else {
+            String::new()
+        };
+        let query = format!("SELECT COUNT(*), COALESCE(SUM(a.is_favorite=1),0), COALESCE(SUM(strftime('%m-%d',a.taken_date,'unixepoch','localtime')=?1),0), COALESCE(SUM(a.rating>0),0), COALESCE(SUM(a.rating=0),0), COALESCE(SUM(a.rating=1),0), COALESCE(SUM(a.rating=2),0), COALESCE(SUM(a.rating=3),0), COALESCE(SUM(a.rating=4),0), COALESCE(SUM(a.rating=5),0), COALESCE(SUM(a.culling_flag=1),0), COALESCE(SUM(a.culling_flag=2),0), COALESCE(SUM(a.culling_flag=0),0) FROM afiles a JOIN afolders b ON b.id=a.folder_id WHERE {} AND {}{}{}", Self::search_exclusion_condition("b"), Self::live_photo_companion_exclusion_condition(), Self::album_filter_sql("a"), scope_clause);
         conn.query_row(&query, params![today], |r| Ok(LibraryVisibleCounts { all:r.get(0)?, favorite:r.get(1)?, today:r.get(2)?, rated:r.get(3)?, unrated:r.get(4)?, rating_1:r.get(5)?, rating_2:r.get(6)?, rating_3:r.get(7)?, rating_4:r.get(8)?, rating_5:r.get(9)?, pick:r.get(10)?, reject:r.get(11)?, unreviewed:r.get(12)? })).map_err(|e| e.to_string())
+    }
+
+    fn active_scope_album_ids() -> Option<Vec<i64>> {
+        #[cfg(test)]
+        if let Some(overridden) = TEST_SCOPE_ALBUM_IDS.with(|slot| slot.borrow().clone()) {
+            return overridden;
+        }
+        t_config::active_scope_album_ids()
+    }
+
+    /// Restrict queries to the currently active collection scope (e.g. Everyday, Family Archive).
+    /// Returns `"1"` when the active scope is "everything", `"0"` when the active scope has no
+    /// assigned folders, or `"{folder_alias}.album_id IN (...)"`.
+    pub(crate) fn collection_scope_condition(folder_alias: &str) -> String {
+        let active = Self::active_scope_album_ids();
+        Self::collection_scope_condition_for(folder_alias, active.as_deref())
+    }
+
+    pub(crate) fn collection_scope_condition_for(
+        folder_alias: &str,
+        album_ids: Option<&[i64]>,
+    ) -> String {
+        match album_ids {
+            None => "1".to_string(),
+            Some([]) => "0".to_string(),
+            Some(ids) => {
+                let list = ids
+                    .iter()
+                    .filter(|id| **id > 0)
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if list.is_empty() {
+                    "0".to_string()
+                } else {
+                    format!("{folder_alias}.album_id IN ({list})")
+                }
+            }
+        }
     }
 
     /// Exclude files whose folder path is the excluded folder itself or one of its children.
@@ -5452,7 +5502,7 @@ impl AFile {
             "SELECT {} AS group_date, COUNT(1)
             FROM afiles a
             JOIN afolders b ON a.folder_id = b.id
-            WHERE {} IS NOT NULL AND {} >= 86400 AND {}{} AND {}
+            WHERE {} IS NOT NULL AND {} >= 86400 AND {}{} AND {} AND {}
             GROUP BY {}
             ORDER BY group_date {}",
             date_expr,
@@ -5461,6 +5511,7 @@ impl AFile {
             Self::live_photo_companion_exclusion_condition(),
             Self::album_filter_sql("a"),
             Self::search_exclusion_condition("b"),
+            Self::collection_scope_condition("b"),
             date_expr,
             order_clause
         );
@@ -5643,6 +5694,7 @@ impl AFile {
         }
 
         conditions.push(Self::search_exclusion_condition("b"));
+        conditions.push(Self::collection_scope_condition("b"));
 
         let joins_clause = if !joins.is_empty() {
             format!(" {}", joins.join(" "))
@@ -6735,6 +6787,7 @@ impl AFile {
         Self::append_album_filter(&mut conditions);
 
         conditions.push(Self::search_exclusion_condition("b"));
+        conditions.push(Self::collection_scope_condition("b"));
         conditions.push(Self::live_photo_companion_exclusion_condition().to_string());
 
         if let (Some(min_lat), Some(max_lat), Some(min_lon), Some(max_lon)) = (
@@ -7491,6 +7544,8 @@ impl AFile {
 
         query.push_str(" AND ");
         query.push_str(&Self::search_exclusion_condition("b"));
+        query.push_str(" AND ");
+        query.push_str(&Self::collection_scope_condition("b"));
 
         query.push_str(&Self::album_filter_sql("a"));
 
@@ -8936,11 +8991,12 @@ impl ATag {
              FROM tree JOIN afile_tags ft ON ft.tag_id=tree.id
              JOIN afiles a ON a.id = ft.file_id
              JOIN afolders b ON b.id = a.folder_id
-             WHERE {}{} AND {}
+             WHERE {}{} AND {} AND {}
              GROUP BY tree.root",
             AFile::live_photo_companion_exclusion_condition(),
             AFile::album_filter_sql("a"),
             AFile::search_exclusion_condition("b"),
+            AFile::collection_scope_condition("b"),
         );
         let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
         let rows = stmt
@@ -9238,21 +9294,29 @@ impl Person {
     pub fn get_all(sort: i64) -> Result<Vec<Self>, String> {
         let conn = open_conn()?;
 
-        // Single query with JOIN for count, directly fetch pre-stored thumbnail
-        let query = "
-            SELECT p.id, p.name, COUNT(f.id) as count, p.thumbnail
-            FROM persons p
-            LEFT JOIN faces f ON f.person_id = p.id
-            GROUP BY p.id
-            ORDER BY {order_clause}
-        ";
+        let visible_file_conditions = format!(
+            "{} AND {} AND {} AND {}",
+            AFile::album_filter_sql("a"),
+            AFile::search_exclusion_condition("b"),
+            AFile::collection_scope_condition("b"),
+            AFile::live_photo_companion_exclusion_condition(),
+        );
         let order_clause = match sort {
             1 => "p.name DESC",
             2 => "count ASC, p.name ASC",
             3 => "count DESC, p.name ASC",
             _ => "p.name ASC",
         };
-        let query = query.replace("{order_clause}", order_clause);
+        let query = format!(
+            "SELECT p.id, p.name, COUNT(DISTINCT a.id) as count, p.thumbnail
+             FROM persons p
+             JOIN faces f ON f.person_id = p.id
+             JOIN afiles a ON a.id = f.file_id
+             JOIN afolders b ON b.id = a.folder_id
+             WHERE 1=1{visible_file_conditions}
+             GROUP BY p.id
+             ORDER BY {order_clause}"
+        );
         let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
 
         let persons_iter = stmt
@@ -9331,9 +9395,10 @@ impl Person {
                 .replace('_', "\\_")
         );
         let visible_file_conditions = format!(
-            "{} AND {} AND {}",
+            "{} AND {} AND {} AND {}",
             AFile::album_filter_sql("a"),
             AFile::search_exclusion_condition("b"),
+            AFile::collection_scope_condition("b"),
             AFile::live_photo_companion_exclusion_condition(),
         );
         let visible_person_condition = format!(
@@ -10045,9 +10110,9 @@ impl ACamera {
             WHERE a.e_make IS NOT NULL AND a.e_model IS NOT NULL
                 AND a.id NOT IN (
                     SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
-                ){} AND {}
+                ){} AND {} AND {}
             GROUP BY UPPER(a.e_make), a.e_model
-            ORDER BY UPPER(a.e_make), a.e_model", AFile::album_filter_sql("a"), AFile::search_exclusion_condition("b"));
+            ORDER BY UPPER(a.e_make), a.e_model", AFile::album_filter_sql("a"), AFile::search_exclusion_condition("b"), AFile::collection_scope_condition("b"));
 
         let mut stmt = conn.prepare(query.as_str()).map_err(|e| e.to_string())?;
 
@@ -10123,9 +10188,9 @@ impl ALens {
             WHERE a.e_lens_make IS NOT NULL AND a.e_lens_model IS NOT NULL
                 AND a.id NOT IN (
                     SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
-                ){} AND {}
+                ){} AND {} AND {}
             GROUP BY UPPER(a.e_lens_make), a.e_lens_model
-            ORDER BY UPPER(a.e_lens_make), a.e_lens_model", AFile::album_filter_sql("a"), AFile::search_exclusion_condition("b"));
+            ORDER BY UPPER(a.e_lens_make), a.e_lens_model", AFile::album_filter_sql("a"), AFile::search_exclusion_condition("b"), AFile::collection_scope_condition("b"));
 
         let mut stmt = conn.prepare(query.as_str()).map_err(|e| e.to_string())?;
 
@@ -10205,9 +10270,9 @@ impl ALocation {
                 OR COALESCE(a.geo_name, '') <> '')
                 AND a.id NOT IN (
                     SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
-                ){} AND {}
+                ){} AND {} AND {}
             GROUP BY COALESCE(a.geo_cc, ''), COALESCE(a.geo_admin1, ''), COALESCE(a.geo_name, '')
-            ORDER BY a.geo_cc, a.geo_admin1, a.geo_name", AFile::album_filter_sql("a"), AFile::search_exclusion_condition("b"));
+            ORDER BY a.geo_cc, a.geo_admin1, a.geo_name", AFile::album_filter_sql("a"), AFile::search_exclusion_condition("b"), AFile::collection_scope_condition("b"));
 
         let mut stmt = conn.prepare(query.as_str()).map_err(|e| e.to_string())?;
 
@@ -10393,6 +10458,7 @@ pub(crate) struct PooledConn(Option<(String, Connection)>, t_storage::DbConnecti
 #[cfg(test)]
 thread_local! {
     pub(crate) static TEST_DB_PATH: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static TEST_SCOPE_ALBUM_IDS: std::cell::RefCell<Option<Option<Vec<i64>>>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Drop for PooledConn {
@@ -12169,6 +12235,156 @@ mod multi_tag_filter_tests {
             let mut stmt = conn.prepare(&format!("SELECT a.id FROM afiles a JOIN afolders b ON b.id=a.folder_id {joins}{conditions} ORDER BY a.id")).unwrap();
             let actual = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| row.get::<_,i64>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
             assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod collection_scope_tests {
+    use super::*;
+
+    struct ScopeGuard;
+
+    impl Drop for ScopeGuard {
+        fn drop(&mut self) {
+            TEST_SCOPE_ALBUM_IDS.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    fn with_test_scope(scope: Option<Vec<i64>>) -> ScopeGuard {
+        TEST_SCOPE_ALBUM_IDS.with(|slot| *slot.borrow_mut() = Some(scope));
+        ScopeGuard
+    }
+
+    fn setup_scoped_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE albums(id INTEGER PRIMARY KEY, path TEXT, file_types INTEGER, small_image_filter INTEGER, excluded_folders TEXT);
+             INSERT INTO albums VALUES (1, '/everyday', 7, NULL, '[]'), (2, '/family', 7, NULL, '[]');
+             CREATE TABLE afolders(id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT, is_excluded_from_search INTEGER);
+             INSERT INTO afolders VALUES (10, 1, '/everyday/2026', 0), (20, 2, '/family/scans', 0);
+             CREATE TABLE afiles(
+                id INTEGER PRIMARY KEY, folder_id INTEGER, name TEXT, size INTEGER, file_type INTEGER,
+                taken_date INTEGER, is_favorite INTEGER, rating INTEGER, culling_flag INTEGER,
+                live_photo_video_id INTEGER, width INTEGER, height INTEGER,
+                e_make TEXT, e_model TEXT, e_lens_make TEXT, e_lens_model TEXT,
+                geo_cc TEXT, geo_admin1 TEXT, geo_name TEXT,
+                comments TEXT, e_title TEXT, e_headline TEXT, e_artist TEXT, e_copyright TEXT, e_software TEXT
+             );
+             INSERT INTO afiles VALUES
+                (1, 10, 'iphone1.heic', 100, 1, 1700000000, 1, 5, 1, NULL, 4000, 3000, 'Apple', 'iPhone 16', 'Apple', 'Main', 'US', 'CA', 'SF', NULL, NULL, NULL, NULL, NULL, NULL),
+                (2, 10, 'iphone2.heic', 100, 1, 1700100000, 0, 0, 0, NULL, 4000, 3000, 'Apple', 'iPhone 16', 'Apple', 'Main', 'US', 'CA', 'SF', NULL, NULL, NULL, NULL, NULL, NULL),
+                (3, 20, 'scan1.jpg',    200, 1, 946684800,  1, 4, 1, NULL, 2000, 1500, 'Epson', 'V600',      NULL,    NULL,   'US', 'TX', 'Austin', NULL, NULL, NULL, NULL, NULL, NULL);
+             CREATE TABLE atags(id INTEGER PRIMARY KEY, parent_id INTEGER);
+             INSERT INTO atags VALUES (100, NULL), (101, NULL);
+             CREATE TABLE afile_tags(file_id INTEGER, tag_id INTEGER, PRIMARY KEY(file_id, tag_id));
+             INSERT INTO afile_tags VALUES (1, 100), (3, 100), (3, 101);
+             CREATE TABLE persons(id INTEGER PRIMARY KEY, name TEXT, thumbnail BLOB);
+             INSERT INTO persons VALUES (1, 'Colby', NULL), (2, 'Grandpa', NULL);
+             CREATE TABLE faces(id INTEGER PRIMARY KEY, file_id INTEGER, person_id INTEGER);
+             INSERT INTO faces VALUES (1, 1, 1), (2, 3, 1), (3, 3, 2);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn scope_filters_queries_counts_tags_and_people() {
+        let conn = setup_scoped_db();
+        let params: QueryParams = serde_json::from_value(serde_json::json!({
+            "searchFileName":"","searchFileType":0,"sortType":0,"sortOrder":0,
+            "searchAllSubfolders":"","searchFolder":"","startDate":0,"endDate":0,
+            "calendarSort":0,"make":"","model":"","lensMake":"","lensModel":"",
+            "locationAdmin1":"","locationName":"","isFavorite":false,"rating":-1,"tagId":0
+        }))
+        .unwrap();
+
+        let query_ids = || {
+            let (joins, where_clause, values) = AFile::build_search_query_parts(&params);
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT a.id FROM afiles a JOIN afolders b ON b.id = a.folder_id {joins}{where_clause} ORDER BY a.id"
+                ))
+                .unwrap();
+            stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        let query_person_counts = || {
+            let visible = format!(
+                "{} AND {} AND {} AND {}",
+                AFile::album_filter_sql("a"),
+                AFile::search_exclusion_condition("b"),
+                AFile::collection_scope_condition("b"),
+                AFile::live_photo_companion_exclusion_condition(),
+            );
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT p.id, COUNT(DISTINCT a.id)
+                     FROM persons p
+                     JOIN faces f ON f.person_id = p.id
+                     JOIN afiles a ON a.id = f.file_id
+                     JOIN afolders b ON b.id = a.folder_id
+                     WHERE 1=1{visible}
+                     GROUP BY p.id
+                     ORDER BY p.id"
+                ))
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        // Everything scope: sees all 3 files, both people (Colby=2, Grandpa=1), both tags
+        {
+            let _guard = with_test_scope(None);
+            assert_eq!(query_ids(), vec![1, 2, 3]);
+            let counts = AFile::get_library_visible_counts_on_with_scope(&conn, true).unwrap();
+            assert_eq!(counts.all, 3);
+            assert_eq!(counts.favorite, 2);
+            let tag_counts = ATag::get_counts_on(&conn).unwrap();
+            assert_eq!(tag_counts.get(&100), Some(&2));
+            assert_eq!(tag_counts.get(&101), Some(&1));
+            assert_eq!(query_person_counts(), vec![(1, 2), (2, 1)]);
+        }
+
+        // Everyday scope (album 1): only files 1 & 2, Colby=1, Grandpa hidden, tag 100=1
+        {
+            let _guard = with_test_scope(Some(vec![1]));
+            assert_eq!(query_ids(), vec![1, 2]);
+            let counts = AFile::get_library_visible_counts_on_with_scope(&conn, true).unwrap();
+            assert_eq!(counts.all, 2);
+            assert_eq!(counts.favorite, 1);
+            // Unscoped library count (used for library switcher menu) still sees all 3
+            let unscoped = AFile::get_library_visible_counts_on_with_scope(&conn, false).unwrap();
+            assert_eq!(unscoped.all, 3);
+            let tag_counts = ATag::get_counts_on(&conn).unwrap();
+            assert_eq!(tag_counts.get(&100), Some(&1));
+            assert_eq!(tag_counts.get(&101), None);
+            assert_eq!(query_person_counts(), vec![(1, 1)]);
+        }
+
+        // Family Archive scope (album 2): only file 3, Colby=1, Grandpa=1
+        {
+            let _guard = with_test_scope(Some(vec![2]));
+            assert_eq!(query_ids(), vec![3]);
+            let counts = AFile::get_library_visible_counts_on_with_scope(&conn, true).unwrap();
+            assert_eq!(counts.all, 1);
+            assert_eq!(counts.favorite, 1);
+            assert_eq!(query_person_counts(), vec![(1, 1), (2, 1)]);
+        }
+
+        // Empty scope (unassigned): cleanly matches 0 items
+        {
+            let _guard = with_test_scope(Some(vec![]));
+            assert_eq!(query_ids(), Vec::<i64>::new());
+            let counts = AFile::get_library_visible_counts_on_with_scope(&conn, true).unwrap();
+            assert_eq!(counts.all, 0);
+            assert!(ATag::get_counts_on(&conn).unwrap().is_empty());
+            assert!(query_person_counts().is_empty());
         }
     }
 }

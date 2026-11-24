@@ -9,7 +9,7 @@
     <!-- albums -->
     <div v-if="isMainPane" class="sidebar-panel-header">
       <span class="sidebar-panel-header-title flex-1">
-        {{ $t('album.album_list') }}<template v-if="albums.length > 0"> ({{ albums.length.toLocaleString() }})</template>
+        {{ $t('album.album_list') }}<template v-if="scopedAlbums.length > 0"> ({{ scopedAlbums.length.toLocaleString() }})</template>
       </span>
       <TButton
         v-if="albums.length > 0"
@@ -250,7 +250,48 @@
           <span class="text-sm">{{ $t('album.drop.add') }}</span>
         </li>
 
-        <li v-if="!isFolderSearchLoading && visibleAlbums.length === 0 && albums.length > 0" class="sidebar-empty text-sm">
+        <li
+          v-if="isMainPane && hiddenByScopeCount > 0 && visibleAlbums.length > 0"
+          class="mx-1 mt-1 px-2 py-1.5 flex items-center justify-between gap-2 text-[11px] text-base-content/45"
+        >
+          <span class="truncate">{{ $t('scope.hidden_folders_hint', hiddenByScopeCount) }}</span>
+          <button
+            type="button"
+            class="text-primary/80 hover:text-primary shrink-0 cursor-pointer"
+            @click="switchToEverythingScope"
+          >
+            {{ $t('scope.everything_short') }}
+          </button>
+        </li>
+
+        <li
+          v-if="isMainPane && isScopedEmpty && albums.length > 0"
+          class="mx-2 my-3 p-3 rounded-box bg-base-100/40 border border-base-content/10 flex flex-col items-center text-center gap-2"
+        >
+          <span class="text-xs font-medium text-base-content/80">
+            {{ $t('scope.empty_scope_title', { scope: activeScopeLabel }) }}
+          </span>
+          <span class="text-[11px] text-base-content/50 leading-relaxed">
+            {{ $t('scope.empty_scope_hint', { scope: activeScopeLabel }) }}
+          </span>
+          <div class="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              class="btn btn-xs btn-primary"
+              @click="openScopeConfigurator"
+            >
+              {{ $t('scope.choose_folders') }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost"
+              @click="switchToEverythingScope"
+            >
+              {{ $t('scope.everything_short') }}
+            </button>
+          </div>
+        </li>
+        <li v-else-if="!isFolderSearchLoading && visibleAlbums.length === 0 && scopedAlbums.length > 0" class="sidebar-empty text-sm">
           <span class="text-center">{{ $t('album.no_folders_found') }}</span>
         </li>
         <li v-else-if="!isLoading && albums.length === 0" class="sidebar-empty text-sm">
@@ -351,6 +392,14 @@ import {
   IconHeartFilled,
 } from '@/common/icons';
 import { SIDEBAR } from '@/common/constants';
+import {
+  SCOPE_EVERYDAY,
+  SCOPE_FAMILY,
+  SCOPE_EVERYTHING,
+  getActiveScopeAlbumIds,
+  isAlbumInScope,
+  normalizeCollectionScopeState,
+} from '@/common/collectionScopes';
 
 const props = withDefaults(defineProps<{
   selectionSource: SelectionSource;
@@ -394,6 +443,14 @@ const albumPanelMenuItems = computed(() => {
       disabled: albums.value.length < 2 || isFolderFiltering.value,
       action: () => { isReorderingAlbums.value = !isReorderingAlbums.value; },
     },
+    ...(isMac ? [
+      { label: "-", action: null },
+      {
+        label: t('apple_photos.menu_label'),
+        icon: IconDownload,
+        action: () => { void tauriEmit('import-apple-photos-requested'); },
+      },
+    ] : []),
   ];
 });
 
@@ -730,10 +787,39 @@ async function loadCachedAlbumTree(album: Album) {
   album.children = buildFilteredFolderTree(folders, new Set(folders.map((folder: AlbumFolderRecord) => folder.path)));
 }
 
+const activeScopeState = computed(() => normalizeCollectionScopeState(libConfig.collectionScope));
+const activeScopeAlbumIds = computed(() => getActiveScopeAlbumIds(activeScopeState.value));
+const activeScopeLabel = computed(() => {
+  if (activeScopeState.value.activeId === SCOPE_EVERYDAY) return t('scope.everyday');
+  if (activeScopeState.value.activeId === SCOPE_FAMILY) return t('scope.family');
+  return t('scope.everything');
+});
+const scopedAlbums = computed(() => {
+  if (!isMainPane.value || activeScopeAlbumIds.value === null) return albums.value;
+  const allowed = new Set(activeScopeAlbumIds.value);
+  return albums.value.filter(album => allowed.has(Number(album.id)));
+});
+const hiddenByScopeCount = computed(() =>
+  isMainPane.value ? Math.max(0, albums.value.length - scopedAlbums.value.length) : 0
+);
+const isScopedEmpty = computed(() =>
+  isMainPane.value && activeScopeAlbumIds.value !== null && scopedAlbums.value.length === 0
+);
+
+const openScopeConfigurator = async () => {
+  await tauriEmit('configure-collection-scopes', { scopeId: activeScopeState.value.activeId });
+};
+
+const switchToEverythingScope = async () => {
+  await libConfig.setActiveScope(SCOPE_EVERYTHING);
+  await tauriEmit('library-total-refreshed', { source: 'collection-scope' });
+};
+
 const filteredAlbumResults = computed<FilteredAlbumResult[]>(() => {
+  const sourceAlbums = scopedAlbums.value;
   const query = normalizedFolderSearch.value;
   if (!query && !favoriteFoldersOnly.value) {
-    return albums.value.map(album => ({
+    return sourceAlbums.map(album => ({
       album,
       rootFolderMatches: false,
       visibleFolderPaths: new Set<string>(),
@@ -743,7 +829,7 @@ const filteredAlbumResults = computed<FilteredAlbumResult[]>(() => {
     }));
   }
 
-  return albums.value.flatMap((album) => {
+  return sourceAlbums.flatMap((album) => {
     const albumFolders = folderSearchFoldersByAlbum.value.get(Number(album.id)) || [];
     const rootFolder = albumFolders.find(folder => folder.path === album.path) || {
       id: -Number(album.id),
@@ -905,11 +991,31 @@ const handleImportComplete = async () => {
 // Get menu items for a specific album (function for lazy evaluation)
 const getMoreMenuItems = async (album: any) => {
   const isAccessible = await refreshAlbumAccess(album);
+  const inEveryday = isAlbumInScope(libConfig.collectionScope, SCOPE_EVERYDAY, Number(album.id));
+  const inFamily = isAlbumInScope(libConfig.collectionScope, SCOPE_FAMILY, Number(album.id));
+  const toggleScope = async (scopeId: string) => {
+    await libConfig.toggleAlbumInScope(scopeId, Number(album.id));
+    await tauriEmit('library-total-refreshed', { source: 'collection-scope' });
+  };
   return [
     {
       label: localeMsg.value.menu.album.edit,
       icon: IconEdit,
       action: () => openAlbumEdit(album.id)
+    },
+    {
+      label: "-",   // separator
+      action: () => {}
+    },
+    {
+      label: t('scope.include_in_everyday'),
+      icon: inEveryday ? IconOk : null,
+      action: () => { void toggleScope(SCOPE_EVERYDAY); }
+    },
+    {
+      label: t('scope.include_in_family'),
+      icon: inFamily ? IconOk : null,
+      action: () => { void toggleScope(SCOPE_FAMILY); }
     },
     {
       label: "-",   // separator
@@ -1250,6 +1356,7 @@ async function createAndIndexAlbum(path: string, name: string, description: stri
   if (libraryId !== libConfig._libraryId) return album;
   config.leftPanel.show = true;
   albums.value.push(album);
+  await libConfig.assignNewAlbumToActiveScope(album.id);
   await clickAlbum(album);
   await tauriEmit('albums-refreshed');
   await tauriEmit('library-total-refreshed');
@@ -1373,6 +1480,7 @@ const clickRemoveAlbum = async () => {
   const removedAlbum = await removeAlbum(selection.albumId.value);
   if(removedAlbum) {
     showRemoveAlbumMsgbox.value = false;
+    await libConfig.removeAlbumFromScopes(albumId);
 
     // Keep scan state consistent when the removed album was queued or paused.
     libConfig.index.albumQueue = (libConfig.index.albumQueue as any[]).filter(

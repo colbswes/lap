@@ -42,6 +42,17 @@
           <IconClose class="w-4 h-4" />
         </button>
       </div>
+      <div class="mt-1.5 px-1 flex items-center justify-between gap-2 text-[11px] text-base-content/50">
+        <span class="truncate">{{ $t('scope.searching_in', { scope: activeScopeLabel }) }}</span>
+        <button
+          v-if="isScopedSearch"
+          type="button"
+          class="text-primary/85 hover:text-primary font-medium shrink-0 cursor-pointer"
+          @click="searchEverything"
+        >
+          {{ $t('scope.search_everything') }}
+        </button>
+      </div>
     </div>
 
     <!-- search history -->
@@ -95,8 +106,15 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { emit as tauriEmit } from '@tauri-apps/api/event';
 import { config, libConfig } from '@/common/config';
 import { useUIStore } from '@/stores/uiStore';
+import {
+  SCOPE_EVERYDAY,
+  SCOPE_FAMILY,
+  SCOPE_EVERYTHING,
+  normalizeCollectionScopeState,
+} from '@/common/collectionScopes';
 import MessageBox from '@/components/MessageBox.vue';
 import { IconMore, IconTrash, IconSearch, IconClose } from '@/common/icons';
 import ContextMenu from '@/components/ContextMenu.vue';
@@ -109,9 +127,22 @@ const props = defineProps({
 });
 
 /// i18n
-const { locale, messages } = useI18n();
+const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
+
+const activeScopeId = computed(() => normalizeCollectionScopeState(libConfig.collectionScope).activeId);
+const isScopedSearch = computed(() => activeScopeId.value !== SCOPE_EVERYTHING);
+const activeScopeLabel = computed(() => {
+  if (activeScopeId.value === SCOPE_EVERYDAY) return t('scope.everyday');
+  if (activeScopeId.value === SCOPE_FAMILY) return t('scope.family');
+  return t('scope.everything');
+});
+
+async function searchEverything() {
+  await libConfig.setActiveScope(SCOPE_EVERYTHING);
+  await tauriEmit('library-total-refreshed', { source: 'collection-scope' });
+}
 
 const showClearHistoryMsgbox = ref(false);
 

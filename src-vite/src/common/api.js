@@ -246,6 +246,38 @@ export async function saveLibraryState(id, state) {
   return false;
 }
 
+// update and persist a library's collection scope
+export async function setCollectionScope(id, scope) {
+  try {
+    return await invoke('set_collection_scope', { id, scope });
+  } catch (error) {
+    console.error('Failed to set collection scope:', error);
+  }
+  return null;
+}
+
+export async function checkApplePhotosExportReady() {
+  try {
+    return await invoke('check_apple_photos_export_ready');
+  } catch (error) {
+    console.error('Failed to check Apple Photos export availability:', error);
+  }
+  return null;
+}
+
+export async function runApplePhotosExport(request) {
+  return await invoke('run_apple_photos_export', { request });
+}
+
+export async function cancelApplePhotosExport() {
+  try {
+    return await invoke('cancel_apple_photos_export');
+  } catch (error) {
+    console.error('Failed to cancel Apple Photos export:', error);
+  }
+  return false;
+}
+
 // get library state
 export async function getLibraryState(id) {
   try {

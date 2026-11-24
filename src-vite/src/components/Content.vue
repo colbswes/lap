@@ -50,6 +50,30 @@
           class="min-w-0 overflow-hidden"
           @navigate="handleTitleBreadcrumbNavigate"
         />
+        <div
+          v-if="showHeaderScopeBadge"
+          class="ml-1.5 shrink-0 flex items-center gap-1"
+        >
+          <button
+            type="button"
+            class="h-6 px-2 rounded-full text-[11px] font-medium border transition-colors cursor-pointer flex items-center gap-1"
+            :class="activeScopeId !== SCOPE_EVERYTHING
+              ? 'bg-primary/12 text-primary border-primary/25 hover:bg-primary/20'
+              : 'bg-base-200/80 text-base-content/65 border-base-content/10 hover:text-base-content hover:bg-base-100/70'"
+            :title="$t('scope.configure')"
+            @click="openScopeConfigurator"
+          >
+            <span>{{ activeScopeLabel }}</span>
+          </button>
+          <button
+            v-if="activeScopeId !== SCOPE_EVERYTHING && (config.main.sidebarIndex === SIDEBAR.SEARCH || tempViewMode === 'similar')"
+            type="button"
+            class="h-6 px-2 rounded-full text-[11px] text-base-content/60 hover:text-primary bg-base-200/70 hover:bg-base-100/70 border border-base-content/10 transition-colors cursor-pointer"
+            @click="switchToEverythingScope"
+          >
+            {{ $t('scope.search_everything') }}
+          </button>
+        </div>
       </div>
 
       <!-- toolbar -->
@@ -246,6 +270,35 @@
             <!-- grid view -->
             <div ref="gridScrollContainerRef" class="absolute w-full h-full">
               <Welcome v-if="showWelcomeContent" />
+              <div
+                v-else-if="isActiveScopeEmpty"
+                class="w-full h-full flex flex-col items-center justify-center px-8 text-center"
+              >
+                <div class="max-w-sm p-6 rounded-box bg-base-200/70 border border-base-content/10 flex flex-col items-center gap-3">
+                  <h3 class="text-base font-medium text-base-content">
+                    {{ $t('scope.empty_scope_title', { scope: activeScopeLabel }) }}
+                  </h3>
+                  <p class="text-xs text-base-content/60 leading-relaxed">
+                    {{ $t('scope.empty_scope_hint', { scope: activeScopeLabel }) }}
+                  </p>
+                  <div class="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-primary text-xs"
+                      @click="openScopeConfigurator"
+                    >
+                      {{ $t('scope.choose_folders') }}
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-ghost text-xs"
+                      @click="switchToEverythingScope"
+                    >
+                      {{ $t('scope.show_everything') }}
+                    </button>
+                  </div>
+                </div>
+              </div>
               <GridView v-else ref="gridViewRef"
                 :selected-item-index="selectedItemIndex"
                 :fileList="gridRows"
@@ -806,6 +859,13 @@ import { getSmartTagById } from '@/common/smartTags';
 import { handleVideoPlaybackShortcut, handleVideoEscapeShortcut } from '@/common/video';
 import { clearFolderFileCounts, setFolderFileCount, getCountedFolderPaths } from '@/composables/useAlbumSelection';
 import { createEmptyLibraryCounts } from '@/stores/libraryStore';
+import {
+  SCOPE_EVERYDAY,
+  SCOPE_FAMILY,
+  SCOPE_EVERYTHING,
+  getActiveScopeAlbumIds,
+  normalizeCollectionScopeState,
+} from '@/common/collectionScopes';
 import { getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
 import { CULLING, DATE_SORT, GROUP, LIB_ITEM, RATE, SIDEBAR, RIGHT_PANEL_MIN_WIDTH, PANEL_ANIMATION_MS, MONTAGE_MAX_PHOTOS, LARGE_BATCH_CONFIRM_THRESHOLD, EXTERNAL_OPEN_WARNING_THRESHOLD } from '@/common/constants';
 import { isWin, isMac, isLinux, separator,
@@ -922,6 +982,35 @@ const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
 
 const contentTitle = ref("");
+
+const activeScopeState = computed(() => normalizeCollectionScopeState(libConfig.collectionScope));
+const activeScopeId = computed(() => activeScopeState.value.activeId);
+const activeScopeAlbumIds = computed(() => getActiveScopeAlbumIds(activeScopeState.value));
+const isActiveScopeEmpty = computed(() =>
+  !showWelcomeContent.value &&
+  activeScopeAlbumIds.value !== null &&
+  activeScopeAlbumIds.value.length === 0
+);
+const activeScopeLabel = computed(() => {
+  if (activeScopeId.value === SCOPE_EVERYDAY) return t('scope.everyday');
+  if (activeScopeId.value === SCOPE_FAMILY) return t('scope.family');
+  return t('scope.everything');
+});
+const showHeaderScopeBadge = computed(() =>
+  !showWelcomeContent.value &&
+  (activeScopeId.value !== SCOPE_EVERYTHING ||
+    config.main.sidebarIndex === SIDEBAR.SEARCH ||
+    tempViewMode.value === 'similar')
+);
+
+async function openScopeConfigurator() {
+  await tauriEmit('configure-collection-scopes', { scopeId: activeScopeId.value });
+}
+
+async function switchToEverythingScope() {
+  await libConfig.setActiveScope(SCOPE_EVERYTHING);
+  await tauriEmit('library-total-refreshed', { source: 'collection-scope' });
+}
 
 const titleSegments = computed(() => {
   if (!contentTitle.value) return [];
@@ -6080,6 +6169,12 @@ onMounted( async() => {
 
   unlistenLibraryTotalRefreshed = await listen('library-total-refreshed', (event: any) => {
     if (event?.payload?.source === 'content') return;
+    if (event?.payload?.source === 'collection-scope') {
+      pendingInitialSelectedIndex = 0;
+      hasRestoredInitialSelection = false;
+      updateContent(true, false);
+      return;
+    }
     if (isScanStreamingMode.value) return;
     if (config.main.sidebarIndex === SIDEBAR.ALBUM) {
       pendingInitialSelectedIndex = selectedItemIndex.value;

@@ -20,12 +20,33 @@ use crate::t_storage;
 static APP_IDENTIFIER: OnceLock<String> = OnceLock::new();
 static CONFIG_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static CURRENT_LIBRARY_ID: RwLock<Option<String>> = RwLock::new(None);
+/// Active collection scope album IDs for the current library.
+/// `None` means "everything" (all albums visible); `Some(ids)` restricts queries to those album IDs.
+static ACTIVE_SCOPE_ALBUM_IDS: RwLock<Option<Vec<i64>>> = RwLock::new(None);
 
 pub fn current_library_id() -> Result<String, String> {
     if let Some(id) = CURRENT_LIBRARY_ID.read().map_err(|e| e.to_string())?.clone() {
         return Ok(id);
     }
     Ok(load_app_config()?.current_library_id)
+}
+
+pub fn active_scope_album_ids() -> Option<Vec<i64>> {
+    ACTIVE_SCOPE_ALBUM_IDS
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+fn sync_active_scope_from_config(config: &AppConfig) {
+    let album_ids = config
+        .libraries
+        .iter()
+        .find(|lib| lib.id == config.current_library_id)
+        .and_then(|lib| lib.state.collection_scope.active_album_ids());
+    if let Ok(mut guard) = ACTIVE_SCOPE_ALBUM_IDS.write() {
+        *guard = album_ids;
+    }
 }
 
 
@@ -367,12 +388,125 @@ pub struct PersonState {
     pub name: Option<String>,
 }
 
+pub const SCOPE_EVERYTHING: &str = "everything";
+pub const SCOPE_EVERYDAY: &str = "everyday";
+pub const SCOPE_FAMILY: &str = "family";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionScopeItem {
+    pub id: String,
+    pub name: String,
+    #[serde(default, alias = "album_ids")]
+    pub album_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionScopeState {
+    #[serde(default = "default_collection_scope_active_id", alias = "active_id")]
+    pub active_id: String,
+    #[serde(default = "default_collection_scopes")]
+    pub scopes: Vec<CollectionScopeItem>,
+}
+
+fn default_collection_scope_active_id() -> String {
+    SCOPE_EVERYTHING.to_string()
+}
+
+fn default_collection_scopes() -> Vec<CollectionScopeItem> {
+    vec![
+        CollectionScopeItem {
+            id: SCOPE_EVERYDAY.to_string(),
+            name: "Everyday".to_string(),
+            album_ids: Vec::new(),
+        },
+        CollectionScopeItem {
+            id: SCOPE_FAMILY.to_string(),
+            name: "Family Archive".to_string(),
+            album_ids: Vec::new(),
+        },
+    ]
+}
+
+impl Default for CollectionScopeState {
+    fn default() -> Self {
+        Self {
+            active_id: default_collection_scope_active_id(),
+            scopes: default_collection_scopes(),
+        }
+    }
+}
+
+impl CollectionScopeState {
+    pub fn normalized(self) -> Self {
+        let mut by_id: HashMap<String, CollectionScopeItem> = HashMap::new();
+        let mut extra_order: Vec<String> = Vec::new();
+        for mut item in self.scopes {
+            let id = item.id.trim().to_string();
+            if id.is_empty() || id == SCOPE_EVERYTHING {
+                continue;
+            }
+            item.id = id.clone();
+            let mut seen = std::collections::HashSet::new();
+            item.album_ids.retain(|album_id| *album_id > 0 && seen.insert(*album_id));
+            item.album_ids.sort_unstable();
+            if !by_id.contains_key(&id) && id != SCOPE_EVERYDAY && id != SCOPE_FAMILY {
+                extra_order.push(id.clone());
+            }
+            by_id.insert(id, item);
+        }
+
+        let mut scopes = Vec::new();
+        for default_item in default_collection_scopes() {
+            if let Some(mut existing) = by_id.remove(&default_item.id) {
+                if existing.name.trim().is_empty() {
+                    existing.name = default_item.name;
+                }
+                scopes.push(existing);
+            } else {
+                scopes.push(default_item);
+            }
+        }
+        for id in extra_order {
+            if let Some(item) = by_id.remove(&id) {
+                scopes.push(item);
+            }
+        }
+
+        let active_id = if self.active_id == SCOPE_EVERYTHING
+            || scopes.iter().any(|item| item.id == self.active_id)
+        {
+            self.active_id
+        } else {
+            SCOPE_EVERYTHING.to_string()
+        };
+
+        Self { active_id, scopes }
+    }
+
+    /// Returns `None` for "everything" (all albums visible), or `Some(album_ids)`
+    /// for a named collection scope.
+    pub fn active_album_ids(&self) -> Option<Vec<i64>> {
+        if self.active_id == SCOPE_EVERYTHING {
+            return None;
+        }
+        let scope = self.scopes.iter().find(|item| item.id == self.active_id)?;
+        let mut ids: Vec<i64> = scope.album_ids.iter().copied().filter(|id| *id > 0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        Some(ids)
+    }
+}
+
 /// Per-library state that persists across sessions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryState {
     #[serde(default)]
     pub library: LibraryPanelState,
+    #[serde(default)]
+    pub collection_scope: CollectionScopeState,
     pub album: AlbumState,
     #[serde(default)]
     pub smart_album: SmartAlbumState,
@@ -509,6 +643,7 @@ pub fn load_app_config() -> Result<AppConfig, String> {
         .map_err(|_| "Config lock poisoned".to_string())?;
     let config = load_app_config_locked()?;
     *CURRENT_LIBRARY_ID.write().map_err(|e| e.to_string())? = Some(config.current_library_id.clone());
+    sync_active_scope_from_config(&config);
     Ok(config)
 }
 
@@ -611,6 +746,7 @@ fn save_app_config_locked(config: &AppConfig) -> Result<(), String> {
     write_atomic(&config_path, &content)
         .map_err(|e| format!("Failed to write config file: {}", e))?;
     *CURRENT_LIBRARY_ID.write().map_err(|e| e.to_string())? = Some(config.current_library_id.clone());
+    sync_active_scope_from_config(config);
     Ok(())
 }
 
@@ -954,7 +1090,8 @@ fn get_thumb_cache_size(library_id: &str) -> i64 {
 }
 
 /// Save library state
-pub fn save_library_state(id: &str, state: LibraryState) -> Result<(), String> {
+pub fn save_library_state(id: &str, mut state: LibraryState) -> Result<(), String> {
+    state.collection_scope = state.collection_scope.normalized();
     update_app_config(|config| {
         if let Some(lib) = config.libraries.iter_mut().find(|l| l.id == id) {
             lib.state = state;
@@ -965,12 +1102,31 @@ pub fn save_library_state(id: &str, state: LibraryState) -> Result<(), String> {
     })
 }
 
+/// Update and persist a library's collection scope configuration, syncing the active runtime filter.
+pub fn set_collection_scope(
+    id: &str,
+    scope: CollectionScopeState,
+) -> Result<CollectionScopeState, String> {
+    let normalized = scope.normalized();
+    update_app_config(|config| {
+        if let Some(lib) = config.libraries.iter_mut().find(|l| l.id == id) {
+            lib.state.collection_scope = normalized.clone();
+            Ok(())
+        } else {
+            Err("Library not found".to_string())
+        }
+    })?;
+    Ok(normalized)
+}
+
 /// Get library state
 pub fn get_library_state(id: &str) -> Result<LibraryState, String> {
     let config = load_app_config()?;
 
     if let Some(lib) = config.libraries.iter().find(|l| l.id == id) {
-        Ok(lib.state.clone())
+        let mut state = lib.state.clone();
+        state.collection_scope = state.collection_scope.normalized();
+        Ok(state)
     } else {
         Err("Library not found".to_string())
     }
@@ -983,7 +1139,11 @@ pub fn get_current_library_state() -> Result<LibraryState, String> {
         .libraries
         .iter()
         .find(|lib| lib.id == config.current_library_id)
-        .map(|lib| lib.state.clone())
+        .map(|lib| {
+            let mut state = lib.state.clone();
+            state.collection_scope = state.collection_scope.normalized();
+            state
+        })
         .ok_or_else(|| "Library not found".to_string())
 }
 
@@ -1145,5 +1305,56 @@ mod config_update_tests {
         );
         assert!(result.is_err());
         assert!(!saved.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn collection_scope_defaults_and_normalizes() {
+        let default_state = CollectionScopeState::default();
+        assert_eq!(default_state.active_id, SCOPE_EVERYTHING);
+        assert_eq!(default_state.active_album_ids(), None);
+        assert_eq!(default_state.scopes.len(), 2);
+        assert_eq!(default_state.scopes[0].id, SCOPE_EVERYDAY);
+        assert_eq!(default_state.scopes[1].id, SCOPE_FAMILY);
+
+        let normalized = CollectionScopeState {
+            active_id: SCOPE_EVERYDAY.to_string(),
+            scopes: vec![CollectionScopeItem {
+                id: SCOPE_EVERYDAY.to_string(),
+                name: "Everyday".to_string(),
+                album_ids: vec![5, 2, 5, 0, -1],
+            }],
+        }
+        .normalized();
+        assert_eq!(normalized.active_id, SCOPE_EVERYDAY);
+        assert_eq!(normalized.scopes.len(), 2);
+        assert_eq!(normalized.scopes[0].album_ids, vec![2, 5]);
+        assert_eq!(normalized.scopes[1].id, SCOPE_FAMILY);
+        assert!(normalized.scopes[1].album_ids.is_empty());
+        assert_eq!(normalized.active_album_ids(), Some(vec![2, 5]));
+
+        let invalid_active = CollectionScopeState {
+            active_id: "missing-scope".to_string(),
+            scopes: Vec::new(),
+        }
+        .normalized();
+        assert_eq!(invalid_active.active_id, SCOPE_EVERYTHING);
+        assert_eq!(invalid_active.active_album_ids(), None);
+    }
+
+    #[test]
+    fn legacy_library_state_without_collection_scope_deserializes() {
+        let legacy: LibraryState = serde_json::from_value(serde_json::json!({
+            "album": { "id": 0, "folderId": null, "folderPath": "", "selected": false },
+            "tag": { "id": null },
+            "calendar": { "year": null, "month": null, "date": null },
+            "camera": { "make": null, "model": null, "lensMake": null, "lensModel": null },
+            "location": { "cc": null, "admin1": null, "name": null },
+            "search": { "searchText": "", "searchHistory": [], "searchHistoryIndex": -1, "similarImageHistory": [], "similarImageHistoryIndex": -1, "fileName": "" },
+            "destFolder": { "albumId": null, "folderId": null, "folderPath": null, "selected": false },
+            "index": { "status": 0, "albumQueue": [], "albumName": "", "indexed": 0, "total": 0 }
+        }))
+        .unwrap();
+        assert_eq!(legacy.collection_scope.active_id, SCOPE_EVERYTHING);
+        assert_eq!(legacy.collection_scope.scopes.len(), 2);
     }
 }

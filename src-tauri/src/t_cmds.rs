@@ -493,6 +493,41 @@ pub fn save_library_state(id: &str, state: LibraryState) -> Result<(), String> {
     t_config::save_library_state(id, state)
 }
 
+/// update and persist a library's collection scope
+#[tauri::command]
+pub fn set_collection_scope(
+    id: &str,
+    scope: t_config::CollectionScopeState,
+) -> Result<t_config::CollectionScopeState, String> {
+    t_config::set_collection_scope(id, scope)
+}
+
+#[tauri::command]
+pub fn check_apple_photos_export_ready() -> crate::t_apple_photos::ApplePhotosToolStatus {
+    crate::t_apple_photos::check_tool_status()
+}
+
+#[tauri::command]
+pub async fn run_apple_photos_export(
+    app_handle: tauri::AppHandle,
+    state: State<'_, std::sync::Arc<crate::t_apple_photos::ApplePhotosExportState>>,
+    request: crate::t_apple_photos::ApplePhotosExportRequest,
+) -> Result<crate::t_apple_photos::ApplePhotosExportResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::t_apple_photos::run_export_blocking(&app_handle, &state, request)
+    })
+    .await
+    .map_err(|e| format!("Apple Photos export task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn cancel_apple_photos_export(
+    state: State<'_, std::sync::Arc<crate::t_apple_photos::ApplePhotosExportState>>,
+) -> Result<bool, String> {
+    state.cancel()
+}
+
 /// get library state
 #[tauri::command]
 pub fn get_library_state(id: &str) -> Result<LibraryState, String> {
