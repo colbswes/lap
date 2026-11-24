@@ -558,6 +558,11 @@ pub fn open_apple_photos_app() -> Result<(), String> {
     crate::t_apple_photos::open_apple_photos_app()
 }
 
+#[tauri::command]
+pub fn set_sync_delete_to_apple_photos(enabled: bool) -> Result<bool, String> {
+    t_config::set_sync_delete_to_apple_photos(enabled)
+}
+
 /// get library state
 #[tauri::command]
 pub fn get_library_state(id: &str) -> Result<LibraryState, String> {
@@ -3333,7 +3338,11 @@ fn delete_file_group(
     group_raw_pairs: bool,
 ) -> Result<BatchDeleteResult, String> {
     let delete = if permanently { t_utils::delete_file_permanently } else { t_utils::trash_path };
-    delete_file_group_with(file_id, file_path, permanently, group_raw_pairs, delete)
+    let result = delete_file_group_with(file_id, file_path, permanently, group_raw_pairs, delete)?;
+    if !result.deleted_file_ids.is_empty() {
+        crate::t_apple_photos::sync_deleted_paths_to_apple_photos(vec![file_path.to_string()]);
+    }
+    Ok(result)
 }
 
 pub(crate) fn delete_file_group_with(
@@ -3887,13 +3896,24 @@ fn delete_resolved_files(
 
     AFile::batch_delete(&deleted_file_ids)
         .map_err(|e| format!("Error while deleting files from DB: {}", e))?;
+    let deleted_ids: HashSet<_> = deleted_file_ids.iter().copied().collect();
+    let deleted_paths: Vec<String> = delete_groups
+        .iter()
+        .flat_map(|group| {
+            std::iter::once((group.primary_id, &group.primary_path))
+                .chain(group.components.iter().map(|(id, path)| (*id, path)))
+        })
+        .filter_map(|(id, path)| deleted_ids.contains(&id).then(|| path.clone()))
+        .collect();
     if cleanup_sidecars {
-        let deleted_ids: HashSet<_> = deleted_file_ids.iter().copied().collect();
-        let removed = delete_groups.iter()
-            .flat_map(|group| std::iter::once((group.primary_id, &group.primary_path))
-                .chain(group.components.iter().map(|(id, path)| (*id, path))))
-            .filter_map(|(id, path)| deleted_ids.contains(&id).then_some(path.as_str()));
-        failed_count += delete_unowned_aae(removed, &[], permanently);
+        failed_count += delete_unowned_aae(
+            deleted_paths.iter().map(String::as_str),
+            &[],
+            permanently,
+        );
+    }
+    if !deleted_paths.is_empty() {
+        crate::t_apple_photos::sync_deleted_paths_to_apple_photos(deleted_paths);
     }
     Ok(BatchDeleteResult {
         failed_count,

@@ -301,6 +301,15 @@ export async function openApplePhotosApp() {
   return false;
 }
 
+export async function setSyncDeleteToApplePhotos(enabled) {
+  try {
+    return await invoke('set_sync_delete_to_apple_photos', { enabled: Boolean(enabled) });
+  } catch (error) {
+    console.error('Failed to update Apple Photos delete sync setting:', error);
+  }
+  return null;
+}
+
 // get library state
 export async function getLibraryState(id) {
   try {

@@ -466,6 +466,18 @@
                 <option value="permanent">{{ $t('msgbox.permanent_delete.title') }}</option>
               </select>
             </label>
+            <label v-if="isMac" class="flex items-start justify-between gap-4 px-1 pt-1 rounded-box hover:bg-base-100/10 transition-colors duration-200 cursor-pointer">
+              <span class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <span>{{ $t('apple_photos.sync_delete_label') }}</span>
+                <span class="text-xs text-base-content/30">{{ $t('apple_photos.sync_delete_hint') }}</span>
+              </span>
+              <input
+                v-model="syncDeleteToApplePhotos"
+                type="checkbox"
+                class="toggle toggle-primary toggle-sm shrink-0 mt-0.5"
+                @change="handleSyncDeleteToApplePhotosChange"
+              />
+            </label>
           </section>
 
 
@@ -805,6 +817,7 @@ import { normalizeThumbnailSize } from '@/common/thumbnailProfiles';
 import { THUMBNAIL_BADGE, MAP_MARKER_SIZES, SETTINGS_TAB, SETTINGS_BASE_WIDTH, SETTINGS_BASE_HEIGHT } from '@/common/constants';
 import {
   getAppConfig,
+  setSyncDeleteToApplePhotos,
   cleanUnusedThumbnailCache,
   getThumbnailCacheLocation,
   getThumbnailCacheMigrationCount,
@@ -862,6 +875,14 @@ let unlistenCloseRequested: (() => void) | null = null;
 
 const cleanupKey = 'settings.advanced.thumbnail_cache.cleanup';
 const cleanupLibraryCount = ref(0);
+const syncDeleteToApplePhotos = ref(true);
+
+async function handleSyncDeleteToApplePhotosChange() {
+  const saved = await setSyncDeleteToApplePhotos(syncDeleteToApplePhotos.value);
+  if (typeof saved === 'boolean') {
+    syncDeleteToApplePhotos.value = saved;
+  }
+}
 const cleanupOpen = ref(false);
 const cleanupRunning = ref(false);
 const cleanupTotal = ref(0);
@@ -1593,7 +1614,11 @@ onMounted(async () => {
   }
 
   
-  cleanupLibraryCount.value = (await getAppConfig())?.libraries?.length ?? 0;
+  const initialAppConfig = await getAppConfig();
+  cleanupLibraryCount.value = initialAppConfig?.libraries?.length ?? 0;
+  if (typeof initialAppConfig?.sync_delete_to_apple_photos === 'boolean') {
+    syncDeleteToApplePhotos.value = initialAppConfig.sync_delete_to_apple_photos;
+  }
 
   // Show window after mount
   await appWindow.show();

@@ -245,6 +245,7 @@ async fn main() {
             t_cmds::list_apple_shared_albums,
             t_cmds::get_apple_shared_album_photos,
             t_cmds::open_apple_photos_app,
+            t_cmds::set_sync_delete_to_apple_photos,
             t_cmds::get_library_state,
             t_cmds::get_current_library_state,
             // album

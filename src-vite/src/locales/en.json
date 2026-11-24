@@ -1976,6 +1976,8 @@
     "shared_album_import": "Import Album to Lap…",
     "shared_album_local_badge": "Local",
     "shared_album_cloud_badge": "iCloud",
-    "shared_album_empty": "No cached previews found in this shared album."
+    "shared_album_empty": "No cached previews found in this shared album.",
+    "sync_delete_label": "Also delete exported photos from Apple Photos",
+    "sync_delete_hint": "When you delete a photo exported from Apple Photos, automatically move it to Apple Photos' Recently Deleted album (macOS will ask to confirm)."
   }
 }

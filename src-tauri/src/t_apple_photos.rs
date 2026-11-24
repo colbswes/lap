@@ -780,6 +780,157 @@ pub fn open_apple_photos_app() -> Result<(), String> {
     }
 }
 
+/// Walk up from a deleted file path looking for an `osxphotos` export database
+/// (`.apple-photos-export.db`). Returns `(export_root, db_path)` if found.
+fn find_export_db_for_path(file_path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let mut current = file_path.parent()?;
+    for _ in 0..8 {
+        let candidate = current.join(DEFAULT_EXPORT_DB_NAME);
+        if candidate.is_file() {
+            return Some((current.to_path_buf(), candidate));
+        }
+        current = current.parent()?;
+    }
+    None
+}
+
+fn open_export_db_readonly(db_path: &Path) -> Result<rusqlite::Connection, rusqlite::Error> {
+    if let Ok(conn) = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        return Ok(conn);
+    }
+    let escaped = db_path.to_string_lossy().replace('?', "%3F").replace('#', "%23");
+    rusqlite::Connection::open_with_flags(
+        format!("file:{escaped}?immutable=1"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+}
+
+/// Look up deduplicated Apple Photos asset UUIDs for any deleted paths that originated
+/// from an `osxphotos` export directory containing `.apple-photos-export.db`.
+pub fn lookup_uuids_for_deleted_paths(paths: &[String]) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut by_db: HashMap<PathBuf, (PathBuf, Vec<String>)> = HashMap::new();
+    for raw in paths {
+        let path = Path::new(raw);
+        let Some((root, db_path)) = find_export_db_for_path(path) else {
+            continue;
+        };
+        let Ok(rel) = path.strip_prefix(&root) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str.is_empty() {
+            continue;
+        }
+        by_db
+            .entry(db_path)
+            .or_insert_with(|| (root, Vec::new()))
+            .1
+            .push(rel_str);
+    }
+
+    let mut uuids = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (db_path, (_root, rel_paths)) in by_db {
+        let Ok(conn) = open_export_db_readonly(&db_path) else {
+            continue;
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT uuid FROM export_data
+             WHERE (filepath = ?1 OR filepath_normalized = ?2)
+               AND uuid IS NOT NULL AND TRIM(uuid) <> ''
+             LIMIT 1",
+        ) else {
+            continue;
+        };
+        for rel in rel_paths {
+            let normalized = rel.to_lowercase();
+            let found: Result<String, _> = stmt.query_row(rusqlite::params![rel, normalized], |row| row.get(0));
+            if let Ok(uuid) = found {
+                let cleaned = uuid.trim().to_uppercase();
+                if !cleaned.is_empty() && seen.insert(cleaned.clone()) {
+                    uuids.push(cleaned);
+                }
+            }
+        }
+    }
+
+    uuids
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn lap_delete_apple_photos_assets(
+        uuids_json: *const std::ffi::c_char,
+        error_out: *mut *mut std::ffi::c_char,
+    ) -> std::ffi::c_int;
+    fn lap_free_string(ptr: *const std::ffi::c_char);
+}
+
+#[cfg(target_os = "macos")]
+pub fn delete_apple_photos_assets_by_uuids(uuids: &[String]) -> Result<usize, String> {
+    if uuids.is_empty() {
+        return Ok(0);
+    }
+    let json = serde_json::to_string(uuids).map_err(|e| e.to_string())?;
+    let c_json = std::ffi::CString::new(json).map_err(|e| e.to_string())?;
+    let mut err_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
+
+    let result = unsafe { lap_delete_apple_photos_assets(c_json.as_ptr(), &mut err_ptr) };
+    if result < 0 {
+        let msg = if !err_ptr.is_null() {
+            let text = unsafe { std::ffi::CStr::from_ptr(err_ptr) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { lap_free_string(err_ptr) };
+            text
+        } else {
+            "Failed to delete assets from Apple Photos.".to_string()
+        };
+        return Err(msg);
+    }
+    if !err_ptr.is_null() {
+        unsafe { lap_free_string(err_ptr) };
+    }
+    Ok(result as usize)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn delete_apple_photos_assets_by_uuids(_uuids: &[String]) -> Result<usize, String> {
+    Ok(0)
+}
+
+/// Automatically move deleted exported photos to Apple Photos' Recently Deleted album
+/// on a background thread when the preference is enabled.
+pub fn sync_deleted_paths_to_apple_photos(paths: Vec<String>) {
+    if cfg!(test) || paths.is_empty() || !crate::t_config::sync_delete_to_apple_photos() {
+        return;
+    }
+    let uuids = lookup_uuids_for_deleted_paths(&paths);
+    if uuids.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        match delete_apple_photos_assets_by_uuids(&uuids) {
+            Ok(count) => {
+                if count > 0 {
+                    eprintln!("Moved {count} deleted photo(s) to Apple Photos Recently Deleted.");
+                }
+            }
+            Err(err) => {
+                eprintln!("Apple Photos delete sync error: {err}");
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,5 +1019,45 @@ mod tests {
                 live_photo_videos: 1,
             }
         );
+    }
+
+    #[test]
+    fn lookup_uuids_resolves_and_deduplicates_exported_files() {
+        let root = std::env::temp_dir().join(format!(
+            "lap_apple_photos_uuid_lookup_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let sub = root.join("2025").join("2025-06");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let db_path = root.join(DEFAULT_EXPORT_DB_NAME);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE export_data (
+                id INTEGER PRIMARY KEY,
+                filepath_normalized TEXT,
+                filepath TEXT,
+                uuid TEXT
+            );
+            INSERT INTO export_data (filepath_normalized, filepath, uuid) VALUES
+                ('2025/2025-06/img_0001.heic', '2025/2025-06/IMG_0001.HEIC', 'aaaa-1111'),
+                ('2025/2025-06/img_0001.mov',  '2025/2025-06/IMG_0001.MOV',  'aaaa-1111'),
+                ('2025/2025-06/img_0002.jpg',  '2025/2025-06/IMG_0002.JPG',  'BBBB-2222');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let paths = vec![
+            sub.join("IMG_0001.HEIC").to_string_lossy().to_string(),
+            sub.join("IMG_0001.MOV").to_string_lossy().to_string(),
+            sub.join("IMG_0002.JPG").to_string_lossy().to_string(),
+            "/tmp/non-exported-family-scan.jpg".to_string(),
+        ];
+
+        let uuids = lookup_uuids_for_deleted_paths(&paths);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(uuids, vec!["AAAA-1111".to_string(), "BBBB-2222".to_string()]);
     }
 }

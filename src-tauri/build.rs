@@ -377,6 +377,14 @@ fn build_libraw() {
             .file("src/pasteboard.mm")
             .compile("lap_pasteboard");
         println!("cargo:rustc-link-lib=framework=AppKit");
+
+        println!("cargo:rerun-if-changed=src/photos_kit.mm");
+        cc::Build::new()
+            .file("src/photos_kit.mm")
+            .flag("-fobjc-arc")
+            .compile("lap_photos_kit");
+        println!("cargo:rustc-link-lib=framework=Photos");
+        println!("cargo:rustc-link-lib=framework=Foundation");
     } else if target_os == "linux" {
         println!("cargo:rerun-if-changed=src/clipboard_linux.c");
         let gtk = pkg_config::Config::new()
