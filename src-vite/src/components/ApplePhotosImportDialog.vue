@@ -1,13 +1,13 @@
 <template>
   <ModalDialog
     :title="$t('apple_photos.dialog_title')"
-    :width="560"
+    :width="580"
     :hideClose="isRunning"
     @cancel="handleClose"
   >
-    <div class="flex flex-col gap-3">
-      <div class="flex items-start justify-between gap-2">
-        <p class="text-xs text-base-content/60 leading-relaxed flex-1">
+    <div class="flex flex-col gap-3 min-w-0">
+      <div class="flex items-start justify-between gap-2 min-w-0">
+        <p class="text-xs text-base-content/60 leading-relaxed flex-1 min-w-0">
           {{ $t('apple_photos.subtitle') }}
         </p>
         <span
@@ -23,6 +23,43 @@
         </span>
       </div>
 
+      <!-- Explicit Mode Switch: Import vs Dry Run Preview -->
+      <div class="grid grid-cols-2 gap-1 p-1 rounded-box bg-base-300/70 border border-base-content/10">
+        <button
+          type="button"
+          :disabled="isRunning"
+          :class="[
+            'h-7 px-3 rounded-[calc(var(--radius-box)-3px)] text-xs font-medium transition-colors cursor-pointer',
+            !dryRun
+              ? 'bg-base-100 text-primary shadow-xs'
+              : 'text-base-content/60 hover:text-base-content hover:bg-base-100/40',
+          ]"
+          @click="dryRun = false"
+        >
+          {{ $t('apple_photos.mode_import') }}
+        </button>
+        <button
+          type="button"
+          :disabled="isRunning"
+          :class="[
+            'h-7 px-3 rounded-[calc(var(--radius-box)-3px)] text-xs font-medium transition-colors cursor-pointer',
+            dryRun
+              ? 'bg-base-100 text-primary shadow-xs'
+              : 'text-base-content/60 hover:text-base-content hover:bg-base-100/40',
+          ]"
+          @click="dryRun = true"
+        >
+          {{ $t('apple_photos.mode_dry_run') }}
+        </button>
+      </div>
+
+      <p
+        v-if="dryRun"
+        class="px-2.5 py-1.5 rounded-box bg-info/10 border border-info/25 text-[11px] text-info"
+      >
+        {{ $t('apple_photos.dry_run_hint') }}
+      </p>
+
       <div
         v-if="toolStatus && !toolStatus.available"
         class="p-2.5 rounded-box bg-error/10 border border-error/25 text-xs text-error"
@@ -31,16 +68,16 @@
       </div>
 
       <!-- Destination folder -->
-      <div class="flex flex-col gap-1">
+      <div class="flex flex-col gap-1 min-w-0">
         <label class="text-xs font-medium text-base-content/80">
           {{ $t('apple_photos.destination') }}
         </label>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 min-w-0">
           <input
             v-model="destPath"
             type="text"
             :disabled="isRunning"
-            class="input input-sm flex-1 bg-base-100/60 border border-base-content/15 text-xs"
+            class="input input-sm flex-1 min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
             placeholder="~/Pictures/Lap-Everyday"
           />
           <button
@@ -55,15 +92,15 @@
       </div>
 
       <!-- Target scope + Versions row -->
-      <div class="grid grid-cols-2 gap-3">
-        <div class="flex flex-col gap-1">
+      <div class="grid grid-cols-2 gap-3 min-w-0">
+        <div class="flex flex-col gap-1 min-w-0">
           <label class="text-xs font-medium text-base-content/80">
             {{ $t('apple_photos.target_scope') }}
           </label>
           <select
             v-model="targetScopeId"
             :disabled="isRunning"
-            class="select select-sm bg-base-100/60 border border-base-content/15 text-xs"
+            class="select select-sm w-full min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
           >
             <option :value="SCOPE_EVERYDAY">{{ $t('scope.everyday') }}</option>
             <option :value="SCOPE_FAMILY">{{ $t('scope.family') }}</option>
@@ -71,14 +108,14 @@
           </select>
         </div>
 
-        <div class="flex flex-col gap-1">
+        <div class="flex flex-col gap-1 min-w-0">
           <label class="text-xs font-medium text-base-content/80">
             {{ $t('apple_photos.versions_label') }}
           </label>
           <select
             v-model="versions"
             :disabled="isRunning"
-            class="select select-sm bg-base-100/60 border border-base-content/15 text-xs"
+            class="select select-sm w-full min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
           >
             <option value="edited-prefer">{{ $t('apple_photos.versions_edited_prefer') }}</option>
             <option value="both">{{ $t('apple_photos.versions_both') }}</option>
@@ -88,81 +125,85 @@
       </div>
 
       <!-- Core checkboxes -->
-      <div class="grid grid-cols-2 gap-x-3 gap-y-1.5 pt-0.5">
-        <label class="flex items-center gap-2 text-xs text-base-content/75 cursor-pointer">
-          <input v-model="preserveLivePhotos" type="checkbox" class="checkbox checkbox-xs checkbox-primary" :disabled="isRunning" />
-          <span>{{ $t('apple_photos.preserve_live_photos') }}</span>
+      <div class="flex flex-col gap-1.5 pt-0.5 min-w-0">
+        <label class="flex items-center gap-2 text-xs text-base-content/80 cursor-pointer min-w-0">
+          <input v-model="preserveLivePhotos" type="checkbox" class="checkbox checkbox-xs checkbox-primary shrink-0" :disabled="isRunning" />
+          <span class="truncate">{{ $t('apple_photos.preserve_live_photos') }}</span>
         </label>
-        <label class="flex items-center gap-2 text-xs text-base-content/75 cursor-pointer">
-          <input v-model="autoIndexInLap" type="checkbox" class="checkbox checkbox-xs checkbox-primary" :disabled="isRunning" />
-          <span>{{ $t('apple_photos.auto_index') }}</span>
+        <label class="flex items-center gap-2 text-xs text-base-content/80 cursor-pointer min-w-0">
+          <input v-model="downloadMissing" type="checkbox" class="checkbox checkbox-xs checkbox-primary shrink-0" :disabled="isRunning" />
+          <span class="truncate">{{ $t('apple_photos.download_missing') }}</span>
         </label>
-        <label class="flex items-center gap-2 text-xs text-base-content/75 cursor-pointer">
-          <input v-model="downloadMissing" type="checkbox" class="checkbox checkbox-xs checkbox-primary" :disabled="isRunning" />
-          <span>{{ $t('apple_photos.download_missing') }}</span>
-        </label>
-        <label class="flex items-center gap-2 text-xs text-base-content/75 cursor-pointer">
-          <input v-model="dryRun" type="checkbox" class="checkbox checkbox-xs checkbox-primary" :disabled="isRunning" />
-          <span>{{ $t('apple_photos.dry_run') }}</span>
+        <label
+          v-if="!dryRun"
+          class="flex items-center gap-2 text-xs text-base-content/80 cursor-pointer min-w-0"
+        >
+          <input v-model="autoIndexInLap" type="checkbox" class="checkbox checkbox-xs checkbox-primary shrink-0" :disabled="isRunning" />
+          <span class="truncate">{{ $t('apple_photos.auto_index') }}</span>
         </label>
       </div>
 
-      <!-- Optional sample & filter section -->
-      <div class="rounded-box border border-base-content/10 bg-base-100/25 overflow-hidden">
+      <!-- Optional filter section -->
+      <div class="rounded-box border border-base-content/10 bg-base-100/25 overflow-hidden min-w-0">
         <button
           type="button"
-          class="w-full px-3 py-2 flex items-center justify-between text-xs font-medium text-base-content/70 hover:text-base-content cursor-pointer"
+          class="w-full px-3 py-2 flex items-center justify-between text-xs font-medium text-base-content/75 hover:text-base-content cursor-pointer"
           @click="showFilters = !showFilters"
         >
           <span>{{ $t('apple_photos.filters_toggle') }}</span>
           <IconRight
-            class="w-4 h-4 transition-transform"
+            class="w-4 h-4 shrink-0 transition-transform"
             :class="showFilters ? 'rotate-90' : ''"
           />
         </button>
 
-        <div v-if="showFilters" class="px-3 pb-3 pt-1 grid grid-cols-2 gap-2.5 border-t border-base-content/5">
-          <div class="flex flex-col gap-1">
-            <label class="text-[11px] text-base-content/60">{{ $t('apple_photos.limit_label') }}</label>
-            <input
-              v-model="limitInput"
-              type="number"
-              min="1"
-              :disabled="isRunning"
-              class="input input-xs bg-base-100/60 border border-base-content/15 text-xs"
-              :placeholder="$t('apple_photos.limit_placeholder')"
-            />
+        <div v-if="showFilters" class="px-3 pb-3 pt-2 flex flex-col gap-2.5 border-t border-base-content/5 min-w-0">
+          <div class="grid grid-cols-2 gap-2.5 min-w-0">
+            <div class="flex flex-col gap-1 min-w-0">
+              <label class="text-[11px] text-base-content/60">{{ $t('apple_photos.from_date_label') }}</label>
+              <input
+                v-model="fromDate"
+                type="text"
+                :disabled="isRunning"
+                class="input input-xs w-full min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
+                placeholder="YYYY-MM-DD"
+              />
+            </div>
+            <div class="flex flex-col gap-1 min-w-0">
+              <label class="text-[11px] text-base-content/60">{{ $t('apple_photos.album_label') }}</label>
+              <input
+                v-model="albumFilter"
+                type="text"
+                :disabled="isRunning"
+                class="input input-xs w-full min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
+                :placeholder="$t('apple_photos.album_placeholder')"
+              />
+            </div>
+            <div class="flex flex-col gap-1 min-w-0">
+              <label class="text-[11px] text-base-content/60">{{ $t('apple_photos.limit_label') }}</label>
+              <input
+                v-model="limitInput"
+                type="number"
+                min="1"
+                :disabled="isRunning"
+                class="input input-xs w-full min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
+                :placeholder="$t('apple_photos.limit_placeholder')"
+              />
+            </div>
+            <div class="flex flex-col gap-1 min-w-0">
+              <label class="text-[11px] text-base-content/60">{{ $t('apple_photos.library_label') }}</label>
+              <input
+                v-model="libraryPath"
+                type="text"
+                :disabled="isRunning"
+                class="input input-xs w-full min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
+                :placeholder="$t('apple_photos.library_placeholder')"
+              />
+            </div>
           </div>
-          <div class="flex flex-col gap-1">
-            <label class="text-[11px] text-base-content/60">{{ $t('apple_photos.from_date_label') }}</label>
-            <input
-              v-model="fromDate"
-              type="text"
-              :disabled="isRunning"
-              class="input input-xs bg-base-100/60 border border-base-content/15 text-xs"
-              placeholder="YYYY-MM-DD"
-            />
-          </div>
-          <div class="flex flex-col gap-1">
-            <label class="text-[11px] text-base-content/60">{{ $t('apple_photos.album_label') }}</label>
-            <input
-              v-model="albumFilter"
-              type="text"
-              :disabled="isRunning"
-              class="input input-xs bg-base-100/60 border border-base-content/15 text-xs"
-              :placeholder="$t('apple_photos.album_placeholder')"
-            />
-          </div>
-          <div class="flex flex-col gap-1">
-            <label class="text-[11px] text-base-content/60">{{ $t('apple_photos.library_label') }}</label>
-            <input
-              v-model="libraryPath"
-              type="text"
-              :disabled="isRunning"
-              class="input input-xs bg-base-100/60 border border-base-content/15 text-xs"
-              :placeholder="$t('apple_photos.library_placeholder')"
-            />
-          </div>
+          <p v-if="String(limitInput).trim()" class="text-[11px] text-base-content/50 leading-snug">
+            {{ $t('apple_photos.limit_hint') }}
+          </p>
         </div>
       </div>
 
@@ -170,7 +211,7 @@
       <div
         v-if="isRunning || progressLines.length > 0"
         ref="logContainerRef"
-        class="max-h-32 overflow-y-auto rounded-box bg-base-300/80 border border-base-content/10 p-2 font-mono text-[11px] text-base-content/70 space-y-0.5 select-text"
+        class="max-h-32 overflow-y-auto rounded-box bg-base-300/80 border border-base-content/10 p-2 font-mono text-[11px] text-base-content/70 space-y-0.5 select-text min-w-0"
       >
         <div v-if="isRunning && progressLines.length === 0" class="flex items-center gap-2 text-base-content/50">
           <span class="loading loading-spinner loading-xs text-primary"></span>
@@ -189,7 +230,7 @@
       <!-- Completion summary -->
       <div
         v-if="exportResult"
-        class="p-3 rounded-box border flex flex-col gap-2"
+        class="p-3 rounded-box border flex flex-col gap-2 min-w-0"
         :class="exportResult.exitCode === 0 && !exportResult.cancelled
           ? 'bg-success/8 border-success/25'
           : (exportResult.cancelled ? 'bg-warning/8 border-warning/25' : 'bg-error/10 border-error/25')"
@@ -207,7 +248,10 @@
           </span>
         </div>
 
-        <div class="grid grid-cols-5 gap-1.5 text-center">
+        <div
+          v-if="!exportResult.cancelled || totalResultCount > 0"
+          class="grid grid-cols-5 gap-1.5 text-center"
+        >
           <div class="rounded-box bg-base-100/50 py-1 px-1">
             <div class="text-xs font-semibold tabular-nums text-base-content">{{ exportResult.exported }}</div>
             <div class="text-[10px] text-base-content/50">{{ $t('apple_photos.stat_exported') }}</div>
@@ -232,12 +276,23 @@
           </div>
         </div>
 
-        <p v-if="exportResult.errorMessage" class="text-[11px] text-error break-words">
+        <p v-if="exportResult.cancelled" class="text-[11px] text-warning/90 leading-snug">
+          {{ $t('apple_photos.cancelled_hint') }}
+        </p>
+        <p v-else-if="exportResult.errorMessage" class="text-[11px] text-error break-words">
           {{ exportResult.errorMessage }}
         </p>
         <p v-if="indexedNotice" class="text-[11px] text-success">
           {{ indexedNotice }}
         </p>
+      </div>
+
+      <!-- Standalone notice when scanning existing folder -->
+      <div
+        v-else-if="indexedNotice"
+        class="p-2.5 rounded-box bg-success/10 border border-success/25 text-xs text-success"
+      >
+        {{ indexedNotice }}
       </div>
 
       <!-- Error banner -->
@@ -246,32 +301,45 @@
       </div>
 
       <!-- Footer -->
-      <div class="flex items-center justify-end gap-2 pt-1">
+      <div class="flex items-center justify-between gap-2 pt-1">
         <button
-          v-if="isRunning"
+          v-if="!isRunning && !dryRun && destPath.trim()"
           type="button"
-          class="btn btn-sm btn-warning text-xs"
-          @click="handleCancel"
+          class="btn btn-sm btn-ghost border border-base-content/15 text-xs"
+          :disabled="isIndexingFolder"
+          @click="scanExistingDestination"
         >
-          {{ $t('apple_photos.cancel_export') }}
+          {{ $t('apple_photos.scan_existing') }}
         </button>
-        <template v-else>
+        <div v-else></div>
+
+        <div class="flex items-center gap-2">
           <button
+            v-if="isRunning"
             type="button"
-            class="btn btn-sm btn-ghost text-xs"
-            @click="handleClose"
+            class="btn btn-sm btn-warning text-xs"
+            @click="handleCancel"
           >
-            {{ $t('apple_photos.close') }}
+            {{ $t('apple_photos.cancel_export') }}
           </button>
-          <button
-            type="button"
-            class="btn btn-sm btn-primary text-xs"
-            :disabled="!canStart"
-            @click="startExport"
-          >
-            {{ dryRun ? $t('apple_photos.start_dry_run') : $t('apple_photos.start_export') }}
-          </button>
-        </template>
+          <template v-else>
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost text-xs"
+              @click="handleClose"
+            >
+              {{ $t('apple_photos.close') }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-primary text-xs"
+              :disabled="!canStart"
+              @click="startExport"
+            >
+              {{ dryRun ? $t('apple_photos.start_dry_run') : $t('apple_photos.start_export') }}
+            </button>
+          </template>
+        </div>
       </div>
     </div>
   </ModalDialog>
@@ -298,6 +366,7 @@ import {
   SCOPE_EVERYTHING,
   isAlbumInScope,
 } from '@/common/collectionScopes';
+import { SIDEBAR } from '@/common/constants';
 import { normalizePathForCompare, getFolderName } from '@/common/utils';
 import { IconRight } from '@/common/icons';
 import ModalDialog from '@/components/ModalDialog.vue';
@@ -325,6 +394,7 @@ const albumFilter = ref('');
 const libraryPath = ref('');
 
 const isRunning = ref(false);
+const isIndexingFolder = ref(false);
 const runError = ref('');
 const indexedNotice = ref('');
 const exportResult = ref<any>(null);
@@ -337,6 +407,17 @@ const canStart = computed(() =>
   Boolean(toolStatus.value?.available) &&
   destPath.value.trim().length > 0
 );
+
+const totalResultCount = computed(() => {
+  if (!exportResult.value) return 0;
+  return (
+    Number(exportResult.value.exported || 0) +
+    Number(exportResult.value.updated || 0) +
+    Number(exportResult.value.skipped || 0) +
+    Number(exportResult.value.missing || 0) +
+    Number(exportResult.value.errors || 0)
+  );
+});
 
 function scopeLabel(scopeId: string): string {
   if (scopeId === SCOPE_EVERYDAY) return t('scope.everyday');
@@ -364,10 +445,17 @@ async function addAndIndexExportedFolder(destination: string) {
 
   if (!album) {
     const name = getFolderName(destination) || 'Apple Photos';
-    album = await addAlbum(destination, name, 'Exported from Apple Photos');
+    album = await addAlbum(destination, name, 'Exported from Apple Photos', {
+      fileTypes: 7,
+      smallImageFilter: 0,
+      excludedFolders: [],
+    });
   }
 
-  if (!album?.id) return;
+  if (!album?.id) {
+    runError.value = t('apple_photos.index_failed');
+    return;
+  }
 
   if (
     targetScopeId.value !== SCOPE_EVERYTHING &&
@@ -380,12 +468,34 @@ async function addAndIndexExportedFolder(destination: string) {
     await libConfig.setActiveScope(targetScopeId.value);
   }
 
+  libConfig.activePane = 'main';
+  libConfig.album.id = Number(album.id);
+  libConfig.album.folderId = null;
+  libConfig.album.folderPath = '';
+  libConfig.album.selected = true;
+  config.main.sidebarIndex = SIDEBAR.LIBRARY;
   config.leftPanel.show = true;
+
   await tauriEmit('albums-refreshed', { libraryId: libConfig._libraryId });
   await tauriEmit('library-total-refreshed', { source: 'collection-scope' });
-  await indexAlbum(Number(album.id));
   indexedNotice.value = t('apple_photos.indexed_notice', { scope: scopeLabel(targetScopeId.value) });
   emit('imported');
+  void indexAlbum(Number(album.id));
+}
+
+async function scanExistingDestination() {
+  const target = destPath.value.trim();
+  if (!target || isRunning.value || isIndexingFolder.value) return;
+  runError.value = '';
+  indexedNotice.value = '';
+  isIndexingFolder.value = true;
+  try {
+    await addAndIndexExportedFolder(target);
+  } catch (error: any) {
+    runError.value = typeof error === 'string' ? error : (error?.message || String(error));
+  } finally {
+    isIndexingFolder.value = false;
+  }
 }
 
 async function startExport() {

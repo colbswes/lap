@@ -474,12 +474,16 @@ export async function getAlbumVisibleCounts() {
 }
 
 // add an album to db
-export async function addAlbum(folderPath, name, description, filters) {
+export async function addAlbum(folderPath, name, description, filters = {}) {
   if(!folderPath) {
     return null;
   }
   try {
-    const { fileTypes, smallImageFilter, excludedFolders } = filters;
+    const {
+      fileTypes = 7,
+      smallImageFilter = 0,
+      excludedFolders = [],
+    } = filters || {};
     const newAlbum = await invoke('add_album', { folderPath, name, description, fileTypes, smallImageFilter, excludedFolders });
     console.log('add_album', newAlbum);
     if(newAlbum) {
