@@ -220,9 +220,9 @@ export const useConfigStore = defineStore('configStore', {
       
       // face recognition settings
       face: {
-        enabled: false, // enable face recognition in image search
+        enabled: true, // enable face recognition in image search
         // Cluster threshold index: 0=Very High, 1=High, 2=Medium, 3=Low
-        clusterThresholdIndex: 2, // Default: Medium
+        clusterThresholdIndex: 2, // Default: Medium (0.65, see faceClusterThresholds)
       },
       importXmpSidecars: true,
     },
@@ -249,7 +249,10 @@ export const useConfigStore = defineStore('configStore', {
     
     // Cluster threshold values: cosine distance (lower = stricter, higher = looser)
     // [Very High, High, Medium, Low]
-    faceClusterThresholds: () => [0.35, 0.45, 0.55, 0.65],
+    // Cosine-distance cutoffs. Calibrated on aligned MobileFaceNet embeddings: same-person
+    // pairs sit around 0.57 while different people rarely come within 0.8, so 0.65 links
+    // most true matches with few mistakes.
+    faceClusterThresholds: () => [0.50, 0.55, 0.65, 0.70],
 
   },
 

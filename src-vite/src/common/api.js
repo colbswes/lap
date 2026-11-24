@@ -2361,6 +2361,16 @@ export async function importApplePets() {
   return await invoke('import_apple_pets');
 }
 
+// unconfirmed faces that probably show this person, most likely first
+export async function getFaceSuggestions(personId, limit = 60) {
+  return await invoke('get_face_suggestions', { personId, limit });
+}
+
+// mark a suggested face as not being this person
+export async function rejectFaceSuggestion(faceId, personId) {
+  return await invoke('reject_face_suggestion', { faceId, personId });
+}
+
 // mark a face as not being its current person; returns that person's id
 export async function removeFaceFromPerson(faceId) {
   return await invoke('remove_face_from_person', { faceId });

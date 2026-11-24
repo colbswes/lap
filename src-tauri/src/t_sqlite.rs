@@ -11212,6 +11212,30 @@ impl Face {
         Ok(assigned)
     }
 
+    /// The user says this face is not `person_id` (from the suggestions view). Unassigns it
+    /// if it is currently that person; otherwise only records the rejection.
+    pub fn reject_for_person_with_conn(
+        conn: &mut Connection,
+        face_id: i64,
+        person_id: i64,
+    ) -> Result<(), String> {
+        let current: Option<i64> = conn
+            .query_row("SELECT person_id FROM faces WHERE id = ?1", params![face_id], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Face {} not found", face_id))?;
+        if current == Some(person_id) {
+            Self::reject_from_person_with_conn(conn, face_id)?;
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO face_rejections (face_id, person_id) VALUES (?1, ?2)",
+            params![face_id, person_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// The user says this face is not its current person: unassign it and remember
     /// the rejection. Boxless manual tags are deleted instead of left orphaned.
     /// Returns the person it was removed from.
@@ -14341,10 +14365,10 @@ mod hidden_album_tests {
             "INSERT INTO persons(id, name, created_at) VALUES
                 (1, 'Alice', 100), (2, 'Person 2', 100), (3, 'Person 3', 100);
              INSERT INTO faces(id, file_id, bbox, person_id, confirmed, created_at) VALUES
-                (10, 1, '{}', 1, 1, 100),
-                (11, 2, '{}', 1, 0, 100),
-                (20, 2, '{}', 2, 0, 100),
-                (30, 3, '{}', 3, 0, 100);",
+                (10, 1, '{\"x\":0,\"y\":0,\"width\":10,\"height\":10}', 1, 1, 100),
+                (11, 2, '{\"x\":0,\"y\":0,\"width\":10,\"height\":10}', 1, 0, 100),
+                (20, 2, '{\"x\":0,\"y\":0,\"width\":10,\"height\":10}', 2, 0, 100),
+                (30, 3, '{\"x\":0,\"y\":0,\"width\":10,\"height\":10}', 3, 0, 100);",
         )
         .unwrap();
         conn
@@ -14395,6 +14419,20 @@ mod hidden_album_tests {
         assert_eq!(added, 1);
         // Person 54 still has face 12, so it survives; Mom keeps 14.
         assert_eq!(person_ids(&conn), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn rejecting_a_suggestion_only_unassigns_when_it_is_that_person() {
+        let mut conn = setup_face_edit_db();
+        // Face 20 belongs to person 2: rejecting it for Alice only records the rejection.
+        Face::reject_for_person_with_conn(&mut conn, 20, 1).unwrap();
+        assert_eq!(face_state(&conn)[2].1, Some(2));
+        assert_eq!(rejections(&conn), vec![(20, 1)]);
+        // Face 11 is Alice's: rejecting it for Alice unassigns it.
+        Face::reject_for_person_with_conn(&mut conn, 11, 1).unwrap();
+        assert_eq!(face_state(&conn)[1], (11, None, false));
+        assert!(rejections(&conn).contains(&(11, 1)));
+        assert!(Face::reject_for_person_with_conn(&mut conn, 999, 1).is_err());
     }
 
     #[test]

@@ -446,6 +446,8 @@ async fn main() {
             t_cmds::delete_face,
             t_cmds::scan_file_faces,
             t_cmds::remove_face_from_person,
+            t_cmds::get_face_suggestions,
+            t_cmds::reject_face_suggestion,
             t_cmds::remove_person_from_files,
             t_cmds::import_apple_pets,
             t_af_area::get_af_areas,

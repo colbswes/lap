@@ -5209,6 +5209,26 @@ pub async fn import_apple_pets(
     .map_err(|e| format!("Apple Photos pet import task failed: {e}"))?
 }
 
+/// Unconfirmed faces that probably show `person_id`, most likely first.
+#[tauri::command]
+pub async fn get_face_suggestions(
+    person_id: i64,
+    limit: Option<usize>,
+) -> Result<Vec<crate::t_cluster::FaceSuggestion>, String> {
+    crate::t_cluster::face_suggestions(person_id, limit.unwrap_or(60))
+        .map_err(|e| format!("Error while getting face suggestions: {}", e))
+}
+
+/// Mark a suggested face as not being `person_id`.
+#[tauri::command]
+pub async fn reject_face_suggestion(face_id: i64, person_id: i64) -> Result<(), String> {
+    let mut conn = t_sqlite::open_conn()?;
+    t_sqlite::Face::reject_for_person_with_conn(&mut conn, face_id, person_id)
+        .map_err(|e| format!("Error while rejecting suggestion: {}", e))?;
+    refresh_person_thumbnails(&[Some(person_id)]);
+    Ok(())
+}
+
 /// Mark a face as not being its current person. Returns that person's id.
 #[tauri::command]
 pub async fn remove_face_from_person(face_id: i64) -> Result<Option<i64>, String> {

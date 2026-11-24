@@ -1188,8 +1188,8 @@ pub fn run_face_indexing(
     let cancel_token = cancel_token_struct.0.clone();
     let status_token = status_token_struct.0.clone();
     let progress_token = progress_token_struct.0.clone();
-    // Use provided epsilon or default to 0.42
-    let epsilon = cluster_epsilon.unwrap_or(0.42);
+    // Use provided epsilon or the recommended default (calibrated on aligned MobileFaceNet embeddings)
+    let epsilon = cluster_epsilon.unwrap_or(t_common::FACE_CLUSTER_THRESHOLD);
 
     // Check if already running
     {

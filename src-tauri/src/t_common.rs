@@ -172,7 +172,14 @@ pub const LOW_QUALITY_MIN_BLUR: f32 = 100.0; // softer than this (at <=112px) is
 // photos scored ~125); only truly unusable smears are dropped now.
 pub const MIN_BLUR_SCORE: f32 = 25.0;
 /// Cosine-distance threshold for linking pet detections (tuned on Apple-labeled pets).
+/// Default clustering distance for human faces. Calibrated on a real library: same-person
+/// pairs have a median distance of ~0.57 while different people rarely come within 0.8.
+pub const FACE_CLUSTER_THRESHOLD: f32 = 0.65;
 pub const PET_CLUSTER_THRESHOLD: f32 = 0.35;
+/// Max mean top-3 distance (to a person's confirmed faces) for a face to be suggested for
+/// review. Measured on a real library: suggestions under 0.6 were ~94% correct, 0.6-0.65 ~22%,
+/// and beyond 0.65 almost all wrong, so the list ends where guesses stop being useful.
+pub const FACE_SUGGESTION_MAX_DISTANCE: f32 = 0.65;
 
 // Clustering Constants
 pub const K_NEIGHBORS: usize = 80; // Prune edges to Top-K (K-NN)

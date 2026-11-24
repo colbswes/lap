@@ -608,6 +608,149 @@ where
     Ok(total_assigned)
 }
 
+/// An unconfirmed face that probably shows a given person.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FaceSuggestion {
+    pub face_id: i64,
+    pub file_id: i64,
+    /// Person the face is currently (automatically) assigned to, if any.
+    pub person_id: Option<i64>,
+    pub person_name: Option<String>,
+    pub similarity: f32,
+}
+
+/// Rank candidates by similarity to a person's reference faces: the mean of the
+/// top-3 cosine similarities, which is steadier than the single best match.
+/// Returns `(candidate index, score)` for scores within `max_distance`, best first.
+pub(crate) fn rank_suggestions(
+    refs: &[Vec<f32>],
+    candidates: &[Vec<f32>],
+    max_distance: f32,
+) -> Vec<(usize, f32)> {
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    let mut ranked: Vec<(usize, f32)> = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, emb)| {
+            let mut top = [f32::MIN; 3];
+            for r in refs {
+                let sim: f32 = emb.iter().zip(r).map(|(a, b)| a * b).sum();
+                if sim > top[2] {
+                    top[2] = sim;
+                    top.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                }
+            }
+            let used = refs.len().min(3);
+            let score = top[..used].iter().sum::<f32>() / used as f32;
+            (1.0 - score <= max_distance).then_some((i, score))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked
+}
+
+/// Faces to review for `person_id`, most likely first: unconfirmed faces of the same
+/// kind, excluding ones the user rejected for this person and photos where the person
+/// is already confirmed. At most one face per photo.
+pub fn face_suggestions(person_id: i64, limit: usize) -> Result<Vec<FaceSuggestion>, String> {
+    let conn = t_sqlite::open_conn()?;
+    let kind: Option<String> = conn
+        .query_row("SELECT kind FROM persons WHERE id = ?1", [person_id], |row| row.get(0))
+        .map_err(|e| format!("Person {} not found: {}", person_id, e))?;
+    let kind = t_sqlite::PersonKind::parse(kind.as_deref());
+    let max_distance = match kind {
+        t_sqlite::PersonKind::Person => t_common::FACE_SUGGESTION_MAX_DISTANCE,
+        t_sqlite::PersonKind::Pet => t_common::PET_CLUSTER_THRESHOLD + 0.15,
+    };
+
+    let rejected: std::collections::HashSet<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT face_id FROM face_rejections WHERE person_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map([person_id], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        ids
+    };
+
+    struct Row {
+        id: i64,
+        file_id: i64,
+        embedding: Option<Vec<f32>>,
+        person_id: Option<i64>,
+        confirmed: bool,
+        person_name: Option<String>,
+    }
+    let rows: Vec<Row> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT f.id, f.file_id, f.embedding, f.person_id, f.confirmed, p.name
+                 FROM faces f LEFT JOIN persons p ON p.id = f.person_id
+                 WHERE f.kind = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([kind.face_kind()], |row| {
+                let bytes: Option<Vec<u8>> = row.get(2)?;
+                Ok(Row {
+                    id: row.get(0)?,
+                    file_id: row.get(1)?,
+                    embedding: bytes.as_deref().and_then(parse_embedding),
+                    person_id: row.get(3)?,
+                    confirmed: row.get::<_, i64>(4)? != 0,
+                    person_name: row.get(5)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+
+    // Reference faces: the person's confirmed faces, or all of its faces if none are confirmed.
+    let own = |r: &&Row| r.person_id == Some(person_id) && r.embedding.is_some();
+    let has_confirmed = rows.iter().filter(own).any(|r| r.confirmed);
+    let refs: Vec<Vec<f32>> = rows
+        .iter()
+        .filter(own)
+        .filter(|r| r.confirmed || !has_confirmed)
+        .filter_map(|r| r.embedding.clone())
+        .collect();
+    let occupied: std::collections::HashSet<i64> = rows
+        .iter()
+        .filter(|r| r.person_id == Some(person_id) && r.confirmed)
+        .map(|r| r.file_id)
+        .collect();
+
+    let candidates: Vec<&Row> = rows
+        .iter()
+        .filter(|r| r.embedding.is_some() && !r.confirmed && !rejected.contains(&r.id))
+        .filter(|r| !occupied.contains(&r.file_id))
+        // Without confirmed faces, the person's own faces are the references, not suggestions.
+        .filter(|r| has_confirmed || r.person_id != Some(person_id))
+        .collect();
+    let embeddings: Vec<Vec<f32>> = candidates.iter().map(|r| r.embedding.clone().unwrap()).collect();
+
+    let mut seen_files = std::collections::HashSet::new();
+    let suggestions = rank_suggestions(&refs, &embeddings, max_distance)
+        .into_iter()
+        .filter(|&(i, _)| seen_files.insert(candidates[i].file_id))
+        .take(limit)
+        .map(|(i, score)| FaceSuggestion {
+            face_id: candidates[i].id,
+            file_id: candidates[i].file_id,
+            person_id: candidates[i].person_id,
+            person_name: candidates[i].person_name.clone(),
+            similarity: score,
+        })
+        .collect();
+    Ok(suggestions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,5 +889,22 @@ mod tests {
         assert!(outcome.matched.is_empty());
         // Should keep only 1 copy of the unconfirmed collage person and 1 copy of the distinct person.
         assert_eq!(outcome.new_clusters, vec![vec![3], vec![5]]);
+    }
+
+    #[test]
+    fn suggestions_rank_by_top3_similarity_and_respect_cutoff() {
+        let refs = vec![
+            unit([1.0, 0.0, 0.0, 0.0]).unwrap(),
+            unit([0.9, 0.1, 0.0, 0.0]).unwrap(),
+        ];
+        let candidates = vec![
+            unit([0.0, 0.0, 1.0, 0.0]).unwrap(), // unrelated
+            unit([0.8, 0.3, 0.0, 0.0]).unwrap(), // similar
+            unit([0.95, 0.05, 0.0, 0.0]).unwrap(), // most similar
+        ];
+        let ranked = rank_suggestions(&refs, &candidates, 0.5);
+        assert_eq!(ranked.iter().map(|r| r.0).collect::<Vec<_>>(), vec![2, 1]);
+        assert!(ranked[0].1 > ranked[1].1);
+        assert!(rank_suggestions(&[], &candidates, 0.5).is_empty());
     }
 }

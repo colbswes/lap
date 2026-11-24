@@ -237,6 +237,13 @@
     @cancel="cancelDeletePerson"
   />
 
+  <!-- "Is this <name>?" suggestions review -->
+  <ReviewSuggestionsDialog
+    v-if="reviewPerson"
+    :person="reviewPerson"
+    @close="onReviewClosed"
+  />
+
   <!-- Merge person picker dialog -->
   <MergePersonDialog
     v-if="mergeDialogSource"
@@ -330,6 +337,7 @@ import {
   IconHide,
   IconUnhide,
   IconGroup,
+  IconPersonSearch,
   IconTrash,
   IconUpdate,
   IconClose,
@@ -339,6 +347,7 @@ import {
 import ContextMenu from '@/components/ContextMenu.vue';
 import MessageBox from '@/components/MessageBox.vue';
 import MergePersonDialog from '@/components/MergePersonDialog.vue';
+import ReviewSuggestionsDialog from '@/components/ReviewSuggestionsDialog.vue';
 import SortMenuButton from '@/components/SortMenuButton.vue';
 
 const props = defineProps({
@@ -582,9 +591,32 @@ const getMultiSelectionMenuItems = () => {
   ];
 };
 
+// Person whose suggestions are being reviewed.
+const reviewPerson = ref<any | null>(null);
+
+function onReviewClosed(payload: { changed: boolean }) {
+  const reviewedId = reviewPerson.value?.id;
+  reviewPerson.value = null;
+  if (!payload.changed) return;
+  void loadPersons(true, true);
+  // Refresh the grid if it is showing this person's photos.
+  if (reviewedId && libConfig.person.id === reviewedId) {
+    libConfig.person.activateTick = Number(libConfig.person.activateTick || 0) + 1;
+  }
+}
+
 const getSinglePersonMenuItems = (person: any) => {
   const hidden = isPersonHidden(person.id);
   return [
+    {
+      label: t('menu.person.review_suggestions'),
+      icon: IconPersonSearch,
+      disabled: isIndexing.value || isMergingPersons.value,
+      action: () => {
+        reviewPerson.value = person;
+      }
+    },
+    { label: "-", action: null },
     {
       label: localeMsg.value.menu?.person?.rename || 'Rename',
       icon: IconRename,
@@ -1174,8 +1206,8 @@ async function clickIndexFaces(rescan = false) {
     const face = config.settings.face;
     const thresholdIndex = face?.clusterThresholdIndex ?? 2; // Default: Medium (index 2)
     // Use getter for thresholds to ensure we get the latest values, even if state is old
-    const thresholds = config.faceClusterThresholds ?? [0.35, 0.45, 0.55, 0.65];
-    const clusterEpsilon = thresholds[thresholdIndex] ?? 0.55;
+    const thresholds = config.faceClusterThresholds ?? [0.50, 0.55, 0.65, 0.70];
+    const clusterEpsilon = thresholds[thresholdIndex] ?? 0.65;
     console.log('clusterEpsilon', clusterEpsilon);
     await indexFaces(clusterEpsilon, rescan);
     await loadPersons();
