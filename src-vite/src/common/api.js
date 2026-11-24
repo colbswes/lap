@@ -278,6 +278,29 @@ export async function cancelApplePhotosExport() {
   return false;
 }
 
+export async function listAppleSharedAlbums(forceRefresh = false) {
+  try {
+    return await invoke('list_apple_shared_albums', { forceRefresh });
+  } catch (error) {
+    console.error('Failed to list Apple Shared Albums:', error);
+  }
+  return [];
+}
+
+export async function getAppleSharedAlbumPhotos(albumUuid) {
+  return await invoke('get_apple_shared_album_photos', { albumUuid });
+}
+
+export async function openApplePhotosApp() {
+  try {
+    await invoke('open_apple_photos_app');
+    return true;
+  } catch (error) {
+    console.error('Failed to open Apple Photos:', error);
+  }
+  return false;
+}
+
 // get library state
 export async function getLibraryState(id) {
   try {

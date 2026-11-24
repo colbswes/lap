@@ -297,6 +297,61 @@
         <li v-else-if="!isLoading && albums.length === 0" class="sidebar-empty text-sm">
           <span class="text-center">{{ $t('tooltip.not_found.albums') }}</span>
         </li>
+
+        <!-- Apple Shared Albums (macOS read-only preview section) -->
+        <li
+          v-if="isMainPane && isMac && (sharedAlbums.length > 0 || sharedAlbumsLoading)"
+          class="mt-3 pt-2 border-t border-base-content/10"
+        >
+          <div class="mx-1 px-1 py-1 flex items-center justify-between gap-1 text-base-content/55">
+            <button
+              type="button"
+              class="flex-1 min-w-0 flex items-center gap-1 text-left text-[11px] font-medium hover:text-base-content cursor-pointer"
+              @click="sharedAlbumsExpanded = !sharedAlbumsExpanded"
+            >
+              <IconRight
+                class="w-3.5 h-3.5 shrink-0 transition-transform"
+                :class="sharedAlbumsExpanded ? 'rotate-90' : ''"
+              />
+              <IconCloud class="w-3.5 h-3.5 shrink-0 opacity-70" />
+              <span class="truncate">
+                {{ $t('apple_photos.shared_albums_title') }}<template v-if="sharedAlbums.length > 0"> ({{ sharedAlbums.length }})</template>
+              </span>
+            </button>
+            <button
+              type="button"
+              class="p-1 rounded-box text-base-content/40 hover:text-base-content/80 cursor-pointer"
+              :title="$t('apple_photos.shared_albums_refresh')"
+              :disabled="sharedAlbumsLoading"
+              @click.stop="loadSharedAlbums(true)"
+            >
+              <IconUpdate class="w-3.5 h-3.5" :class="sharedAlbumsLoading ? 'animate-spin' : ''" />
+            </button>
+          </div>
+
+          <ul v-if="sharedAlbumsExpanded" class="mt-0.5 space-y-0.5">
+            <li
+              v-if="sharedAlbumsLoading && sharedAlbums.length === 0"
+              class="px-3 py-1.5 text-[11px] text-base-content/40"
+            >
+              {{ $t('apple_photos.shared_albums_loading') }}
+            </li>
+            <li v-for="shared in sharedAlbums" :key="shared.uuid">
+              <button
+                type="button"
+                class="w-[calc(100%-0.5rem)] mx-1 px-2 py-1.5 rounded-box flex items-center gap-2 text-left text-xs text-base-content/75 hover:text-base-content hover:bg-base-100/40 transition-colors cursor-pointer"
+                :title="shared.owner ? `${shared.title} — ${$t('apple_photos.shared_album_by', { owner: shared.owner })}` : shared.title"
+                @click="openSharedAlbum(shared)"
+              >
+                <IconCloud class="w-3.5 h-3.5 shrink-0 opacity-55" />
+                <span class="flex-1 min-w-0 truncate">{{ shared.title }}</span>
+                <span class="text-[10px] tabular-nums text-base-content/40 shrink-0">
+                  {{ shared.count.toLocaleString() }}
+                </span>
+              </button>
+            </li>
+          </ul>
+        </li>
       </ul>
     </div>
 
@@ -359,7 +414,7 @@ import {
 import { getAlbumQueueIndex, getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
 import { getAllAlbums, getAlbumVisibleCounts, getAllAlbumFolders, reorderAlbums, addAlbum, editAlbum, removeAlbum, getDragPayload, isDirectoryAccessible,
          fetchFolder, expandFinalFolder, getFileThumbById,
-         getAlbum, checkAlbumAccessibility, cancelIndexing as cancelIndexingApi, listenIndexProgress, listenIndexFinished, recountAlbum } from '@/common/api';
+         getAlbum, checkAlbumAccessibility, cancelIndexing as cancelIndexingApi, listenIndexProgress, listenIndexFinished, recountAlbum, listAppleSharedAlbums } from '@/common/api';
 import { Album, Folder } from '@/common/types';
 import { useAlbumSelectionProvider, SelectionSource } from '@/composables/useAlbumSelection';
 import { useLibraryChangeRefresh } from '@/composables/useLibraryChangeRefresh';
@@ -373,6 +428,7 @@ import TButton from '@/components/TButton.vue';
 
 import {
   IconAdd,
+  IconCloud,
   IconDownload,
   IconMore,
   IconOk,
@@ -631,6 +687,24 @@ const showRemoveAlbumMsgbox = ref(false);   // show remove album
 const importAlbum = ref<Album | null>(null);
 
 const albums = ref<Album[]>([]);
+const sharedAlbums = ref<any[]>([]);
+const sharedAlbumsLoading = ref(false);
+const sharedAlbumsExpanded = ref(true);
+
+async function loadSharedAlbums(forceRefresh = false) {
+  if (!isMainPane.value || !isMac) return;
+  sharedAlbumsLoading.value = true;
+  try {
+    const items = await listAppleSharedAlbums(forceRefresh);
+    sharedAlbums.value = Array.isArray(items) ? items : [];
+  } finally {
+    sharedAlbumsLoading.value = false;
+  }
+}
+
+function openSharedAlbum(album: any) {
+  void tauriEmit('open-apple-shared-album', album);
+}
 const albumFolderRefs = ref<Record<number, InstanceType<typeof AlbumFolder>>>({});
 const selectedFolder = computed(() => selection.selected.value || !selection.folderPath.value ? null : {
   albumId: selection.albumId.value,
@@ -1086,6 +1160,7 @@ const loadAlbumCovers = async () => {
 };
 
 onMounted( async () => {
+  void loadSharedAlbums(false);
   document.addEventListener('pointerdown', handleReorderOutsidePointerDown, true);
   document.addEventListener('dragenter', handleWindowAlbumDrag, true);
   document.addEventListener('dragover', handleWindowAlbumDrag, true);

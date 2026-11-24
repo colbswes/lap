@@ -194,8 +194,17 @@
     <!-- Apple Photos Import Dialog (macOS) -->
     <ApplePhotosImportDialog
       v-if="showApplePhotosImportDialog"
+      :initialPreset="applePhotosImportPreset"
       @imported="void checkLibraryEmpty()"
-      @close="showApplePhotosImportDialog = false"
+      @close="closeApplePhotosImportDialog"
+    />
+
+    <!-- Apple Shared Album Preview Dialog (macOS) -->
+    <SharedAlbumDialog
+      v-if="activeSharedAlbum"
+      :album="activeSharedAlbum"
+      @import-album="handleImportFromSharedAlbum"
+      @close="activeSharedAlbum = null"
     />
   </div>
 
@@ -236,6 +245,7 @@ import CollectionTray from '@/components/CollectionTray.vue';
 import CollectionScopeBar from '@/components/CollectionScopeBar.vue';
 const CollectionScopeDialog = defineAsyncComponent(() => import('@/components/CollectionScopeDialog.vue'));
 const ApplePhotosImportDialog = defineAsyncComponent(() => import('@/components/ApplePhotosImportDialog.vue'));
+const SharedAlbumDialog = defineAsyncComponent(() => import('@/components/SharedAlbumDialog.vue'));
 const ManageLibraries = defineAsyncComponent(() => import('@/components/ManageLibraries.vue'));
 import { getActiveScopeAlbumIds } from '@/common/collectionScopes';
 import iconLogo from '@/assets/images/icon.png';
@@ -373,7 +383,29 @@ const currentLibrary = computed(() =>
 const showManageLibraries = ref(false);
 const showCollectionScopeDialog = ref(false);
 const showApplePhotosImportDialog = ref(false);
+const applePhotosImportPreset = ref<any>(null);
+const activeSharedAlbum = ref<any>(null);
 const collectionScopeDialogInitialId = ref<string | undefined>(undefined);
+
+function closeApplePhotosImportDialog() {
+  showApplePhotosImportDialog.value = false;
+  applePhotosImportPreset.value = null;
+}
+
+function handleImportFromSharedAlbum(album: any) {
+  const safeFolder = String(album?.title || 'Shared-Album')
+    .replace(/[\/:*?"<>|]/g, '-')
+    .trim() || 'Shared-Album';
+  activeSharedAlbum.value = null;
+  applePhotosImportPreset.value = {
+    album: album?.title || '',
+    dest: `~/Pictures/Lap-Shared/${safeFolder}`,
+    excludeShared: false,
+    downloadMissing: true,
+    targetScopeId: 'family',
+  };
+  showApplePhotosImportDialog.value = true;
+}
 const showDesktopTitleBar = isWin || isLinux;
 
 function openCollectionScopeDialog(scopeId?: string) {
@@ -414,6 +446,7 @@ let unlistenAddAlbumRequested: (() => void) | null = null;
 let unlistenEditAlbumRequested: (() => void) | null = null;
 let unlistenConfigureScopes: (() => void) | null = null;
 let unlistenImportApplePhotos: (() => void) | null = null;
+let unlistenOpenSharedAlbum: (() => void) | null = null;
 // Native Edit menu "Select All" routes to the photo selection via the backend event.
 let unlistenMenuSelectAll: (() => void) | null = null;
 const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
@@ -580,9 +613,16 @@ onMounted(async () => {
     openCollectionScopeDialog(event?.payload?.scopeId);
   });
 
-  unlistenImportApplePhotos = await listen('import-apple-photos-requested', () => {
+  unlistenImportApplePhotos = await listen('import-apple-photos-requested', (event: any) => {
     if (isMac) {
+      applePhotosImportPreset.value = event?.payload || null;
       showApplePhotosImportDialog.value = true;
+    }
+  });
+
+  unlistenOpenSharedAlbum = await listen('open-apple-shared-album', (event: any) => {
+    if (isMac && event?.payload?.uuid) {
+      activeSharedAlbum.value = event.payload;
     }
   });
 
@@ -629,6 +669,8 @@ onBeforeUnmount(() => {
   unlistenConfigureScopes = null;
   unlistenImportApplePhotos?.();
   unlistenImportApplePhotos = null;
+  unlistenOpenSharedAlbum?.();
+  unlistenOpenSharedAlbum = null;
 });
 
 function handleHomeKeyDown(event: KeyboardEvent) {

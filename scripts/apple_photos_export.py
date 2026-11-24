@@ -88,6 +88,7 @@ def build_osxphotos_command(
     to_date: str | None = None,
     limit: int | None = None,
     skip_live: bool = False,
+    exclude_shared: bool = True,
     download_missing: bool = False,
     xmp_sidecar: bool = False,
     album_keyword: bool = False,
@@ -126,6 +127,9 @@ def build_osxphotos_command(
     if skip_live:
         cmd.append("--skip-live")
 
+    if exclude_shared:
+        cmd.append("--not-shared")
+
     if library is not None:
         cmd.extend(["--library", str(library)])
 
@@ -143,7 +147,7 @@ def build_osxphotos_command(
     if limit is not None:
         if limit <= 0:
             raise ValueError("--limit must be a positive integer")
-        cmd.extend(["--limit", str(limit)])
+        cmd.extend(["--newest-first", "--limit", str(limit)])
 
     if download_missing:
         cmd.append("--download-missing")
@@ -274,6 +278,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Do not export Live Photo .mov companion videos.",
     )
     parser.add_argument(
+        "--include-shared",
+        action="store_true",
+        help="Include iCloud Shared Albums (excluded by default so personal library exports stay clean).",
+    )
+    parser.add_argument(
         "--download-missing",
         action="store_true",
         help="Attempt to download missing iCloud-optimized originals during export.",
@@ -365,6 +374,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         to_date=args.to_date,
         limit=args.limit,
         skip_live=args.skip_live,
+        exclude_shared=not args.include_shared,
         download_missing=args.download_missing,
         xmp_sidecar=args.xmp_sidecar,
         album_keyword=args.album_keyword,

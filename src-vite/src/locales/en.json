@@ -1937,12 +1937,13 @@
     "versions_both": "Both original & edited",
     "versions_originals": "Originals only",
     "preserve_live_photos": "Include Live Photo motion (grouped as one item)",
+    "exclude_shared": "Exclude iCloud Shared Albums (personal library only)",
     "download_missing": "Download missing iCloud originals",
     "auto_index": "Add & scan folder in Lap when finished",
     "filters_toggle": "Filter what to import (optional)",
     "limit_label": "Max items (optional)",
     "limit_placeholder": "Leave empty for all",
-    "limit_hint": "Checks the oldest N matching items; clear or raise this on repeat runs to import more.",
+    "limit_hint": "Exports the newest N matching items; clear or raise this on repeat runs to import more.",
     "from_date_label": "From date",
     "album_label": "Apple Photos album",
     "album_placeholder": "Entire library",
@@ -1965,6 +1966,16 @@
     "stat_missing": "Missing (iCloud)",
     "stat_errors": "Errors",
     "indexed_notice": "Folder added to {scope} and scanning in Lap.",
-    "index_failed": "Export finished, but Lap could not add the folder automatically. You can add it manually from Folders."
+    "index_failed": "Export finished, but Lap could not add the folder automatically. You can add it manually from Folders.",
+    "shared_albums_title": "Apple Shared Albums",
+    "shared_albums_refresh": "Refresh Shared Albums",
+    "shared_albums_loading": "Loading shared albums…",
+    "shared_album_by": "Shared by {owner}",
+    "shared_album_preview_hint": "Browsing cached Apple Photos previews (0 extra disk space). Open in Photos or import this album for full originals.",
+    "shared_album_open_photos": "Open in Photos",
+    "shared_album_import": "Import Album to Lap…",
+    "shared_album_local_badge": "Local",
+    "shared_album_cloud_badge": "iCloud",
+    "shared_album_empty": "No cached previews found in this shared album."
   }
 }

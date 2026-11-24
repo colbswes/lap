@@ -528,6 +528,36 @@ pub fn cancel_apple_photos_export(
     state.cancel()
 }
 
+#[tauri::command]
+pub async fn list_apple_shared_albums(
+    state: State<'_, std::sync::Arc<crate::t_apple_photos::ApplePhotosExportState>>,
+    force_refresh: Option<bool>,
+) -> Result<Vec<crate::t_apple_photos::AppleSharedAlbum>, String> {
+    let state = state.inner().clone();
+    let force = force_refresh.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::t_apple_photos::list_shared_albums(&state, force)
+    })
+    .await
+    .map_err(|e| format!("Shared albums task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn get_apple_shared_album_photos(
+    album_uuid: String,
+) -> Result<Vec<crate::t_apple_photos::AppleSharedPhoto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::t_apple_photos::get_shared_album_photos(&album_uuid)
+    })
+    .await
+    .map_err(|e| format!("Shared album photos task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn open_apple_photos_app() -> Result<(), String> {
+    crate::t_apple_photos::open_apple_photos_app()
+}
+
 /// get library state
 #[tauri::command]
 pub fn get_library_state(id: &str) -> Result<LibraryState, String> {

@@ -131,6 +131,10 @@
           <span class="truncate">{{ $t('apple_photos.preserve_live_photos') }}</span>
         </label>
         <label class="flex items-center gap-2 text-xs text-base-content/80 cursor-pointer min-w-0">
+          <input v-model="excludeShared" type="checkbox" class="checkbox checkbox-xs checkbox-primary shrink-0" :disabled="isRunning" />
+          <span class="truncate">{{ $t('apple_photos.exclude_shared') }}</span>
+        </label>
+        <label class="flex items-center gap-2 text-xs text-base-content/80 cursor-pointer min-w-0">
           <input v-model="downloadMissing" type="checkbox" class="checkbox checkbox-xs checkbox-primary shrink-0" :disabled="isRunning" />
           <span class="truncate">{{ $t('apple_photos.download_missing') }}</span>
         </label>
@@ -371,6 +375,16 @@ import { normalizePathForCompare, getFolderName } from '@/common/utils';
 import { IconRight } from '@/common/icons';
 import ModalDialog from '@/components/ModalDialog.vue';
 
+const props = defineProps<{
+  initialPreset?: {
+    album?: string;
+    dest?: string;
+    excludeShared?: boolean;
+    downloadMissing?: boolean;
+    targetScopeId?: string;
+  } | null;
+}>();
+
 const emit = defineEmits<{
   (e: 'close'): void;
   (e: 'imported'): void;
@@ -380,17 +394,18 @@ const { t } = useI18n();
 const uiStore = useUIStore();
 
 const toolStatus = ref<any>(null);
-const destPath = ref('');
-const targetScopeId = ref<string>(SCOPE_EVERYDAY);
+const destPath = ref(props.initialPreset?.dest || '');
+const targetScopeId = ref<string>(props.initialPreset?.targetScopeId || SCOPE_EVERYDAY);
 const versions = ref<'edited-prefer' | 'both' | 'originals'>('edited-prefer');
 const preserveLivePhotos = ref(true);
-const downloadMissing = ref(false);
+const excludeShared = ref(props.initialPreset?.excludeShared ?? true);
+const downloadMissing = ref(props.initialPreset?.downloadMissing ?? false);
 const autoIndexInLap = ref(true);
 const dryRun = ref(false);
-const showFilters = ref(false);
+const showFilters = ref(Boolean(props.initialPreset?.album));
 const limitInput = ref('');
 const fromDate = ref('');
-const albumFilter = ref('');
+const albumFilter = ref(props.initialPreset?.album || '');
 const libraryPath = ref('');
 
 const isRunning = ref(false);
@@ -519,6 +534,7 @@ async function startExport() {
       fromDate: fromDate.value.trim() || null,
       limit: parsedLimit && parsedLimit > 0 ? parsedLimit : null,
       skipLive: !preserveLivePhotos.value,
+      excludeShared: excludeShared.value,
       downloadMissing: downloadMissing.value,
       xmpSidecar: false,
       dryRun: dryRun.value,

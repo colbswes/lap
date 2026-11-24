@@ -22,6 +22,31 @@ pub const DEFAULT_SUMMARY_REPORT_NAME: &str = ".lap-apple-photos-report.json";
 pub struct ApplePhotosExportState {
     active_pid: Mutex<Option<u32>>,
     cancelled: AtomicBool,
+    shared_albums_cache: Mutex<Option<Vec<AppleSharedAlbum>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleSharedAlbum {
+    pub uuid: String,
+    pub title: String,
+    pub owner: String,
+    pub count: usize,
+    pub cover_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleSharedPhoto {
+    pub uuid: String,
+    pub filename: String,
+    pub date: Option<String>,
+    pub is_movie: bool,
+    pub is_local_original: bool,
+    pub preview_path: Option<String>,
+    pub original_path: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 impl ApplePhotosExportState {
@@ -98,12 +123,18 @@ pub struct ApplePhotosExportRequest {
     pub limit: Option<u32>,
     #[serde(default)]
     pub skip_live: bool,
+    #[serde(default = "default_true")]
+    pub exclude_shared: bool,
     #[serde(default)]
     pub download_missing: bool,
     #[serde(default)]
     pub xmp_sidecar: bool,
     #[serde(default)]
     pub dry_run: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_versions() -> String {
@@ -298,6 +329,10 @@ pub fn build_export_args(
         args.push("--skip-live".to_string());
     }
 
+    if request.exclude_shared {
+        args.push("--not-shared".to_string());
+    }
+
     if let Some(library) = request.library.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         args.push("--library".to_string());
         args.push(expand_user_path(library).to_string_lossy().to_string());
@@ -322,6 +357,7 @@ pub fn build_export_args(
         if limit == 0 {
             return Err("Limit must be greater than 0.".to_string());
         }
+        args.push("--newest-first".to_string());
         args.push("--limit".to_string());
         args.push(limit.to_string());
     }
@@ -541,6 +577,209 @@ pub fn run_export_blocking(
     Ok(result)
 }
 
+fn resolve_osxphotos_python_command() -> Result<(PathBuf, Vec<String>), String> {
+    let dirs = augmented_search_dirs();
+    // If osxphotos is installed directly, its script shebang points to its Python interpreter.
+    if let Some(osxphotos_bin) = find_executable_in_dirs("osxphotos", &dirs) {
+        if let Ok(content) = std::fs::read_to_string(&osxphotos_bin) {
+            if let Some(first_line) = content.lines().next() {
+                if let Some(shebang) = first_line.strip_prefix("#!") {
+                    let parts: Vec<&str> = shebang.trim().split_whitespace().collect();
+                    if let Some(first) = parts.first() {
+                        let py_path = PathBuf::from(first);
+                        if py_path.is_file() {
+                            let extra: Vec<String> =
+                                parts[1..].iter().map(|s| s.to_string()).collect();
+                            return Ok((py_path, extra));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(uvx_bin) = find_executable_in_dirs("uvx", &dirs) {
+        return Ok((
+            uvx_bin,
+            vec![
+                "--quiet".to_string(),
+                "--from".to_string(),
+                "osxphotos".to_string(),
+                "python".to_string(),
+            ],
+        ));
+    }
+    if let Some(uv_bin) = find_executable_in_dirs("uv", &dirs) {
+        return Ok((
+            uv_bin,
+            vec![
+                "tool".to_string(),
+                "run".to_string(),
+                "--quiet".to_string(),
+                "--from".to_string(),
+                "osxphotos".to_string(),
+                "python".to_string(),
+            ],
+        ));
+    }
+    Err("Could not find 'osxphotos' or 'uvx'/'uv' to read Apple Shared Albums.".to_string())
+}
+
+fn run_osxphotos_python_json<T: for<'de> Deserialize<'de>>(
+    script: &str,
+    extra_args: &[&str],
+) -> Result<T, String> {
+    let (program, prefix) = resolve_osxphotos_python_command()?;
+    let mut cmd = Command::new(&program);
+    cmd.args(&prefix)
+        .arg("-c")
+        .arg(script)
+        .args(extra_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(path_env) = augmented_path_env() {
+        cmd.env("PATH", path_env);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to query Apple Photos shared albums: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("Apple Photos query exited with status {}", output.status)
+        } else {
+            stderr
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout)
+        .map_err(|e| format!("Failed to parse Apple Photos shared album data: {e}"))
+}
+
+pub fn list_shared_albums(
+    state: &ApplePhotosExportState,
+    force_refresh: bool,
+) -> Result<Vec<AppleSharedAlbum>, String> {
+    if !force_refresh {
+        if let Ok(guard) = state.shared_albums_cache.lock() {
+            if let Some(cached) = guard.as_ref() {
+                return Ok(cached.clone());
+            }
+        }
+    }
+
+    const SCRIPT: &str = r#"
+import json, os, osxphotos
+
+def best_preview(photo):
+    for cand in (photo.path_edited, photo.path):
+        if cand and os.path.isfile(cand):
+            return cand
+    derivs = [d for d in (photo.path_derivatives or []) if d and os.path.isfile(d)]
+    if derivs:
+        derivs.sort(key=lambda d: os.path.getsize(d), reverse=True)
+        return derivs[0]
+    return None
+
+db = osxphotos.PhotosDB()
+albums = []
+for album in sorted(db.album_info_shared, key=lambda a: (a.title or '').lower()):
+    photos = album.photos
+    cover = None
+    for p in photos:
+        cover = best_preview(p)
+        if cover:
+            break
+    albums.append({
+        'uuid': album.uuid,
+        'title': album.title or 'Untitled Shared Album',
+        'owner': album.owner or '',
+        'count': len(photos),
+        'coverPath': cover,
+    })
+print(json.dumps(albums, ensure_ascii=False))
+"#;
+
+    let albums: Vec<AppleSharedAlbum> = run_osxphotos_python_json(SCRIPT, &[])?;
+    if let Ok(mut guard) = state.shared_albums_cache.lock() {
+        *guard = Some(albums.clone());
+    }
+    Ok(albums)
+}
+
+pub fn get_shared_album_photos(album_uuid: &str) -> Result<Vec<AppleSharedPhoto>, String> {
+    let uuid = album_uuid.trim();
+    if uuid.is_empty() {
+        return Err("Shared album UUID is required.".to_string());
+    }
+
+    const SCRIPT: &str = r#"
+import json, os, sys, osxphotos
+
+target_uuid = sys.argv[1]
+
+def best_preview(photo):
+    derivs = [d for d in (photo.path_derivatives or []) if d and os.path.isfile(d)]
+    if derivs:
+        derivs.sort(key=lambda d: os.path.getsize(d), reverse=True)
+        return derivs[0]
+    for cand in (photo.path_edited, photo.path):
+        if cand and os.path.isfile(cand):
+            return cand
+    return None
+
+def local_original(photo):
+    for cand in (photo.path_edited, photo.path):
+        if cand and os.path.isfile(cand):
+            return cand
+    return None
+
+db = osxphotos.PhotosDB()
+album = next((a for a in db.album_info_shared if a.uuid == target_uuid), None)
+if album is None:
+    print('[]')
+    raise SystemExit(0)
+
+photos = sorted(
+    album.photos,
+    key=lambda p: p.date.timestamp() if p.date else 0,
+    reverse=True,
+)
+items = []
+for p in photos:
+    orig = local_original(p)
+    preview = best_preview(p) or orig
+    items.append({
+        'uuid': p.uuid,
+        'filename': p.original_filename or p.filename or p.uuid,
+        'date': p.date.isoformat() if p.date else None,
+        'isMovie': bool(p.ismovie),
+        'isLocalOriginal': orig is not None,
+        'previewPath': preview,
+        'originalPath': orig,
+        'width': int(p.width) if p.width else None,
+        'height': int(p.height) if p.height else None,
+    })
+print(json.dumps(items, ensure_ascii=False))
+"#;
+
+    run_osxphotos_python_json(SCRIPT, &[uuid])
+}
+
+pub fn open_apple_photos_app() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-a", "Photos"])
+            .spawn()
+            .map_err(|e| format!("Failed to open Apple Photos: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Apple Photos is only available on macOS.".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,6 +798,7 @@ mod tests {
             to_date: None,
             limit: None,
             skip_live: false,
+            exclude_shared: true,
             download_missing: false,
             xmp_sidecar: false,
             dry_run: false,
@@ -567,6 +807,7 @@ mod tests {
         assert!(args.contains(&"--update".to_string()));
         assert!(args.contains(&"--skip-original-if-edited".to_string()));
         assert!(args.contains(&"--touch-file".to_string()));
+        assert!(args.contains(&"--not-shared".to_string()));
         assert!(!args.contains(&"--cleanup".to_string()));
         assert!(!args.contains(&"--sidecar".to_string()));
         assert!(!args.contains(&"--skip-live".to_string()));
@@ -576,6 +817,7 @@ mod tests {
             album: Some("Favorites".to_string()),
             from_date: Some("2025-01-01".to_string()),
             limit: Some(50),
+            exclude_shared: false,
             download_missing: true,
             dry_run: true,
             ..default_req
@@ -585,8 +827,10 @@ mod tests {
         assert!(custom_args.contains(&"_edited".to_string()));
         assert!(custom_args.contains(&"--album".to_string()));
         assert!(custom_args.contains(&"Favorites".to_string()));
+        assert!(custom_args.contains(&"--newest-first".to_string()));
         assert!(custom_args.contains(&"--limit".to_string()));
         assert!(custom_args.contains(&"50".to_string()));
+        assert!(!custom_args.contains(&"--not-shared".to_string()));
         assert!(custom_args.contains(&"--download-missing".to_string()));
         assert!(custom_args.contains(&"--dry-run".to_string()));
     }
