@@ -78,7 +78,7 @@
             type="text"
             :disabled="isRunning"
             class="input input-sm flex-1 min-w-0 bg-base-100/60 border border-base-content/15 text-xs"
-            placeholder="~/Pictures/Lap-Everyday"
+            placeholder="~/Pictures/Apple Photos Export"
           />
           <button
             type="button"

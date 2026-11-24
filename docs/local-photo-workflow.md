@@ -1,6 +1,6 @@
 # Local Photo Workflow (Album Visibility & Apple Photos Import)
 
-This personal fork adds two focused features to Lap so you can keep everyday photos separate from archives while keeping everything in one catalog.
+This fork adds two features to Lap: hiding sidebar items so you can keep some photos out of everyday browsing while keeping everything in one catalog, and importing from Apple Photos on macOS.
 
 ## 1. Hide / Show Folders, Collections, Smart Collections, and Tags
 
@@ -15,11 +15,11 @@ This personal fork adds two focused features to Lap so you can keep everyday pho
 
 Open **Import from Apple Photos…** from the Welcome screen, the Library dropdown menu (top-left), or the Folders panel `...` menu:
 
-- Choose a destination folder (defaults to `~/Pictures/Lap-Everyday`).
+- Choose a destination folder (defaults to `~/Pictures/Apple Photos Export`).
 - Choose edited photo handling (`Edited if available, else original` by default, `Both`, or `Originals only`), Live Photo preservation, optional iCloud `--download-missing`, and optional sample filters (`Limit`, `From date`, `Album`, or custom `.photoslibrary`).
 - Supports **Dry run** previews, live progress streaming, cancellation, a completion report, and automatic adding + scanning in Lap.
 - **Exclude iCloud Shared Albums** is enabled by default so personal library exports stay clean; your Apple Shared Albums still appear in the collapsible **Apple Shared Albums** section at the bottom of the Folders sidebar, where clicking any shared album lets you browse its cached Apple Photos previews (0 extra disk space), open Apple Photos, or import just that album on demand.
-- **Automatic Apple Photos deletion (macOS)**: enabled by default (**Settings → Advanced → Also delete exported photos from Apple Photos**). When you delete a photo in Lap that originated from an Apple Photos export folder (`.apple-photos-export.db`), Lap automatically looks up its Apple Photos UUID and moves it to Apple Photos' **Recently Deleted** album via PhotoKit (macOS asks to confirm). Deleting photos from non-Apple folders (like your Family Archive) never touches Apple Photos.
+- **Automatic Apple Photos deletion (macOS)**: enabled by default (**Settings → Advanced → Also delete exported photos from Apple Photos**). When you delete a photo in Lap that originated from an Apple Photos export folder (`.apple-photos-export.db`), Lap automatically looks up its Apple Photos UUID and moves it to Apple Photos' **Recently Deleted** album via PhotoKit (macOS asks to confirm). Deleting photos from other folders never touches Apple Photos.
 
 ### From the terminal
 
@@ -31,7 +31,7 @@ It automatically uses `osxphotos` if installed, or falls back to `uvx osxphotos`
 
 ```bash
 python3 scripts/apple_photos_export.py \
-  --dest ~/Pictures/Lap-Everyday \
+  --dest ~/Pictures/Apple Photos Export \
   --limit 50 \
   --dry-run
 ```
@@ -40,7 +40,7 @@ Remove `--dry-run` to export the sample:
 
 ```bash
 python3 scripts/apple_photos_export.py \
-  --dest ~/Pictures/Lap-Everyday \
+  --dest ~/Pictures/Apple Photos Export \
   --limit 50
 ```
 
@@ -48,7 +48,7 @@ python3 scripts/apple_photos_export.py \
 
 ```bash
 python3 scripts/apple_photos_export.py \
-  --dest ~/Pictures/Lap-Everyday
+  --dest ~/Pictures/Apple Photos Export
 ```
 
 - **Edited vs. originals**: defaults to `--versions edited-prefer` (exports the edited version if edited, otherwise the original). Pass `--versions both` to keep both (`_edited` suffix), or `--versions originals` for originals only.

@@ -244,7 +244,7 @@ pub fn default_export_destination() -> PathBuf {
     dirs::picture_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join("Pictures")))
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Lap-Everyday")
+        .join("Apple Photos Export")
 }
 
 pub fn default_photos_library_path() -> Option<PathBuf> {

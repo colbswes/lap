@@ -28,8 +28,7 @@ Usage:
 
 Options:
   --profile <name>      Cargo profile to build (default: release-fast; e.g. release)
-  --target-dir <dir>    Cargo target directory (default: $CARGO_TARGET_DIR, or
-                        /Volumes/Builds/lap/target if writable, else src-tauri/target)
+  --target-dir <dir>    Cargo target directory (default: $CARGO_TARGET_DIR, else src-tauri/target)
   --install-dir <dir>   Directory where Lap.app is installed (default: ~/Applications)
   --no-install          Only build Lap.app; skip installing and relaunching
   --no-launch           Install and verify Lap.app, but do not quit/relaunch it
@@ -86,11 +85,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TARGET_DIR" ]]; then
-  if [[ -d "/Volumes/Builds" && -w "/Volumes/Builds" ]]; then
-    TARGET_DIR="/Volumes/Builds/lap/target"
-  else
-    TARGET_DIR="$REPO_ROOT/src-tauri/target"
-  fi
+  TARGET_DIR="$REPO_ROOT/src-tauri/target"
 fi
 
 # Pick frontend build command (matches tauri.conf.json when pnpm is present, else npm).

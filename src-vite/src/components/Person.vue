@@ -317,6 +317,7 @@ import { resolveMergedPersonName } from '@/common/personMerge';
 import { PERSONS_CHANGED_EVENT } from '@/common/personContext';
 import { nextPersonSelection } from '@/common/personSelection';
 import { isHiddenId, normalizeHiddenIds } from '@/common/hiddenAlbums';
+import { isMac } from '@/common/utils';
 import { emit as tauriEmit, listen } from '@tauri-apps/api/event';
 import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
@@ -506,12 +507,12 @@ const personPanelMenuItems = computed(() => [
     action: () => clickIndexFaces(true),
     disabled: isIndexing.value,
   },
-  {
+  ...(isMac ? [{
     label: t('menu.person.import_apple_pets'),
     icon: IconUpdate,
     action: () => clickImportApplePets(),
     disabled: isIndexing.value || isImportingApplePets.value,
-  },
+  }] : []),
   { label: "-", action: null },
   {
     label: t('menu.person.reset_index'),

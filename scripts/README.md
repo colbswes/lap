@@ -4,7 +4,7 @@ Utility scripts for the Lap project.
 
 ## 0. build_install (local `release-fast` macOS build & install)
 
-Builds Lap with Cargo's `release-fast` profile (thin LTO + parallel codegen), syncs the resulting `Lap.app` into `~/Applications/Lap.app`, verifies the copy with `diff -qr`, and relaunches Lap. Automatically locates `cargo-tauri` / `tauri` / cached `npx` Tauri CLI, falls back from `pnpm` to `npm`, and uses `/Volumes/Builds/lap/target` when writable (override with `CARGO_TARGET_DIR` or `--target-dir`).
+Builds Lap with Cargo's `release-fast` profile (thin LTO + parallel codegen), syncs the resulting `Lap.app` into `~/Applications/Lap.app`, verifies the copy with `diff -qr`, and relaunches Lap. Automatically locates `cargo-tauri` / `tauri` / cached `npx` Tauri CLI, falls back from `pnpm` to `npm`, and builds into `src-tauri/target` (override with `CARGO_TARGET_DIR` or `--target-dir`).
 
 ### Usage
 

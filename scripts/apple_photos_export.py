@@ -226,7 +226,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--dest",
         required=True,
         type=Path,
-        help="Destination folder that Lap indexes as an Album (e.g. ~/Pictures/Lap-Everyday).",
+        help="Destination folder that Lap indexes as an Album (e.g. ~/Pictures/Apple Photos Export).",
     )
     parser.add_argument(
         "--library",
@@ -325,7 +325,7 @@ def format_summary(summary: ExportSummary) -> str:
     ]
     if not summary.dry_run and summary.exit_code == 0:
         lines.append(
-            "Next step:         Open Lap, add/rescan this folder, and assign it to the Everyday scope."
+            "Next step:         Open Lap, add/rescan this folder, if it isn't already in your library."
         )
     return "\n".join(lines)
 
