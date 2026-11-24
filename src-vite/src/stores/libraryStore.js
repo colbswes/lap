@@ -15,6 +15,7 @@ import {
   withToggledAlbumInScope,
   pruneRemovedAlbumFromScopes,
 } from '@/common/collectionScopes';
+import { remapSmartAlbumPersonIds } from '@/common/personMerge';
 
 // The app-level deep watcher calls save() for every store mutation. Keep the
 // last actual payload per library so runtime-only count refreshes do not turn
@@ -128,10 +129,11 @@ export const useLibraryStore = defineStore('libraryStore', {
       name: null,             // location name
     },
 
-    /** @type {{ id: number | null, name: string | null }} */
+    /** @type {{ id: number | null, name: string | null, activateTick: number }} */
     person: {
       id: null,               // selected person id
       name: null,             // selected person name
+      activateTick: 0,        // increments when person content/name changes without id changing
     },
 
     /** @type {{ searchText: string, searchHistory: (string | { text: string, count: number | null })[], searchHistoryIndex: number }} */
@@ -272,6 +274,10 @@ export const useLibraryStore = defineStore('libraryStore', {
             activateTick: _tagActivateTick,
             ...tagState
           } = this.tag;
+          const {
+            activateTick: _personActivateTick,
+            ...personState
+          } = this.person;
             const stateToSave = {
             library: libraryState,
             collectionScope: normalizeCollectionScopeState(this.collectionScope),
@@ -302,7 +308,7 @@ export const useLibraryStore = defineStore('libraryStore', {
               searchTotal: this.index.searchTotal,
               failed: this.index.failed,
             },
-              person: this.person,
+              person: personState,
             };
 
           const payload = JSON.stringify(stateToSave);
@@ -353,6 +359,14 @@ export const useLibraryStore = defineStore('libraryStore', {
 
     async removeAlbumFromScopes(albumId) {
       return await this.applyCollectionScope(pruneRemovedAlbumFromScopes(this.collectionScope, albumId));
+    },
+
+    async remapMergedPersonIds(sourceIds, targetId) {
+      const { albums, changed } = remapSmartAlbumPersonIds(this.smartAlbums, sourceIds, targetId);
+      if (changed) {
+        this.smartAlbums = albums;
+        await this.save();
+      }
     },
   },
 });

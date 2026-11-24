@@ -7092,7 +7092,7 @@ watch(
     config.search.fileType, config.search.favoritesOnly, config.search.sortType, config.search.sortOrder, // search and sort
     config.settings.showSubfolderFiles,                                            // album folder view
     config.settings.folderSort, config.settings.calendarSort, config.settings.locationSort, config.settings.cameraSort, config.search.groupBy, // group sorting and filtering (tag/person sorts only affect their sidebars, not content grouping)
-    libConfig.person.id,                                                              // person
+    libConfig.person.id, libConfig.person.activateTick,                               // person
     config.calendar.view, libConfig.calendar.year, libConfig.calendar.month, libConfig.calendar.date, // calendar
     libConfig.tag.id, libConfig.tag.activateTick, libConfig.tag.multi, libConfig.tag.matchAny, JSON.stringify(libConfig.tag.selectedIds || []), // tag
     libConfig.location.cc, libConfig.location.admin1, libConfig.location.name,                               // location

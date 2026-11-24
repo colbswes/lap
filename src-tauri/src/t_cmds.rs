@@ -5023,6 +5023,27 @@ pub fn delete_person(person_id: i64) -> Result<usize, String> {
     Person::delete(person_id).map_err(|e| format!("Error while deleting person: {}", e))
 }
 
+/// merge one or more source persons into a target person
+#[tauri::command]
+pub fn merge_persons(
+    source_ids: Vec<i64>,
+    target_id: i64,
+    new_name: Option<String>,
+) -> Result<t_sqlite::MergePersonsResult, String> {
+    Person::merge(&source_ids, target_id, new_name.as_deref())
+        .map_err(|e| format!("Error while merging persons: {}", e))
+}
+
+/// find an existing person by name (case-insensitive, trimmed), optionally excluding one person id
+#[tauri::command]
+pub fn find_person_by_name(
+    name: String,
+    exclude_person_id: Option<i64>,
+) -> Result<Option<Person>, String> {
+    Person::find_by_name(&name, exclude_person_id)
+        .map_err(|e| format!("Error while finding person by name: {}", e))
+}
+
 /// get faces for a file
 #[tauri::command]
 pub fn get_faces_for_file(file_id: i64) -> Result<Vec<t_sqlite::Face>, String> {

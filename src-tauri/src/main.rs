@@ -435,6 +435,8 @@ async fn main() {
             t_cmds::get_persons_page,
             t_cmds::rename_person,
             t_cmds::delete_person,
+            t_cmds::merge_persons,
+            t_cmds::find_person_by_name,
             t_cmds::get_faces_for_file,
             t_af_area::get_af_areas,
             t_cmds::get_person_thumbnail,

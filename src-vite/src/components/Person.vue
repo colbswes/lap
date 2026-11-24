@@ -83,17 +83,25 @@
     <!-- Person List -->
     <div
       v-if="allPersons.length > 0"
+      ref="personListRef"
       class="grow overflow-x-hidden overflow-y-auto"
       @scroll="handlePersonListScroll"
     >
       <ul>
         <li v-for="person in sortedPersons" :key="person.id" :id="'person-' + person.id">
           <div
+            :data-person-drop-id="person.id"
             :class="[
-              'sidebar-item gap-2 group',
+              'sidebar-item gap-2 group select-none',
               selectedPerson && selectedPerson.id === person.id && !isRenamingPerson ? 'sidebar-item-selected' : 'sidebar-item-hover',
+              {
+                'opacity-50': draggedPersonId === person.id,
+                'bg-primary/10 ring-1 ring-inset ring-primary/50': dropTargetPersonId === person.id,
+              },
             ]"
-            @click="selectPerson(person)"
+            @pointerdown="startPersonDrag($event, person)"
+            @dragstart.prevent
+            @click="handlePersonClick(person)"
             @contextmenu.prevent.stop="(e: MouseEvent) => handlePersonContextMenu(person, e)"
           >
             <!-- Face thumbnail -->
@@ -101,7 +109,7 @@
               <img 
                 v-if="person.thumbnail" 
                 :src="'data:image/jpeg;base64,' + person.thumbnail" 
-                class="w-full h-full object-cover"
+                class="w-full h-full object-cover pointer-events-none"
               />
               <IconPerson v-else class="w-5 h-5 text-base-content/30" />
             </div>
@@ -113,15 +121,21 @@
               maxlength="255"
               class="input px-1 flex-1 focus:border text-base"
               v-model="person.name"
-              @keydown.enter="handleRenamePerson"
-              @keydown.esc="cancelRenamePerson"
+              @keydown.enter.prevent="handleRenamePerson"
+              @keydown.esc.prevent="cancelRenamePerson"
               @blur="handleRenamePerson"
             />
             <template v-else>
               <span class="sidebar-item-label">
                 {{ getPersonDisplayName(person) }}
               </span>
-              <div class="ml-auto flex flex-row items-center text-base-content/30">
+              <span
+                v-if="dropTargetPersonId === person.id"
+                class="ml-auto px-1.5 py-0.5 rounded-box text-[10px] font-medium bg-primary/15 text-primary border border-primary/30 shrink-0"
+              >
+                {{ $t('menu.person.drop_to_merge') }}
+              </span>
+              <div v-else class="ml-auto flex flex-row items-center text-base-content/30">
                 <span v-if="person.count" class="sidebar-item-count shrink-0">
                   {{ person.count.toLocaleString() }}
                 </span>
@@ -132,7 +146,7 @@
                   <ContextMenu
                     :ref="(el: any) => { if (el) personContextMenus[person.id] = el }"
                     :iconMenu="IconMore"
-                    :menuItems="getMoreMenuItems()"
+                    :menuItems="getMoreMenuItems(person)"
                     :smallIcon="true"
                   />
                 </div>
@@ -170,12 +184,56 @@
   <MessageBox
     v-if="showDeletePersonMsgbox"
     :title="$t('msgbox.delete_person.title')"
-    :message="`${$t('msgbox.delete_person.content', { person: getPersonDisplayName(selectedPerson) })}`"
+    :message="`${$t('msgbox.delete_person.content', { person: getPersonDisplayName(deleteTargetPerson || selectedPerson) })}`"
     :OkText="$t('msgbox.delete_person.ok')"
     :cancelText="$t('msgbox.cancel')"
     :warningOk="true"
     @ok="clickDeletePerson"
-    @cancel="showDeletePersonMsgbox = false"
+    @cancel="cancelDeletePerson"
+  />
+
+  <!-- Merge person picker dialog -->
+  <MergePersonDialog
+    v-if="mergeDialogSource"
+    :source-person="mergeDialogSource"
+    :is-merging="isMergingPersons"
+    :error-message="mergeDialogError"
+    @cancel="closeMergeDialog"
+    @confirm="onMergeDialogConfirm"
+  />
+
+  <!-- Drag-to-merge confirmation -->
+  <MessageBox
+    v-if="pendingDragMerge"
+    :title="$t('msgbox.merge_person.title')"
+    :message="$t('msgbox.merge_person.content', {
+      source: getPersonDisplayName(pendingDragMerge.source),
+      target: getPersonDisplayName(pendingDragMerge.target),
+      resultName: pendingDragMerge.resultName || getPersonDisplayName(pendingDragMerge.target),
+    })"
+    :OkText="$t('msgbox.merge_person.ok')"
+    :cancelText="$t('msgbox.cancel')"
+    :is-loading="isMergingPersons"
+    @ok="confirmDragMerge"
+    @cancel="cancelDragMerge"
+  />
+
+  <!-- Rename-to-existing-name merge confirmation -->
+  <MessageBox
+    v-if="pendingRenameMerge"
+    :title="$t('msgbox.merge_person.title')"
+    :message="$t('msgbox.merge_person.rename_duplicate', {
+      source: pendingRenameMerge.originalName || getPersonDisplayName(pendingRenameMerge.source),
+      target: getPersonDisplayName(pendingRenameMerge.target),
+      count: Number(pendingRenameMerge.target.count || 0).toLocaleString(),
+    })"
+    :OkText="$t('msgbox.merge_person.ok')"
+    :thirdText="$t('msgbox.merge_person.keep_separate')"
+    :cancelText="$t('msgbox.cancel')"
+    :is-loading="isMergingPersons"
+    @ok="confirmRenameMerge"
+    @third="confirmRenameKeepSeparate"
+    @cancel="cancelRenameMerge"
   />
 
   <!-- Reset faces confirmation -->
@@ -208,13 +266,17 @@
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { config, libConfig } from '@/common/config';
-import { getPersonsPage, renamePerson, deletePerson, indexFaces, cancelFaceIndex, isFaceIndexing, listenFaceIndexProgress, listenFaceIndexFinished, listenClusterProgress, resetFaces, getFaceStats } from '@/common/api';
+import { getPersonsPage, renamePerson, deletePerson, mergePersons, findPersonByName, indexFaces, cancelFaceIndex, isFaceIndexing, listenFaceIndexProgress, listenFaceIndexFinished, listenClusterProgress, resetFaces, getFaceStats } from '@/common/api';
+import { resolveMergedPersonName } from '@/common/personMerge';
+import { useToast } from '@/common/toast';
+import { useUIStore } from '@/stores/uiStore';
 import { useLibraryChangeRefresh } from '@/composables/useLibraryChangeRefresh';
 import { SIDEBAR, PERSON_PAGE_SIZE } from '@/common/constants';
 import { 
   IconPerson, 
   IconMore, 
   IconRename, 
+  IconGroup,
   IconTrash,
   IconUpdate,
   IconClose,
@@ -223,6 +285,7 @@ import {
 
 import ContextMenu from '@/components/ContextMenu.vue';
 import MessageBox from '@/components/MessageBox.vue';
+import MergePersonDialog from '@/components/MergePersonDialog.vue';
 import SortMenuButton from '@/components/SortMenuButton.vue';
 
 const props = defineProps({
@@ -237,10 +300,13 @@ const emit = defineEmits(['editDataChanged']);
 /// i18n
 const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
+const toast = useToast();
+const uiStore = useUIStore();
 
 // persons
 const allPersons = ref<any[]>([]);
 const selectedPerson = ref<any>(null);
+const personListRef = ref<HTMLElement | null>(null);
 const isRenamingPerson = ref(false);
 const originalPersonName = ref('');
 const personInputRef = ref<HTMLInputElement[]>([]);
@@ -327,30 +393,56 @@ const personPanelMenuItems = computed(() => [
   },
 ]);
 
-// message boxes
+// message boxes & merge dialogs
 const showDeletePersonMsgbox = ref(false);
+const deleteTargetPerson = ref<any>(null);
 const showResetFacesMsgbox = ref(false);
+const mergeDialogSource = ref<any>(null);
+const mergeDialogError = ref('');
+const isMergingPersons = ref(false);
+const pendingDragMerge = ref<{ source: any; target: any; resultName: string } | null>(null);
+const pendingRenameMerge = ref<{ source: any; target: any; newName: string; originalName: string } | null>(null);
+
+// pointer-based drag-to-merge state (mirrors Tag.vue so it works cleanly in Tauri WKWebView)
+const draggedPersonId = ref<number | null>(null);
+const dropTargetPersonId = ref<number | null>(null);
+let dragStartState: { id: number; pointer: number; x: number; y: number } | null = null;
+let suppressDragClick = false;
 
 // more menuitems
-const getMoreMenuItems = () => [
+const getMoreMenuItems = (person: any) => [
   {
     label: localeMsg.value.menu?.person?.rename || 'Rename',
     icon: IconRename,
+    disabled: isIndexing.value || isMergingPersons.value,
     action: () => {
+      selectPerson(person);
       isRenamingPerson.value = true;
-      originalPersonName.value = selectedPerson.value?.name || '';
+      originalPersonName.value = person?.name || '';
       nextTick(() => {
         if (personInputRef.value && personInputRef.value[0]) {
           personInputRef.value[0].focus();
+          personInputRef.value[0].select();
         }
       });
+    }
+  },
+  {
+    label: localeMsg.value.menu?.person?.merge || 'Merge into…',
+    icon: IconGroup,
+    disabled: isIndexing.value || isMergingPersons.value || (allPersonCount.value <= 1 && !personSearch.value.trim()),
+    action: () => {
+      mergeDialogError.value = '';
+      mergeDialogSource.value = person;
     }
   },
   { label: "-", action: null },
   {
     label: localeMsg.value.menu?.person?.delete || 'Delete',
     icon: IconTrash,
+    disabled: isIndexing.value || isMergingPersons.value,
     action: () => {
+      deleteTargetPerson.value = person;
       showDeletePersonMsgbox.value = true;
     },
   },
@@ -409,6 +501,7 @@ watch(personSearch, () => {
 
 onUnmounted(() => {
   isPersonMounted = false;
+  stopPersonDrag();
   personLoadRequest++;
   if (personSearchTimer) clearTimeout(personSearchTimer);
   if (unlistenProgress) unlistenProgress();
@@ -457,9 +550,18 @@ async function loadPersons(reset = true, validateSelectedPerson = false) {
       hasMorePersons.value = page.has_more;
       // `total` is the search-filtered visible count, so the header reflects the query.
       allPersonCount.value = page.total;
-      if (allPersons.value.length > 0 && !selectedPerson.value && !selectedPersonWasFiltered) {
-        const index = allPersons.value.findIndex(p => p.id === libConfig.person?.id);
-        selectPerson(allPersons.value[index >= 0 ? index : 0]);
+      if (allPersons.value.length > 0 && !selectedPersonWasFiltered) {
+        const activeId = selectedPerson.value?.id ?? libConfig.person?.id;
+        const index = allPersons.value.findIndex(p => p.id === activeId);
+        if (index >= 0) {
+          selectedPerson.value = allPersons.value[index];
+          if (libConfig.person) {
+            libConfig.person.id = allPersons.value[index].id;
+            libConfig.person.name = allPersons.value[index].name;
+          }
+        } else if (!selectedPerson.value) {
+          selectPerson(allPersons.value[0]);
+        }
       }
     } else if (libConfig.person) {
       libConfig.person.id = null;
@@ -478,34 +580,69 @@ function handlePersonListScroll(event: Event) {
   void loadPersons(false);
 }
 
+function handlePersonClick(person: any) {
+  if (suppressDragClick) return;
+  selectPerson(person);
+}
+
 function selectPerson(person: any) {
   if (isRenamingPerson.value) return;
   selectedPerson.value = person;
   if (!libConfig.person) {
-    libConfig.person = { id: null, name: null };
+    libConfig.person = { id: null, name: null, activateTick: 0 };
   }
   libConfig.person.id = person.id;
   libConfig.person.name = person.name;
 }
 
+function bumpPersonContentRefresh() {
+  if (!libConfig.person) {
+    libConfig.person = { id: null, name: null, activateTick: 0 };
+  }
+  libConfig.person.activateTick = Number(libConfig.person.activateTick || 0) + 1;
+}
+
+async function applyRenamePerson(person: any, newName: string) {
+  const result = await renamePerson(person.id, newName);
+  if (result) {
+    person.name = newName;
+    if (libConfig.person?.id === person.id) {
+      libConfig.person.name = newName;
+      bumpPersonContentRefresh();
+    }
+    await loadPersons();
+  }
+}
+
 async function handleRenamePerson() {
   if (!isRenamingPerson.value) return;
 
-  const newName = selectedPerson.value?.name?.trim() || '';
+  const person = selectedPerson.value;
+  const previousName = originalPersonName.value;
+  const newName = person?.name?.trim() || '';
+  isRenamingPerson.value = false;
 
-  if (newName.length === 0 || newName === originalPersonName.value) {
-    isRenamingPerson.value = false;
-    if (selectedPerson.value) {
-      selectedPerson.value.name = originalPersonName.value;
+  if (!person || newName.length === 0 || newName === previousName) {
+    if (person) {
+      person.name = previousName;
     }
     return;
   }
 
-  const result = await renamePerson(selectedPerson.value.id, newName);
-  if (result) {
-    isRenamingPerson.value = false;
-    await loadPersons();
+  // If another person already has this exact name, offer to merge instead of creating duplicates.
+  const existing = await findPersonByName(newName, person.id);
+  if (existing && existing.id !== person.id) {
+    person.name = previousName;
+    pendingRenameMerge.value = {
+      source: person,
+      target: existing,
+      newName,
+      originalName: previousName,
+    };
+    return;
   }
+
+  await applyRenamePerson(person, newName);
 }
 
 function cancelRenamePerson() {
@@ -515,14 +652,215 @@ function cancelRenamePerson() {
   isRenamingPerson.value = false;
 }
 
+async function executeMergePersons(
+  sourcePerson: any,
+  targetPerson: any,
+  newName: string | null = null,
+): Promise<boolean> {
+  if (!sourcePerson || !targetPerson || sourcePerson.id === targetPerson.id || isMergingPersons.value) {
+    return false;
+  }
+
+  isMergingPersons.value = true;
+  mergeDialogError.value = '';
+  const sourceDisplayName = getPersonDisplayName(sourcePerson);
+
+  try {
+    const result = await mergePersons([sourcePerson.id], targetPerson.id, newName);
+    if (!result?.target) {
+      throw new Error(t('menu.person.merge_failed'));
+    }
+
+    await libConfig.remapMergedPersonIds([sourcePerson.id], result.target.id);
+
+    selectedPerson.value = result.target;
+    if (!libConfig.person) {
+      libConfig.person = { id: null, name: null, activateTick: 0 };
+    }
+    libConfig.person.id = result.target.id;
+    libConfig.person.name = result.target.name;
+    bumpPersonContentRefresh();
+
+    await loadPersons(true);
+
+    const targetDisplayName = getPersonDisplayName(result.target);
+    toast.success(
+      t('menu.person.merge_success', {
+        source: sourceDisplayName,
+        target: targetDisplayName,
+      }),
+    );
+    return true;
+  } catch (error: any) {
+    const msg = typeof error === 'string' ? error : (error?.message || t('menu.person.merge_failed'));
+    mergeDialogError.value = msg;
+    toast.error(t('menu.person.merge_failed'));
+    return false;
+  } finally {
+    isMergingPersons.value = false;
+  }
+}
+
+function closeMergeDialog() {
+  if (isMergingPersons.value) return;
+  mergeDialogSource.value = null;
+  mergeDialogError.value = '';
+}
+
+async function onMergeDialogConfirm(payload: { targetPerson: any; newName: string | null }) {
+  const source = mergeDialogSource.value;
+  if (!source) return;
+  const ok = await executeMergePersons(source, payload.targetPerson, payload.newName);
+  if (ok) {
+    mergeDialogSource.value = null;
+    mergeDialogError.value = '';
+  }
+}
+
+async function confirmDragMerge() {
+  const pending = pendingDragMerge.value;
+  if (!pending) return;
+  const ok = await executeMergePersons(
+    pending.source,
+    pending.target,
+    pending.resultName || null,
+  );
+  if (ok) {
+    pendingDragMerge.value = null;
+  }
+}
+
+function cancelDragMerge() {
+  if (isMergingPersons.value) return;
+  pendingDragMerge.value = null;
+}
+
+async function confirmRenameMerge() {
+  const pending = pendingRenameMerge.value;
+  if (!pending) return;
+  const ok = await executeMergePersons(pending.source, pending.target, pending.newName);
+  if (ok) {
+    pendingRenameMerge.value = null;
+  }
+}
+
+async function confirmRenameKeepSeparate() {
+  const pending = pendingRenameMerge.value;
+  if (!pending || isMergingPersons.value) return;
+  pendingRenameMerge.value = null;
+  await applyRenamePerson(pending.source, pending.newName);
+}
+
+function cancelRenameMerge() {
+  if (isMergingPersons.value) return;
+  pendingRenameMerge.value = null;
+}
+
+function startPersonDrag(event: PointerEvent, person: any) {
+  if (
+    event.button !== 0 ||
+    !event.isPrimary ||
+    isRenamingPerson.value ||
+    isIndexing.value ||
+    isMergingPersons.value ||
+    (event.target as Element).closest('button, input, [role=button]')
+  ) {
+    return;
+  }
+  stopPersonDrag();
+  dragStartState = {
+    id: person.id,
+    pointer: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+  };
+  window.addEventListener('pointermove', onPersonDragMove);
+  window.addEventListener('pointerup', onPersonDragEnd);
+  window.addEventListener('pointercancel', stopPersonDrag);
+  window.addEventListener('blur', stopPersonDrag);
+  window.addEventListener('keydown', onPersonDragKeyDown);
+}
+
+function onPersonDragMove(event: PointerEvent) {
+  if (!dragStartState || event.pointerId !== dragStartState.pointer) return;
+  if (draggedPersonId.value === null) {
+    if (Math.hypot(event.clientX - dragStartState.x, event.clientY - dragStartState.y) < 6) {
+      return;
+    }
+    draggedPersonId.value = dragStartState.id;
+    suppressDragClick = true;
+    uiStore.pushInputHandler('PersonDrag');
+  }
+  event.preventDefault();
+  const element = document.elementFromPoint(event.clientX, event.clientY);
+  dropTargetPersonId.value = null;
+  if (!element || !personListRef.value?.contains(element)) return;
+  const targetEl = element.closest<HTMLElement>('[data-person-drop-id]');
+  if (!targetEl) return;
+  const targetId = Number(targetEl.dataset.personDropId);
+  if (Number.isFinite(targetId) && targetId !== draggedPersonId.value) {
+    dropTargetPersonId.value = targetId;
+  }
+}
+
+function onPersonDragEnd(event: PointerEvent) {
+  if (!dragStartState || event.pointerId !== dragStartState.pointer) return;
+  if (draggedPersonId.value !== null) onPersonDragMove(event);
+  const sourceId = draggedPersonId.value;
+  const targetId = dropTargetPersonId.value;
+  stopPersonDrag();
+  if (sourceId !== null && targetId !== null && sourceId !== targetId) {
+    const source = allPersons.value.find(p => p.id === sourceId);
+    const target = allPersons.value.find(p => p.id === targetId);
+    if (source && target) {
+      pendingDragMerge.value = {
+        source,
+        target,
+        resultName: resolveMergedPersonName(source.name, target.name),
+      };
+    }
+  }
+}
+
+function onPersonDragKeyDown(event: KeyboardEvent) {
+  if (event.key === 'Escape') stopPersonDrag();
+}
+
+function stopPersonDrag() {
+  dragStartState = null;
+  draggedPersonId.value = null;
+  dropTargetPersonId.value = null;
+  uiStore.removeInputHandler('PersonDrag');
+  window.removeEventListener('pointermove', onPersonDragMove);
+  window.removeEventListener('pointerup', onPersonDragEnd);
+  window.removeEventListener('pointercancel', stopPersonDrag);
+  window.removeEventListener('blur', stopPersonDrag);
+  window.removeEventListener('keydown', onPersonDragKeyDown);
+  if (suppressDragClick) {
+    setTimeout(() => {
+      suppressDragClick = false;
+    }, 0);
+  }
+}
+
+function cancelDeletePerson() {
+  showDeletePersonMsgbox.value = false;
+  deleteTargetPerson.value = null;
+}
+
 async function clickDeletePerson() {
-  if (selectedPerson.value) {
-    showDeletePersonMsgbox.value = false;
-    const result = await deletePerson(selectedPerson.value.id);
-    if (result) {
-      const index = allPersons.value.findIndex(p => p.id === selectedPerson.value.id);
-      allPersons.value = allPersons.value.filter(p => p.id !== selectedPerson.value.id);
-      allPersonCount.value = Math.max(0, allPersonCount.value - 1);
+  const target = deleteTargetPerson.value || selectedPerson.value;
+  showDeletePersonMsgbox.value = false;
+  deleteTargetPerson.value = null;
+  if (!target) return;
+
+  const result = await deletePerson(target.id);
+  if (result) {
+    const index = allPersons.value.findIndex(p => p.id === target.id);
+    const wasSelected = selectedPerson.value?.id === target.id;
+    allPersons.value = allPersons.value.filter(p => p.id !== target.id);
+    allPersonCount.value = Math.max(0, allPersonCount.value - 1);
+    if (wasSelected) {
       if (index > 0) {
         selectPerson(allPersons.value[index - 1]);
       } else if (index === 0) {

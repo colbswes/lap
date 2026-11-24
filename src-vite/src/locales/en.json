@@ -817,7 +817,20 @@
       "index_faces": "Index faces",
       "reset_index": "Reset index",
       "unnamed": "Unnamed person",
-      "search": "Search people"
+      "search": "Search people",
+      "rename": "Rename",
+      "merge": "Merge into…",
+      "delete": "Delete",
+      "drop_to_merge": "Merge",
+      "merge_dialog_title": "Merge Person",
+      "merge_dialog_hint": "Choose the person to merge into. All faces and photos will be combined into one person.",
+      "merge_select_target": "Select a person",
+      "merge_resulting_name": "Resulting name",
+      "merge_name_placeholder": "Enter person name",
+      "merge_no_candidates": "No other people found",
+      "merge_confirm": "Merge",
+      "merge_success": "Merged '{source}' into '{target}'",
+      "merge_failed": "Failed to merge people"
     },
     "tag": {
       "rename": "Rename",
@@ -866,6 +879,13 @@
       "title": "Delete person",
       "content": "Are you sure you want to delete '{person}'?",
       "ok": "Delete"
+    },
+    "merge_person": {
+      "title": "Merge people",
+      "content": "Merge '{source}' into '{target}'?\nAll faces and photos from '{source}' will be combined into '{resultName}'.",
+      "rename_duplicate": "'{target}' already exists ({count} photos). Do you want to merge '{source}' into '{target}'?",
+      "keep_separate": "Keep separate",
+      "ok": "Merge"
     },
     "drop_import": {
       "title": "Cannot import files",

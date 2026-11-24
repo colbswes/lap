@@ -9261,6 +9261,14 @@ pub struct Person {
     pub thumbnail: Option<String>, // Base64 encoded face thumbnail
 }
 
+/// Result of merging one or more source persons into a target person.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MergePersonsResult {
+    pub target: Person,
+    pub merged_person_ids: Vec<i64>,
+    pub moved_face_count: usize,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PersonPage {
     pub persons: Vec<Person>,
@@ -9799,6 +9807,248 @@ impl Person {
         .map_err(|e| e.to_string())?;
 
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Find an existing person matching `name` (case-insensitive, trimmed), optionally excluding one id.
+    /// Prefers the matching person with the most distinct photos (then lowest id).
+    pub fn find_by_name(name: &str, exclude_person_id: Option<i64>) -> Result<Option<Self>, String> {
+        let conn = open_conn()?;
+        Self::find_by_name_with_conn(&conn, name, exclude_person_id)
+    }
+
+    pub(crate) fn find_by_name_with_conn(
+        conn: &Connection,
+        name: &str,
+        exclude_person_id: Option<i64>,
+    ) -> Result<Option<Self>, String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        let visible_file_conditions = format!(
+            "{} AND {} AND {} AND {}",
+            AFile::album_filter_sql("a"),
+            AFile::search_exclusion_condition("b"),
+            AFile::collection_scope_condition("b"),
+            AFile::live_photo_companion_exclusion_condition(),
+        );
+        let query = format!(
+            "SELECT p.id, p.name,
+                    (SELECT COUNT(DISTINCT a.id)
+                     FROM faces f
+                     JOIN afiles a ON a.id = f.file_id
+                     JOIN afolders b ON b.id = a.folder_id
+                     WHERE f.person_id = p.id{visible_file_conditions}) AS visible_count,
+                    p.thumbnail,
+                    (SELECT COUNT(DISTINCT f2.file_id) FROM faces f2 WHERE f2.person_id = p.id) AS total_count
+             FROM persons p
+             WHERE LOWER(TRIM(COALESCE(p.name, ''))) = LOWER(?1)
+               AND (?2 IS NULL OR p.id != ?2)
+             ORDER BY visible_count DESC, total_count DESC, p.id ASC
+             LIMIT 1"
+        );
+
+        conn.query_row(&query, params![trimmed, exclude_person_id], |row| {
+            let thumb_data: Option<Vec<u8>> = row.get(3)?;
+            let visible_count: i64 = row.get(2)?;
+            let total_count: i64 = row.get(4)?;
+            Ok(Self {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                count: Some(if visible_count > 0 { visible_count } else { total_count }),
+                thumbnail: thumb_data
+                    .as_ref()
+                    .map(|data| general_purpose::STANDARD.encode(data)),
+            })
+        })
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    /// Merge one or more source persons into `target_id` in a single atomic transaction.
+    /// All faces belonging to the source persons are reassigned to `target_id`,
+    /// optional `new_name` is applied (or target keeps its name / adopts a source name if unnamed),
+    /// missing target thumbnail is adopted from a source or regenerated, and source persons are deleted.
+    pub fn merge(
+        source_ids: &[i64],
+        target_id: i64,
+        new_name: Option<&str>,
+    ) -> Result<MergePersonsResult, String> {
+        let mut conn = open_conn()?;
+        Self::merge_with_conn(&mut conn, source_ids, target_id, new_name)
+    }
+
+    pub(crate) fn merge_with_conn(
+        conn: &mut Connection,
+        source_ids: &[i64],
+        target_id: i64,
+        new_name: Option<&str>,
+    ) -> Result<MergePersonsResult, String> {
+        // Deduplicate source IDs and exclude the target itself.
+        let mut unique_sources: Vec<i64> = Vec::new();
+        for &sid in source_ids {
+            if sid != target_id && !unique_sources.contains(&sid) {
+                unique_sources.push(sid);
+            }
+        }
+        if unique_sources.is_empty() {
+            return Err("At least one distinct source person is required to merge".to_string());
+        }
+
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+
+        // 1. Load target person metadata
+        let (target_name, target_cover_face_id, target_thumbnail): (
+            Option<String>,
+            Option<i64>,
+            Option<Vec<u8>>,
+        ) = tx
+            .query_row(
+                "SELECT name, cover_face_id, thumbnail FROM persons WHERE id = ?1",
+                params![target_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Target person {} not found", target_id))?;
+
+        // 2. Load existing source persons (preserving caller order)
+        let mut existing_sources: Vec<(i64, Option<String>, Option<i64>, Option<Vec<u8>>)> =
+            Vec::new();
+        for &sid in &unique_sources {
+            if let Some(row) = tx
+                .query_row(
+                    "SELECT id, name, cover_face_id, thumbnail FROM persons WHERE id = ?1",
+                    params![sid],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+            {
+                existing_sources.push(row);
+            }
+        }
+        if existing_sources.is_empty() {
+            return Err("No valid source persons found to merge".to_string());
+        }
+
+        // 3. Reassign all faces from source persons to target
+        let mut moved_face_count: usize = 0;
+        let mut merged_person_ids: Vec<i64> = Vec::with_capacity(existing_sources.len());
+        for (sid, _, _, _) in &existing_sources {
+            let moved = tx
+                .execute(
+                    "UPDATE faces SET person_id = ?1 WHERE person_id = ?2",
+                    params![target_id, sid],
+                )
+                .map_err(|e| e.to_string())?;
+            moved_face_count += moved;
+            merged_person_ids.push(*sid);
+        }
+
+        // 4. Resolve final name for target
+        let explicit_name = new_name.map(str::trim).filter(|s| !s.is_empty());
+        let resolved_name: Option<String> = if let Some(name) = explicit_name {
+            Some(name.to_string())
+        } else if target_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            target_name.clone()
+        } else {
+            existing_sources
+                .iter()
+                .find_map(|(_, name, _, _)| {
+                    name.as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string)
+                })
+                .or_else(|| target_name.clone())
+        };
+
+        if resolved_name != target_name {
+            tx.execute(
+                "UPDATE persons SET name = ?1 WHERE id = ?2",
+                params![resolved_name, target_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        // 5. Preserve target thumbnail if present; otherwise adopt from a source or regenerate
+        let mut final_cover_face_id = target_cover_face_id;
+        let mut final_thumbnail = target_thumbnail.filter(|bytes| !bytes.is_empty());
+        if final_thumbnail.is_none() {
+            if let Some((_, _, src_cover, src_thumb)) = existing_sources
+                .iter()
+                .find(|(_, _, _, thumb)| thumb.as_ref().is_some_and(|b| !b.is_empty()))
+            {
+                final_thumbnail = src_thumb.clone();
+                if final_cover_face_id.is_none() {
+                    final_cover_face_id = *src_cover;
+                }
+            } else if let Ok(Some(generated)) =
+                Self::generate_thumbnail(&tx, target_id, final_cover_face_id)
+            {
+                final_thumbnail = Some(generated);
+            }
+
+            if final_thumbnail.is_some() || final_cover_face_id != target_cover_face_id {
+                tx.execute(
+                    "UPDATE persons SET cover_face_id = ?1, thumbnail = ?2 WHERE id = ?3",
+                    params![final_cover_face_id, final_thumbnail, target_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
+        // 6. Delete merged source persons (their faces are already reassigned to target_id)
+        for &sid in &merged_person_ids {
+            tx.execute("DELETE FROM persons WHERE id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
+        }
+
+        // 7. Compute updated visible file count for the merged target person
+        let visible_file_conditions = format!(
+            "{} AND {} AND {} AND {}",
+            AFile::album_filter_sql("a"),
+            AFile::search_exclusion_condition("b"),
+            AFile::collection_scope_condition("b"),
+            AFile::live_photo_companion_exclusion_condition(),
+        );
+        let visible_count: i64 = tx
+            .query_row(
+                &format!(
+                    "SELECT COUNT(DISTINCT a.id)
+                     FROM faces f
+                     JOIN afiles a ON a.id = f.file_id
+                     JOIN afolders b ON b.id = a.folder_id
+                     WHERE f.person_id = ?1{visible_file_conditions}"
+                ),
+                params![target_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+
+        Ok(MergePersonsResult {
+            target: Person {
+                id: target_id,
+                name: resolved_name,
+                count: Some(visible_count),
+                thumbnail: final_thumbnail
+                    .as_ref()
+                    .map(|data| general_purpose::STANDARD.encode(data)),
+            },
+            merged_person_ids,
+            moved_face_count,
+        })
     }
 }
 
@@ -12386,5 +12636,177 @@ mod collection_scope_tests {
             assert!(ATag::get_counts_on(&conn).unwrap().is_empty());
             assert!(query_person_counts().is_empty());
         }
+    }
+
+    fn setup_person_merge_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE albums(id INTEGER PRIMARY KEY, path TEXT, file_types INTEGER, small_image_filter INTEGER, excluded_folders TEXT);
+             INSERT INTO albums VALUES (1, '/photos', 7, NULL, '[]');
+             CREATE TABLE afolders(id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT, is_excluded_from_search INTEGER);
+             INSERT INTO afolders VALUES (10, 1, '/photos/2026', 0);
+             CREATE TABLE afiles(
+                id INTEGER PRIMARY KEY, folder_id INTEGER, name TEXT, size INTEGER, file_type INTEGER,
+                taken_date INTEGER, is_favorite INTEGER, e_rating INTEGER, is_picked INTEGER,
+                live_photo_video_id INTEGER, width INTEGER, height INTEGER, e_orientation INTEGER
+             );
+             INSERT INTO afiles VALUES
+                (1, 10, 'p1.jpg', 100, 1, 1700000000, 0, 0, 0, NULL, 1000, 1000, 1),
+                (2, 10, 'p2.jpg', 100, 1, 1700000100, 0, 0, 0, NULL, 1000, 1000, 1),
+                (3, 10, 'p3.jpg', 100, 1, 1700000200, 0, 0, 0, NULL, 1000, 1000, 1),
+                (4, 10, 'p4.jpg', 100, 1, 1700000300, 0, 0, 0, NULL, 1000, 1000, 1);
+             CREATE TABLE persons(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                cover_face_id INTEGER,
+                thumbnail BLOB,
+                created_at INTEGER
+             );
+             CREATE TABLE faces(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL,
+                bbox TEXT,
+                embedding BLOB,
+                person_id INTEGER,
+                created_at INTEGER,
+                FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE,
+                FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE SET NULL
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn merge_persons_reassigns_faces_deletes_sources_and_preserves_target_metadata() {
+        let mut conn = setup_person_merge_db();
+        let _guard = with_test_scope(None);
+
+        let target_thumb: Vec<u8> = vec![0xFF, 0xD8, 0x01];
+        let source_thumb: Vec<u8> = vec![0xFF, 0xD8, 0x02];
+        conn.execute(
+            "INSERT INTO persons(id, name, cover_face_id, thumbnail, created_at) VALUES
+                (1, 'Alice', 10, ?1, 100),
+                (2, 'Person 2', 20, ?2, 101),
+                (3, 'Person 3', 30, NULL, 102)",
+            params![target_thumb, source_thumb],
+        )
+        .unwrap();
+        // File 1 has target; file 2 has BOTH target and source 2; file 3 has source 2; file 4 has source 3.
+        conn.execute_batch(
+            "INSERT INTO faces(id, file_id, bbox, person_id, created_at) VALUES
+                (10, 1, '{}', 1, 100),
+                (11, 2, '{}', 1, 100),
+                (20, 2, '{}', 2, 101),
+                (21, 3, '{}', 2, 101),
+                (30, 4, '{}', 3, 102);",
+        )
+        .unwrap();
+
+        let result = Person::merge_with_conn(&mut conn, &[2, 3, 1, 2], 1, None).unwrap();
+        assert_eq!(result.target.id, 1);
+        assert_eq!(result.target.name.as_deref(), Some("Alice"));
+        // 4 distinct files (file 2 counted once even though it has 2 faces assigned to Alice)
+        assert_eq!(result.target.count, Some(4));
+        assert_eq!(
+            result.target.thumbnail.as_deref(),
+            Some(general_purpose::STANDARD.encode(&target_thumb).as_str())
+        );
+        assert_eq!(result.merged_person_ids, vec![2, 3]);
+        assert_eq!(result.moved_face_count, 3);
+
+        // Source persons deleted, all 5 faces now point to person 1
+        let person_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(person_count, 1);
+        let faces_on_target: i64 = conn
+            .query_row("SELECT COUNT(*) FROM faces WHERE person_id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(faces_on_target, 5);
+    }
+
+    #[test]
+    fn merge_persons_adopts_thumbnail_and_name_when_target_missing_or_overridden() {
+        let mut conn = setup_person_merge_db();
+        let _guard = with_test_scope(None);
+
+        let source_thumb: Vec<u8> = vec![0xFF, 0xD8, 0x09, 0x0A];
+        conn.execute(
+            "INSERT INTO persons(id, name, cover_face_id, thumbnail, created_at) VALUES
+                (1, NULL, NULL, NULL, 100),
+                (2, 'Bob', 20, ?1, 101)",
+            params![source_thumb],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO faces(id, file_id, bbox, person_id, created_at) VALUES
+                (10, 1, '{}', 1, 100),
+                (20, 2, '{}', 2, 101);",
+        )
+        .unwrap();
+
+        let result = Person::merge_with_conn(&mut conn, &[2], 1, None).unwrap();
+        assert_eq!(result.target.name.as_deref(), Some("Bob"));
+        assert_eq!(
+            result.target.thumbnail.as_deref(),
+            Some(general_purpose::STANDARD.encode(&source_thumb).as_str())
+        );
+        let cover_face_id: Option<i64> = conn
+            .query_row("SELECT cover_face_id FROM persons WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cover_face_id, Some(20));
+
+        // Explicit new_name overrides existing name
+        conn.execute(
+            "INSERT INTO persons(id, name, cover_face_id, thumbnail, created_at) VALUES (3, 'Person 3', NULL, NULL, 102)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO faces(id, file_id, bbox, person_id, created_at) VALUES (30, 3, '{}', 3, 102)",
+            [],
+        )
+        .unwrap();
+        let renamed = Person::merge_with_conn(&mut conn, &[3], 1, Some("  Robert  ")).unwrap();
+        assert_eq!(renamed.target.name.as_deref(), Some("Robert"));
+        assert_eq!(renamed.target.count, Some(3));
+    }
+
+    #[test]
+    fn merge_persons_rejects_invalid_inputs_and_find_by_name_matches_case_insensitively() {
+        let mut conn = setup_person_merge_db();
+        let _guard = with_test_scope(None);
+
+        conn.execute_batch(
+            "INSERT INTO persons(id, name, cover_face_id, thumbnail, created_at) VALUES
+                (1, 'Sarah', NULL, NULL, 100),
+                (2, 'Person 2', NULL, NULL, 101);
+             INSERT INTO faces(id, file_id, bbox, person_id, created_at) VALUES
+                (10, 1, '{}', 1, 100),
+                (11, 2, '{}', 1, 100),
+                (20, 3, '{}', 2, 101);",
+        )
+        .unwrap();
+
+        // Reject merging a person into itself or unknown target
+        assert!(Person::merge_with_conn(&mut conn, &[1], 1, None).is_err());
+        assert!(Person::merge_with_conn(&mut conn, &[], 1, None).is_err());
+        assert!(Person::merge_with_conn(&mut conn, &[2], 999, None).is_err());
+        assert!(Person::merge_with_conn(&mut conn, &[999], 1, None).is_err());
+
+        // Case-insensitive + trimmed lookup excluding self
+        let found = Person::find_by_name_with_conn(&conn, "  sarah ", Some(2))
+            .unwrap()
+            .expect("should match Sarah");
+        assert_eq!(found.id, 1);
+        assert_eq!(found.count, Some(2));
+        assert!(Person::find_by_name_with_conn(&conn, "sarah", Some(1))
+            .unwrap()
+            .is_none());
+        assert!(Person::find_by_name_with_conn(&conn, "   ", None)
+            .unwrap()
+            .is_none());
     }
 }

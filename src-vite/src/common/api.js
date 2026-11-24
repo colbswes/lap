@@ -2310,6 +2310,26 @@ export async function deletePerson(personId) {
   return null;
 }
 
+// merge one or more source persons into a target person
+export async function mergePersons(sourceIds, targetId, newName = null) {
+  try {
+    return await invoke('merge_persons', { sourceIds, targetId, newName });
+  } catch (error) {
+    console.error('Failed to merge persons:', error);
+    throw error;
+  }
+}
+
+// find an existing person by name (case-insensitive, trimmed), optionally excluding one id
+export async function findPersonByName(name, excludePersonId = null) {
+  try {
+    return await invoke('find_person_by_name', { name, excludePersonId });
+  } catch (error) {
+    console.error('Failed to find person by name:', error);
+  }
+  return null;
+}
+
 // get faces for a file
 export async function getFacesForFile(fileId) {
   try {
