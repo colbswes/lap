@@ -88,6 +88,14 @@ export const useLibraryStore = defineStore('libraryStore', {
       counts: {},
     },
 
+    /** @type {{ selectedId: number | null, artistId: number, artistName: string, activateTick: number }} */
+    event: {
+      artistId: 0,
+      artistName: '',
+      selectedId: null,      // selected event (a concert/festival collection) id
+      activateTick: 0,
+    },
+
     /** @type {{ id: number | null, multi: boolean, previousId: number | null, selectedIds: number[], matchAny: boolean, collapsedTagIds: number[], assignCollapsedTagIds: number[], activateTick: number, counts: Record<string, number> }} */
     tag: {
       id: null,
@@ -175,6 +183,7 @@ export const useLibraryStore = defineStore('libraryStore', {
 
         // Load library state from backend
         const backendState = await getCurrentLibraryState();
+        Object.assign(this.event, { selectedId: null, artistId: 0, artistName: '' });
         if (backendState) {
           Object.keys(backendState).forEach(key => {
             if (this[key] !== undefined) {
@@ -201,6 +210,9 @@ export const useLibraryStore = defineStore('libraryStore', {
           : [];
         this.collection.selectedId = Number(this.collection.selectedId || 0) > 0
           ? Number(this.collection.selectedId)
+          : null;
+        this.event.selectedId = Number(this.event.selectedId || 0) > 0
+          ? Number(this.event.selectedId)
           : null;
 
         this._initialized = true;
@@ -294,6 +306,7 @@ export const useLibraryStore = defineStore('libraryStore', {
             smartAlbums: this.smartAlbums,
             dedupPreferredFolderIds: this.dedupPreferredFolderIds,
             collection: collectionState,
+            event: { selectedId: this.event.selectedId, artistId: this.event.artistId, artistName: this.event.artistName },
             tag: tagState,
             calendar: this.calendar,
             camera: this.camera,

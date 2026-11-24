@@ -466,6 +466,17 @@ pub struct CollectionState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct EventState {
+    #[serde(default, alias = "eventId", alias = "selected_id")]
+    pub selected_id: Option<i64>,
+    #[serde(default)]
+    pub artist_id: Option<i64>,
+    #[serde(default)]
+    pub artist_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct DestFolderState {
     #[serde(alias = "album_id")]
     pub album_id: Option<i64>,
@@ -528,6 +539,9 @@ pub struct LibraryState {
     pub person: PersonState,
     #[serde(default)]
     pub collection: CollectionState,
+    /// Selection in the Events sidebar (events are typed collections).
+    #[serde(default)]
+    pub event: EventState,
     pub search: SearchState,
     #[serde(alias = "dest_folder")]
     pub dest_folder: DestFolderState,

@@ -50,6 +50,21 @@
           class="min-w-0 overflow-hidden"
           @navigate="handleTitleBreadcrumbNavigate"
         />
+        <div v-if="showCollectionLineup" class="ml-2 flex items-center gap-1 min-w-0 overflow-hidden" :title="$t('collection.lineup')">
+          <button
+            v-for="artist in collectionLineup.slice(0, COLLECTION_LINEUP_LIMIT)"
+            :key="artist.id"
+            type="button"
+            class="badge badge-sm badge-outline shrink-0 gap-1 border-base-content/10 bg-base-content/5 font-medium text-base-content/65 hover:text-base-content cursor-pointer"
+            @click.stop="openLineupArtist(artist)"
+          >
+            <IconMicrophone class="size-3 shrink-0" />{{ artist.name }}
+          </button>
+          <span v-if="collectionLineup.length > COLLECTION_LINEUP_LIMIT" class="shrink-0 text-xs text-base-content/40"
+            :title="collectionLineup.slice(COLLECTION_LINEUP_LIMIT).map(artist => artist.name).join(', ')">
+            +{{ collectionLineup.length - COLLECTION_LINEUP_LIMIT }}
+          </span>
+        </div>
       </div>
 
       <!-- toolbar -->
@@ -564,6 +579,7 @@
             @metadata-saved="onMetadataSaved"
             @navigate-folder="handleInfoNavigateFolder"
             @navigate-metadata="handleNavigateMetadata"
+            @artists-changed="handleArtistsChanged()"
             @navigate-person="handleNavigatePerson"
           />
         </div>
@@ -806,6 +822,7 @@ import { ask, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { PREVIEW_WINDOW_FOCUS_RESTORED } from '@/common/previewWindow';
 import { useI18n } from 'vue-i18n';
+import { collectionKindIcon } from '@/common/collectionKinds';
 import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTimeLine, getQueryFiles, getFilesByIds, getGroupedQueryRows, getGroupedFilePosition, getGroupFileIds, getQueryFileIds, syncAlbumFolderMtimes, reconcileRawJpegPairs,
@@ -816,7 +833,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          updateFileInfo, refreshFileInfo, changeVideoThumbnail, getSupportedFormatExtensions, importFiles, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, isCloudOnlyFile, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, scanFileFaces, removePersonFromFiles, listenFaceIndexProgress,
          openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, setLastSelectedItemIndex,
          dedupDelete, getQueryFilePosition, getFolderSearchExcluded,
-         listCollections, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile, saveXmpMetadata } from '@/common/api';
+         listCollections, getCollectionArtists, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile, saveXmpMetadata } from '@/common/api';
 import { config, libConfig } from '@/common/config';
 import { createThumbnailScheduler } from '@/common/thumbnailScheduler';
 import {
@@ -889,10 +906,10 @@ import {
   IconFolder,
   IconFolderCog,
   IconTag,
+  IconMicrophone,
   IconBolt,
   IconLocation,
   IconCameraAperture,
-  IconCollection,
   IconLeft,
   IconRight,
   IconSeparator,
@@ -1735,6 +1752,7 @@ const isRandomSort = computed(() => {
 });
 
 const effectiveGroupBy = computed(() => {
+  if (isEventContent.value && tempViewMode.value === 'none') return GROUP.DAY;
   if (isRandomSort.value) return GROUP.NONE;
   const smartAlbum = getActiveCustomSmartAlbum();
   const groupBy = Number(
@@ -1760,6 +1778,7 @@ const isGroupingControlAvailable = computed(() =>
   !isScanStreamingMode.value &&
   tempViewMode.value === 'none' &&
   (libConfig.activePane === 'collection' || (
+    !isEventContent.value &&
     !isSearchGroupingView.value &&
     !isSubjectGroupingView.value
   ))
@@ -1859,7 +1878,7 @@ function getGroupingQueryParams() {
   const baseParams = currentQuerySource.value === 'smart' && currentSmartQueryParams.value
     ? currentSmartQueryParams.value
     : currentQueryParams.value;
-  const calendarSort = (config.main.sidebarIndex === SIDEBAR.LIBRARY && libConfig.library.item === LIB_ITEM.TODAY)
+  const calendarSort = isEventContent.value || (config.main.sidebarIndex === SIDEBAR.LIBRARY && libConfig.library.item === LIB_ITEM.TODAY)
     ? DATE_SORT.TAKEN_DESC
     : Number(config.settings.calendarSort || 0);
   return {
@@ -2451,7 +2470,7 @@ const checkUnsavedChanges = (action: () => void) => {
 // Open a temporary view filtered by the clicked metadata (camera/lens/location).
 // Like "find related photos", the back button returns to the previous view.
 function enterMetadataTempView(
-  mode: 'camera' | 'lens' | 'location' | 'tag',
+  mode: 'camera' | 'lens' | 'location' | 'tag' | 'artist',
   title: string,
   params: Record<string, any>,
 ) {
@@ -2477,6 +2496,11 @@ function handleNavigateMetadata(payload: { type: string; [key: string]: any }) {
     case 'tag': {
       const tagId = Number(payload.tagId);
       if (tagId > 0) enterMetadataTempView('tag', payload.name || '', { tagId, searchFileType: 0 });
+      break;
+    }
+    case 'artist': {
+      const artistId = Number(payload.artistId);
+      if (artistId > 0) enterMetadataTempView('artist', payload.name || '', { artistId, searchFileType: 0 });
       break;
     }
     case 'camera': {
@@ -3496,7 +3520,8 @@ async function clearContentInternalDrag(event?: PointerEvent) {
         count: Number(result?.added || 0),
         fileIds: files.map((file: any) => file.id),
       });
-      if (libConfig.activePane === 'collection' && Number(libConfig.collection.selectedId || 0) === targetCollectionId) {
+      if ((libConfig.activePane === 'collection' && Number(libConfig.collection.selectedId || 0) === targetCollectionId)
+        || (isEventContent.value && Number(libConfig.event.selectedId || 0) === targetCollectionId)) {
         await updateContent(true);
       }
       return;
@@ -3788,6 +3813,9 @@ const currentQueryParams = ref({
   tagId: 0,
   tagFilter: null as { ids: number[]; any: boolean } | null,
   personId: 0,
+  artistId: 0,
+  eventId: 0,
+  eventKind: '',
 });
 const currentQuerySource = ref<'query' | 'smart' | 'collection' | 'search'>('query');
 const isMapView = computed(() => config.settings.grid.viewMode === 'map');
@@ -4114,7 +4142,7 @@ function showLoadingContent(requestId: number) {
 }
 
 // Similar Search Mode State
-const tempViewMode = ref<'none' | 'similar' | 'album' | 'person' | 'camera' | 'lens' | 'location' | 'tag' | 'map'>('none');
+const tempViewMode = ref<'none' | 'similar' | 'album' | 'person' | 'camera' | 'lens' | 'location' | 'tag' | 'artist' | 'map'>('none');
 const tempPersonKind = ref<'person' | 'pet'>('person');
 
 // Expose which person's photos the grid shows so file menus can offer "Not <name>".
@@ -4162,7 +4190,7 @@ watch([dedupScanKey, similarPhotoGroupingThreshold], ([key, threshold]) => {
 }, { immediate: true });
 
 const currentTitleIcon = computed(() => {
-  if (libConfig.activePane === 'collection') return IconCollection;
+  if (libConfig.activePane === 'collection') return collectionKindIcon(currentCollectionKind.value);
   switch (tempViewMode.value) {
     case 'none':
       if (contentTitle.value) {
@@ -4178,6 +4206,7 @@ const currentTitleIcon = computed(() => {
           case SIDEBAR.ALBUM:
               return libConfig.album.selected || config.settings.showSubfolderFiles ? IconFolders : IconFolder;
           case SIDEBAR.SMART_ALBUM: return IconFolderCog;
+          case SIDEBAR.EVENT: return collectionKindIcon(currentCollectionKind.value);
           case SIDEBAR.SEARCH: return IconSearch;
           case SIDEBAR.CALENDAR:
             return config.calendar.view === 'months'
@@ -4200,11 +4229,44 @@ const currentTitleIcon = computed(() => {
     case 'lens': return IconCameraAperture;
     case 'location': return IconLocation;
     case 'tag': return IconTag;
+    case 'artist': return IconMicrophone;
     default: return null;
   }
 });
 
 const backupState = ref<any>(null);
+
+// Event collections: type icon and the lineup derived from artists set on their files.
+const currentCollectionKind = ref<string | null>(null);
+const collectionLineup = ref<Array<{ id: number; name: string; count: number }>>([]);
+const COLLECTION_LINEUP_LIMIT = 6;
+let collectionLineupRequest = 0;
+function openLineupArtist(artist: { id: number; name: string }) {
+  if (isEventContent.value) {
+    Object.assign(libConfig.event, { artistId: artist.id, artistName: artist.name });
+    libConfig.event.activateTick++;
+  } else {
+    handleNavigateMetadata({ type: 'artist', artistId: artist.id, name: artist.name });
+  }
+}
+
+function handleArtistsChanged() {
+  void refreshCollectionLineup();
+  void tauriEmit('event-artists-changed');
+  if (isEventContent.value && libConfig.event.artistId) libConfig.event.activateTick++;
+}
+
+async function refreshCollectionLineup(collectionId = Number((isEventContent.value ? libConfig.event.selectedId : libConfig.collection.selectedId) || 0)) {
+  const request = ++collectionLineupRequest;
+  if (collectionId <= 0) { collectionLineup.value = []; return; }
+  const artists = await getCollectionArtists(collectionId);
+  if (request !== collectionLineupRequest) return;
+  collectionLineup.value = Array.isArray(artists) ? artists : [];
+}
+const isEventContent = computed(() => libConfig.activePane === 'main' && config.main.sidebarIndex === SIDEBAR.EVENT);
+const showCollectionLineup = computed(() =>
+  (libConfig.activePane === 'collection' || isEventContent.value) && tempViewMode.value === 'none' && collectionLineup.value.length > 0
+);
 
 let unlistenAlbumAccessChanged: (() => void) | undefined;
 let unlistenKeydown: () => void;
@@ -4214,6 +4276,7 @@ let unlistenMontage: (() => void) | null = null;
 let unlistenFaceIndexProgress: (() => void) | null = null;
 let unlistenLibraryTotalRefreshed: (() => void) | null = null;
 let unlistenPersonsChanged: (() => void) | null = null;
+let unlistenCollectionsChangedKind: (() => void) | null = null;
 let unlistenImportFilesAdded: (() => void) | null = null;
 let unlistenImportFilesToFolder: (() => void) | null = null;
 let unlistenPasteClipboard: (() => void) | null = null;
@@ -4308,6 +4371,7 @@ onBeforeUnmount(() => {
   if (unlistenImageEditor) unlistenImageEditor();
   if (unlistenLibraryTotalRefreshed) unlistenLibraryTotalRefreshed();
   unlistenPersonsChanged?.();
+  unlistenCollectionsChangedKind?.();
   if (unlistenImportFilesAdded) unlistenImportFilesAdded();
 });
 
@@ -6116,6 +6180,17 @@ onMounted( async() => {
   });
   unlistenKeydown = await listen('global-keydown', handleKeyDown);
 
+  unlistenCollectionsChangedKind = await listen('collections-changed', async () => {
+    if (isEventContent.value) {
+      libConfig.event.activateTick++;
+      return;
+    }
+    if (libConfig.activePane !== 'collection') return;
+    const collectionId = Number((isEventContent.value ? libConfig.event.selectedId : libConfig.collection.selectedId) || 0);
+    const collections = await listCollections();
+    const collection = Array.isArray(collections) ? collections.find((item: any) => Number(item.id) === collectionId) : null;
+    currentCollectionKind.value = collection?.kind || null;
+  });
   unlistenLibraryTotalRefreshed = await listen('library-total-refreshed', (event: any) => {
     if (event?.payload?.source === 'content') return;
     if (event?.payload?.source === 'album-visibility' || event?.payload?.source === 'hidden-filters') {
@@ -7032,6 +7107,7 @@ watch(
     sidebar: config.main.sidebarIndex,
     pane: libConfig.activePane,
     collectionId: libConfig.collection.selectedId,
+    event: [libConfig.event.selectedId, libConfig.event.artistId],
     libraryItem: libConfig.library.item,
     smartId: libConfig.library.smartId,
     searchText: libConfig.search.searchText,
@@ -7063,6 +7139,7 @@ watch(
     config.main.sidebarIndex,      // toolbar index
     libConfig.activePane,          // main content or collection tray
     libConfig.collection.selectedId, // collection
+    libConfig.event.selectedId, libConfig.event.activateTick, // event
     (libConfig.library as any).item, // library
     libConfig.library.smartId,
     libConfig.album.id, libConfig.album.folderId, libConfig.album.folderPath, libConfig.album.selected, // album
@@ -8090,6 +8167,9 @@ async function getFileList(
     tagId = 0,
     tagFilter = null as { ids: number[]; any: boolean } | null,
     personId = 0,
+    artistId = 0,
+    eventId = 0,
+    eventKind = '',
     gpsMinLat = null,
     gpsMaxLat = null,
     gpsMinLon = null,
@@ -8132,6 +8212,9 @@ async function getFileList(
     tagId,
     tagFilter,
     personId,
+    artistId,
+    eventId,
+    eventKind,
     gpsMinLat,
     gpsMaxLat,
     gpsMinLon,
@@ -8777,6 +8860,8 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
     }
 
     contentTitle.value = collection.name || localeMsg.value.collection.title;
+    currentCollectionKind.value = collection.kind || null;
+    void refreshCollectionLineup(collectionId);
     getCollectionFileList(collectionId, requestId);
     return;
   }
@@ -8977,6 +9062,29 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
         contentTitle.value = names.filter(Boolean).join(any && multi ? ' OR ' : ' AND ');
         getFileList(multi ? { tagFilter: { ids, any } } : { tagId: ids[0] }, requestId);
       });
+    }
+  }
+  else if(newIndex === SIDEBAR.EVENT) {
+    const eventId = Number(libConfig.event.selectedId || 0);
+    const collections = eventId > 0 ? await listCollections() : null;
+    if (requestId !== currentContentRequestId) return;
+    const event = Array.isArray(collections) ? collections.find((item: any) => Number(item.id) === eventId && item.kind) : null;
+    const artistId = Number(libConfig.event.artistId || 0);
+    if (artistId && (!eventId || event)) {
+      currentCollectionKind.value = event?.kind || 'concert';
+      void refreshCollectionLineup(0);
+      contentTitle.value = [event?.name || t('event.concerts'), libConfig.event.artistName || t('event.unassigned')].join(' · ');
+      getFileList({ artistId, eventId, eventKind: eventId ? '' : 'concert' }, requestId);
+    } else if (!event) {
+      contentTitle.value = '';
+      currentCollectionKind.value = null;
+      collectionLineup.value = [];
+      showEmptyContent(requestId);
+    } else {
+      contentTitle.value = event.name;
+      currentCollectionKind.value = event.kind;
+      void refreshCollectionLineup(eventId);
+      getCollectionFileList(eventId, requestId);
     }
   }
   else if(newIndex === SIDEBAR.PERSON) {
@@ -9265,6 +9373,7 @@ function handleTitleClick() {
     case 'lens':
     case 'location':
     case 'tag':
+    case 'artist':
       exitTempViewMode();
       break;
     case 'person':

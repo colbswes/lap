@@ -201,6 +201,8 @@ export { default as IconInformation } from '@/assets/icons/information.svg';
 export { default as IconLivePhoto } from '@/assets/icons/live-photo.svg';
 export { default as IconLocation } from '@/assets/icons/map-pin.svg';
 export { default as IconMusic } from '@/assets/icons/musical.svg';
+export { default as IconFestival } from '@/assets/icons/festival.svg';
+export { default as IconMicrophone } from '@/assets/icons/microphone.svg';
 export { default as IconPerson } from '@/assets/icons/user.svg';
 export { default as IconPersonSearch } from '@/assets/icons/user-search.svg';
 export { default as IconPhoto } from '@/assets/icons/photo.svg';

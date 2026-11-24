@@ -1072,6 +1072,82 @@ export async function getCollectionFileIds(collectionId) {
   return null;
 }
 
+export async function setCollectionKind(id, kind) {
+  try {
+    return await invoke('set_collection_kind', { id, kind: kind || null });
+  } catch (error) {
+    console.error('Failed to set collection type:', error);
+  }
+}
+
+export async function listEventArtists(kind, eventId = null) {
+  return await invoke('list_event_artists', { kind, eventId });
+}
+
+export async function listEvents() {
+  try {
+    return await invoke('list_events');
+  } catch (error) {
+    console.error('Failed to list events:', error);
+  }
+}
+
+export async function createEvent(name, kind) {
+  try {
+    return await invoke('create_event', { name, kind });
+  } catch (error) {
+    console.error('Failed to create event:', error);
+  }
+}
+
+// artists
+export async function listArtists() {
+  try {
+    return await invoke('list_artists');
+  } catch (error) {
+    console.error('Failed to list artists:', error);
+  }
+}
+
+export async function getFileArtists(fileId) {
+  try {
+    return await invoke('get_file_artists', { fileId });
+  } catch (error) {
+    console.error('Failed to get file artists:', error);
+  }
+}
+
+export async function getCollectionArtists(collectionId) {
+  try {
+    return await invoke('get_collection_artists', { collectionId });
+  } catch (error) {
+    console.error('Failed to get collection artists:', error);
+  }
+}
+
+export async function addArtistToFiles(name, fileIds) {
+  try {
+    return await invoke('add_artist_to_files', { name, fileIds });
+  } catch (error) {
+    console.error('Failed to add artist:', error);
+  }
+}
+
+export async function removeArtistFromFiles(artistId, fileIds) {
+  try {
+    return await invoke('remove_artist_from_files', { artistId, fileIds });
+  } catch (error) {
+    console.error('Failed to remove artist:', error);
+  }
+}
+
+export async function renameArtist(artistId, name) {
+  try {
+    return await invoke('rename_artist', { artistId, name });
+  } catch (error) {
+    console.error('Failed to rename artist:', error);
+  }
+}
 
 export async function getFileCollections(fileId) {
   try {

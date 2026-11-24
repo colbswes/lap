@@ -10,7 +10,8 @@
     "people": "People",
     "camera": "Cameras",
     "map": "Map",
-    "settings": "Settings"
+    "settings": "Settings",
+    "events": "Events"
   },
   "collection": {
     "title": "Collections",
@@ -50,7 +51,13 @@
     "clear_confirm_title": "Clear collection",
     "clear_confirm_message": "Remove all files from \"{name}\"? Files themselves will not be deleted.",
     "clear_confirm_ok": "Clear",
-    "removed_toast": "{count} item(s) removed from collection"
+    "removed_toast": "{count} item(s) removed from collection",
+    "type": "Type",
+    "type_none": "Collection",
+    "type_other": "Other event",
+    "type_concert": "Concert",
+    "type_festival": "Festival",
+    "lineup": "Lineup"
   },
   "library": {
     "all_files": "All files",
@@ -2052,5 +2059,34 @@
     "shared_album_empty": "No cached previews found in this shared album.",
     "sync_delete_label": "Also delete exported photos from Apple Photos",
     "sync_delete_hint": "When you delete a photo exported from Apple Photos, automatically move it to Apple Photos' Recently Deleted album (macOS will ask to confirm)."
+  },
+  "artist": {
+    "title": "Artists",
+    "add": "Add artist",
+    "placeholder": "Artist name",
+    "remove": "Remove artist",
+    "add_failed": "Could not add artist",
+    "remove_failed": "Could not remove artist"
+  },
+  "event": {
+    "title": "Events",
+    "add": "New event",
+    "concerts": "Concerts",
+    "festivals": "Festivals",
+    "other": "Other events",
+    "unassigned": "Unassigned artist",
+    "by_show": "Individual shows",
+    "new_other": "New other event",
+    "default_other_name": "Event {index}",
+    "new_concert": "New concert",
+    "new_festival": "New festival",
+    "default_concert_name": "Concert {index}",
+    "default_festival_name": "Festival {index}",
+    "search": "Search events",
+    "not_found": "No events found",
+    "empty": "No events yet",
+    "empty_hint": "Create a concert or festival, then drop photos and videos onto it.",
+    "make_collection": "Convert to collection",
+    "no_date": "No date"
   }
 }

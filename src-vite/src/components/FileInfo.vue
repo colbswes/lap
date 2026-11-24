@@ -191,12 +191,61 @@
                     class="inline-flex items-center gap-1 text-[12px] font-medium text-base-content/70 transition-colors hover:text-base-content cursor-pointer"
                     @click.stop="emit('quickEditCollection')"
                   >
-                    <IconCollection class="h-4 w-4 shrink-0" />
+                    <component :is="collectionKindIcon(collection.kind)" class="h-4 w-4 shrink-0" />
                     {{ collection.name }}
                   </button>
                 </div>
               </div>
             </template>
+
+            <!-- Artists: who is performing in this photo/video (per file, not per event) -->
+            <div class="flex items-center text-[11px] text-base-content/30 min-h-6 py-1.5">{{ $t('artist.title') }}</div>
+            <div class="flex items-center min-h-6 gap-x-2.5 gap-y-1.5 flex-wrap">
+              <span v-for="artist in fileArtists" :key="artist.id" class="group inline-flex items-center gap-1 text-[12px] font-medium">
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1 text-base-content/70 transition-colors hover:text-base-content cursor-pointer"
+                  @click.stop="emit('navigateMetadata', { type: 'artist', artistId: artist.id, name: artist.name })"
+                >
+                  <IconMicrophone class="h-4 w-4 shrink-0" />
+                  {{ artist.name }}
+                </button>
+                <button
+                  type="button"
+                  class="p-0.5 rounded text-base-content/30 hover:text-base-content/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer"
+                  :title="$t('artist.remove')"
+                  @click.stop="removeFileArtist(artist)"
+                >
+                  <IconClose class="w-3 h-3" />
+                </button>
+              </span>
+              <input
+                v-if="addingArtist"
+                ref="artistInputRef"
+                v-model="artistDraft"
+                list="file-info-artist-options"
+                class="input input-xs w-36 text-[12px]"
+                :placeholder="$t('artist.placeholder')"
+                maxlength="255"
+                @click.stop
+                @keydown.stop
+                @keydown.enter.prevent="commitArtist"
+                @keydown.escape.prevent="cancelArtist"
+                @blur="commitArtist"
+              />
+              <datalist id="file-info-artist-options">
+                <option v-for="name in artistSuggestions" :key="name" :value="name" />
+              </datalist>
+              <button
+                v-if="!addingArtist"
+                type="button"
+                class="badge badge-sm badge-outline max-w-full min-w-0 border-base-content/10 bg-base-content/5 font-medium text-base-content/65 hover:text-base-content cursor-pointer gap-1"
+                @click.stop="startAddArtist"
+              >
+                <IconAdd class="size-3 shrink-0" />
+                <span class="min-w-0 truncate">{{ $t('artist.add') }}</span>
+              </button>
+            </div>
 
             <!-- People / Pets: one chip per detected/manual face; edit to confirm, rename, dismiss, or add manually -->
             <template v-if="config.settings.face.enabled && [1, 2, 3].includes(Number(fileInfo?.file_type))">
@@ -590,6 +639,8 @@ import { config, libConfig } from '@/common/config';
 import { SIDEBAR } from '@/common/constants';
 import { isWebViewVideoPlaybackDisabled, getGStreamerAvailability } from '@/common/video';
 import { isOriginalUnavailable } from '@/common/availability';
+import { getFileArtists, addArtistToFiles, removeArtistFromFiles, listArtists } from '@/common/api';
+import { collectionKindIcon } from '@/common/collectionKinds';
 import { getTagsForFile, editFileMetadata, renameFile, editImage, getAlbum, getFileCollections, getFileInfo, getMotionPhotoVideoPath, revealPath, getFacesForFile, getFaceThumbnail, getPersonThumbnail, scanFileFaces, isCloudOnlyFile } from '@/common/api';
 import { 
   copyFilePaths,
@@ -628,7 +679,7 @@ import {
   IconZoomIn,
   IconZoomOut,
   IconLivePhoto,
-  IconCollection,
+  IconMicrophone,
   IconPerson,
 } from '@/common/icons';
 import Breadcrumb from '@/components/Breadcrumb.vue';
@@ -665,6 +716,7 @@ const emit = defineEmits([
   'rotate',
   'tagStatesChanged',
   'quickEditCollection',
+  'artistsChanged',
   'editMetadata',
   'metadataSaved',
   'navigateFolder',
@@ -1271,6 +1323,69 @@ watch(
 );
 
 onBeforeUnmount(stopPreviewVideo);
+
+type FileArtist = { id: number; name: string; count: number };
+const fileArtists = ref<FileArtist[]>([]);
+const addingArtist = ref(false);
+const artistDraft = ref('');
+const artistSuggestions = ref<string[]>([]);
+const artistInputRef = ref<HTMLInputElement | null>(null);
+let fileArtistsRequestSeq = 0;
+
+async function refreshFileArtists(fileId = Number(props.fileInfo?.id || 0)) {
+  const requestSeq = ++fileArtistsRequestSeq;
+  if (!fileId) { fileArtists.value = []; return; }
+  const artists = await getFileArtists(fileId);
+  if (requestSeq !== fileArtistsRequestSeq || Number(props.fileInfo?.id) !== fileId) return;
+  fileArtists.value = Array.isArray(artists) ? artists : [];
+}
+
+watch(() => props.fileInfo?.id, (fileId, _previous, onCleanup) => {
+  fileArtists.value = [];
+  addingArtist.value = false;
+  artistDraft.value = '';
+  if (!fileId) return;
+  const timer = setTimeout(() => void refreshFileArtists(Number(fileId)), 120);
+  onCleanup(() => { clearTimeout(timer); fileArtistsRequestSeq++; });
+}, { immediate: true });
+
+async function startAddArtist() {
+  addingArtist.value = true;
+  artistDraft.value = '';
+  await nextTick();
+  artistInputRef.value?.focus();
+  const artists = await listArtists();
+  const current = new Set(fileArtists.value.map(artist => artist.name.toLocaleLowerCase()));
+  artistSuggestions.value = Array.isArray(artists)
+    ? artists.map((artist: FileArtist) => artist.name).filter((name: string) => !current.has(name.toLocaleLowerCase()))
+    : [];
+}
+
+function cancelArtist() {
+  addingArtist.value = false;
+  artistDraft.value = '';
+}
+
+async function commitArtist() {
+  if (!addingArtist.value) return;
+  const name = artistDraft.value.trim();
+  const fileId = Number(props.fileInfo?.id || 0);
+  cancelArtist();
+  if (!name || !fileId) return;
+  const artist = await addArtistToFiles(name, [fileId]);
+  if (!artist) { toast.error(t('artist.add_failed')); return; }
+  await refreshFileArtists(fileId);
+  emit('artistsChanged');
+}
+
+async function removeFileArtist(artist: FileArtist) {
+  const fileId = Number(props.fileInfo?.id || 0);
+  if (!fileId) return;
+  const removed = await removeArtistFromFiles(artist.id, [fileId]);
+  if (removed == null) { toast.error(t('artist.remove_failed')); return; }
+  await refreshFileArtists(fileId);
+  emit('artistsChanged');
+}
 
 watch(
   () => [props.fileInfo?.id, Boolean(props.fileInfo?.has_collections), props.fileInfo?.collectionVersion] as const,

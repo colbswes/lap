@@ -1654,6 +1654,61 @@ pub fn get_file_collections(file_id: i64) -> Result<Vec<AFileCollection>, String
 }
 
 #[tauri::command]
+pub fn set_collection_kind(id: i64, kind: Option<String>) -> Result<usize, String> {
+    ACollection::set_kind(id, kind.as_deref())
+        .map_err(|e| format!("Error while setting collection type: {}", e))
+}
+
+#[tauri::command]
+pub fn list_events() -> Result<Vec<crate::t_sqlite::AEvent>, String> {
+    ACollection::list_events().map_err(|e| format!("Error while listing events: {}", e))
+}
+
+#[tauri::command]
+pub fn create_event(name: &str, kind: &str) -> Result<ACollection, String> {
+    ACollection::create_event(name, kind).map_err(|e| format!("Error while creating event: {}", e))
+}
+
+#[tauri::command]
+pub fn list_event_artists(kind: Option<String>, event_id: Option<i64>) -> Result<Vec<crate::t_artists::AEventArtist>, String> {
+    crate::t_artists::for_events(kind.as_deref(), event_id)
+        .map_err(|e| format!("Error while listing event artists: {}", e))
+}
+
+// artists
+#[tauri::command]
+pub fn list_artists() -> Result<Vec<crate::t_artists::AArtist>, String> {
+    crate::t_artists::list().map_err(|e| format!("Error while listing artists: {}", e))
+}
+
+#[tauri::command]
+pub fn get_file_artists(file_id: i64) -> Result<Vec<crate::t_artists::AArtist>, String> {
+    crate::t_artists::for_file(file_id).map_err(|e| format!("Error while getting file artists: {}", e))
+}
+
+#[tauri::command]
+pub fn get_collection_artists(collection_id: i64) -> Result<Vec<crate::t_artists::AArtist>, String> {
+    crate::t_artists::for_collection(collection_id)
+        .map_err(|e| format!("Error while getting collection artists: {}", e))
+}
+
+#[tauri::command]
+pub fn add_artist_to_files(name: &str, file_ids: Vec<i64>) -> Result<crate::t_artists::AArtist, String> {
+    crate::t_artists::add_to_files(name, file_ids).map_err(|e| format!("Error while adding artist: {}", e))
+}
+
+#[tauri::command]
+pub fn remove_artist_from_files(artist_id: i64, file_ids: Vec<i64>) -> Result<usize, String> {
+    crate::t_artists::remove_from_files(artist_id, file_ids)
+        .map_err(|e| format!("Error while removing artist: {}", e))
+}
+
+#[tauri::command]
+pub fn rename_artist(artist_id: i64, name: &str) -> Result<i64, String> {
+    crate::t_artists::rename(artist_id, name).map_err(|e| format!("Error while renaming artist: {}", e))
+}
+
+#[tauri::command]
 pub fn get_collection_count_and_sum(
     collection_id: i64,
     params: QueryParams,

@@ -127,6 +127,7 @@ test('changing query scope resets focus and multi-selection', async () => {
     f => { f.libConfig.activePane = 'collection'; }, f => { f.libConfig._libraryId = 'other'; },
     f => { f.libConfig.camera.lensModel = 'Lens 2'; }, f => { f.libConfig.album.folderId = 2; },
     f => { f.libConfig.tag.id = 2; }, f => { f.libConfig.library.item = 'favorites'; },
+    f => { f.libConfig.event.artistId = 4; }, f => { f.libConfig.event.selectedId = 7; },
     f => { f.libConfig.search.searchText = 'new'; }]) {
     const f = fixture(3);
     f.seedMulti();

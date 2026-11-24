@@ -223,6 +223,7 @@ const Calendar = defineAsyncComponent(() => import('@/components/Calendar.vue'))
 const Location = defineAsyncComponent(() => import('@/components/Location.vue'));
 const Person = defineAsyncComponent(() => import('@/components/Person.vue'));
 const Camera = defineAsyncComponent(() => import('@/components/Camera.vue'));
+const EventList = defineAsyncComponent(() => import('@/components/EventList.vue'));
 
 import TitleBar from '@/components/TitleBar.vue';
 import TButton from '@/components/TButton.vue';
@@ -237,6 +238,7 @@ import iconLogo from '@/assets/images/icon.png';
 
 import {
   IconTag,
+  IconFestival,
   IconLocation,
   IconPerson,
   IconCamera,
@@ -429,6 +431,7 @@ const buttons = computed(() =>  [
   { index: SIDEBAR.SEARCH, icon: IconSearch, component: ImageSearch, text: localeMsg.value.sidebar.search },
   { index: SIDEBAR.CALENDAR, icon: IconCalendarDay, component: Calendar, text: localeMsg.value.sidebar.calendar },
   { index: SIDEBAR.TAG, icon: IconTag, component: Tag, text: localeMsg.value.sidebar.tag },
+  { index: SIDEBAR.EVENT, icon: IconFestival, component: EventList, text: localeMsg.value.sidebar.events, order: 6.5 },
   { index: SIDEBAR.PERSON, icon: IconPerson, component: Person, text: localeMsg.value.sidebar.people, hidden: !config.settings.face.enabled },
   { index: SIDEBAR.LOCATION, icon: IconLocation, component: Location, text: localeMsg.value.sidebar.location },
   { index: SIDEBAR.CAMERA, icon: IconCamera, component: Camera, text: localeMsg.value.sidebar.camera },

@@ -15,6 +15,7 @@ use tauri_plugin_aptabase::EventTracker;
 
 mod metadata;
 mod t_ai;
+mod t_artists;
 mod t_ai_png;
 mod t_apple_photos;
 mod t_batch_rename;
@@ -316,6 +317,16 @@ async fn main() {
             t_cmds::clear_collection,
             t_cmds::get_collection_file_ids,
             t_cmds::get_file_collections,
+            t_cmds::set_collection_kind,
+            t_cmds::list_events,
+            t_cmds::create_event,
+            t_cmds::list_event_artists,
+            t_cmds::list_artists,
+            t_cmds::get_file_artists,
+            t_cmds::get_collection_artists,
+            t_cmds::add_artist_to_files,
+            t_cmds::remove_artist_from_files,
+            t_cmds::rename_artist,
             t_cmds::get_collection_count_and_sum,
             t_cmds::get_collection_files,
             t_cmds::get_collection_grouped_query_rows,

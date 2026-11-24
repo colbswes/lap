@@ -1697,6 +1697,20 @@ pub struct ACollection {
     pub count: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Optional event type: `concert` or `festival`; `None` for a plain collection.
+    pub kind: Option<String>,
+}
+
+/// An event (a collection typed as concert or festival) with the date span of its files.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AEvent {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub count: i64,
+    pub start_date: Option<i64>,
+    pub end_date: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1711,6 +1725,7 @@ pub struct ACollectionOrder {
 pub struct AFileCollection {
     pub id: i64,
     pub name: String,
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1735,7 +1750,70 @@ impl ACollection {
             count: row.get(3)?,
             created_at: row.get(4)?,
             updated_at: row.get(5)?,
+            kind: row.get(6)?,
         })
+    }
+
+    pub const KINDS: [&'static str; 3] = ["concert", "festival", "other"];
+
+    pub fn set_kind(id: i64, kind: Option<&str>) -> Result<usize, String> {
+        let kind = kind.map(str::trim).filter(|k| !k.is_empty());
+        if let Some(k) = kind {
+            if !Self::KINDS.contains(&k) {
+                return Err(format!("Unknown collection type: {}", k));
+            }
+        }
+        let conn = open_conn()?;
+        let changed = conn
+            .execute(
+                "UPDATE acollections SET kind = ?1, updated_at = ?2 WHERE id = ?3",
+                params![kind, Self::now_ts(), id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            Err("Collection not found".to_string())
+        } else {
+            Ok(changed)
+        }
+    }
+
+    /// Events, newest first by the date of their earliest file (empty events first).
+    pub fn list_events() -> Result<Vec<AEvent>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.name, c.kind, COUNT(a.id), MIN(NULLIF(a.taken_date, 0)), MAX(NULLIF(a.taken_date, 0))
+                 FROM acollections c
+                 LEFT JOIN acollections_files cf ON cf.collection_id = c.id
+                 LEFT JOIN afiles a ON a.id = cf.file_id
+                     AND a.id NOT IN (SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL)
+                 WHERE c.kind IS NOT NULL
+                 GROUP BY c.id
+                 ORDER BY MIN(NULLIF(a.taken_date, 0)) IS NOT NULL, MIN(NULLIF(a.taken_date, 0)) DESC, c.name COLLATE NOCASE",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(AEvent {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    count: row.get(3)?,
+                    start_date: row.get(4)?,
+                    end_date: row.get(5)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn create_event(name: &str, kind: &str) -> Result<Self, String> {
+        if !Self::KINDS.contains(&kind) {
+            return Err(format!("Unknown event type: {}", kind));
+        }
+        let collection = Self::create(name)?;
+        Self::set_kind(collection.id, Some(kind))?;
+        Self::get(collection.id)
     }
 
     fn ensure_exists(conn: &Connection, id: i64) -> Result<(), String> {
@@ -1774,7 +1852,7 @@ impl ACollection {
     /// Collection counts are populated lazily after explicit sidebar activation.
     pub fn list() -> Result<Vec<Self>, String> {
         let conn = open_conn()?;
-        let query = "SELECT id, name, sort_order, 0 AS count, created_at, updated_at
+        let query = "SELECT id, name, sort_order, 0 AS count, created_at, updated_at, kind
              FROM acollections
              ORDER BY sort_order ASC, id ASC";
         let mut stmt = conn
@@ -1849,7 +1927,7 @@ impl ACollection {
     pub fn get(id: i64) -> Result<Self, String> {
         let conn = open_conn()?;
         conn.query_row(
-            "SELECT c.id, c.name, c.sort_order, COUNT(a.id) AS count, c.created_at, c.updated_at
+            "SELECT c.id, c.name, c.sort_order, COUNT(a.id) AS count, c.created_at, c.updated_at, c.kind
             FROM acollections c
             LEFT JOIN acollections_files cf ON cf.collection_id = c.id
             LEFT JOIN afiles a ON a.id = cf.file_id
@@ -2065,7 +2143,7 @@ impl ACollection {
         let conn = open_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT c.id, c.name
+                "SELECT c.id, c.name, c.kind
                 FROM acollections_files cf
                 JOIN acollections c ON c.id = cf.collection_id
                 WHERE cf.file_id = ?1
@@ -2077,6 +2155,7 @@ impl ACollection {
                 Ok(AFileCollection {
                     id: row.get(0)?,
                     name: row.get(1)?,
+                    kind: row.get(2)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -2184,6 +2263,15 @@ pub struct QueryParams {
     pub tag_filter: Option<TagFilter>,
     #[serde(default)]
     pub person_id: i64,
+    /// Artist filter: > 0 an artist id, -1 files without any artist.
+    #[serde(default)]
+    pub artist_id: i64,
+    /// Event filter: files in this event (collection) id.
+    #[serde(default)]
+    pub event_id: i64,
+    /// Event-type filter (`concert` / `festival` / `other`): files in any event of this type.
+    #[serde(default)]
+    pub event_kind: String,
     // GPS bounding box filter (e.g. for "photos in this map area")
     #[serde(default)]
     pub gps_min_lat: Option<f64>,
@@ -5906,6 +5994,21 @@ impl AFile {
             sql_params.push(Box::new(params.tag_id));
         }
 
+
+        if params.artist_id > 0 {
+            conditions.push("EXISTS (SELECT 1 FROM afile_artists fa WHERE fa.file_id = a.id AND fa.artist_id = ?)".to_string());
+            sql_params.push(Box::new(params.artist_id));
+        } else if params.artist_id == -1 {
+            conditions.push("NOT EXISTS (SELECT 1 FROM afile_artists fa WHERE fa.file_id = a.id)".to_string());
+        }
+
+        if params.event_id > 0 {
+            conditions.push("EXISTS (SELECT 1 FROM acollections_files ecf WHERE ecf.file_id = a.id AND ecf.collection_id = ?)".to_string());
+            sql_params.push(Box::new(params.event_id));
+        } else if !params.event_kind.is_empty() {
+            conditions.push("EXISTS (SELECT 1 FROM acollections_files ecf JOIN acollections ec ON ec.id = ecf.collection_id WHERE ecf.file_id = a.id AND ec.kind = ?)".to_string());
+            sql_params.push(Box::new(params.event_kind.clone()));
+        }
 
         if params.person_id > 0 {
             joins.push("INNER JOIN faces f ON a.id = f.file_id");
@@ -12572,6 +12675,8 @@ fn create_db_internal() -> Result<(), String> {
         [],
     )
     .map_err(|e| e.to_string())?;
+    // Migration: event type (`concert` / `festival`) for collections.
+    let _ = conn.execute("ALTER TABLE acollections ADD COLUMN kind TEXT", []);
 
     // collection files table
     conn.execute(
@@ -12597,6 +12702,7 @@ fn create_db_internal() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
+    crate::t_artists::initialize(&conn)?;
 
     // persons table (for face recognition)
     conn.execute(

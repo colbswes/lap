@@ -62,7 +62,7 @@
               @change="toggle(collection.id)"
             />
           </label>
-          <IconCollection class="w-4 h-4 shrink-0" />
+          <component :is="collectionKindIcon(collection.kind)" class="w-4 h-4 shrink-0" />
           <input
             v-if="renamingId === Number(collection.id)"
             ref="renameInput"
@@ -123,6 +123,7 @@ import { emit as tauriEmit } from '@tauri-apps/api/event';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
 import { addFilesToCollection, createCollection, deleteCollection as deleteCollectionApi, getCollectionSelectionCounts, listCollections, removeFilesFromCollection, renameCollection } from '@/common/api';
+import { collectionKindIcon } from '@/common/collectionKinds';
 import { IconAdd, IconCollection, IconClose, IconRename, IconSearch, IconTrash } from '@/common/icons';
 import { config, libConfig } from '@/common/config';
 import MessageBox from '@/components/MessageBox.vue';

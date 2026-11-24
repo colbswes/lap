@@ -108,7 +108,7 @@
               :title="$t('collection.reorder')"
               @click.stop
             />
-            <IconCollection class="pr-1 w-6 h-6 shrink-0" />
+            <component :is="collectionKindIcon(collection.kind)" class="pr-1 w-6 h-6 shrink-0" />
             <input
               v-if="renamingId === collection.id"
               ref="renameInputRef"
@@ -208,11 +208,13 @@ import { emit as tauriEmit, listen } from '@tauri-apps/api/event';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
-import { clearCollection, createCollection, deleteCollection as deleteCollectionApi, getCollectionCounts, getCollectionQueryFileIds, listCollections, renameCollection, reorderCollections } from '@/common/api';
+import { clearCollection, createCollection, deleteCollection as deleteCollectionApi, getCollectionCounts, getCollectionQueryFileIds, listCollections, renameCollection, reorderCollections, setCollectionKind } from '@/common/api';
+import { collectionKindIcon, COLLECTION_KINDS, type CollectionKind } from '@/common/collectionKinds';
 import { isHiddenId } from '@/common/hiddenAlbums';
+import { SIDEBAR } from '@/common/constants';
 import { buildSmartDraftFromCollection, makeDefaultQueryParams } from '@/common/collectionActions';
 import { useLibraryChangeRefresh } from '@/composables/useLibraryChangeRefresh';
-import { IconAdd, IconRight, IconRename, IconMore, IconFolderCog, IconHide, IconTag, IconTrash, IconClose, IconSearch, IconDragHandle, IconOrder, IconUnhide, IconCollection } from '@/common/icons';
+import { IconAdd, IconRight, IconRename, IconMore, IconFolderCog, IconHide, IconTag, IconTrash, IconClose, IconSearch, IconDragHandle, IconOrder, IconUnhide, IconOk } from '@/common/icons';
 import { VueDraggable, type DraggableEvent } from 'vue-draggable-plus';
 import ContextMenu from '@/components/ContextMenu.vue';
 import MessageBox from '@/components/MessageBox.vue';
@@ -235,6 +237,7 @@ type Collection = {
   name: string;
   sortOrder?: number;
   count: number;
+  kind: CollectionKind;
 };
 
 const collections = ref<Collection[]>([]);
@@ -382,12 +385,14 @@ async function loadCollections(preferredId?: number) {
     || libraryId !== libConfig._libraryId
   ) return;
   const countMap = libConfig.collection.counts || {};
+  // Concerts and festivals live in the Events sidebar, not the collection tray.
   collections.value = Array.isArray(result)
-    ? result.map((item: any) => ({
+    ? result.filter((item: any) => !item.kind).map((item: any) => ({
       id: Number(item.id),
       name: String(item.name || ''),
       sortOrder: Number(item.sortOrder || 0),
       count: Number(countMap[String(item.id)] || 0),
+      kind: (item.kind || null) as CollectionKind,
     }))
     : [];
 
@@ -511,6 +516,15 @@ function collectionMenuItems(collection: Collection) {
       icon: hidden ? IconUnhide : IconHide,
       action: () => { void toggleCollectionHidden(collection); },
     },
+    {
+      label: t('collection.type'),
+      icon: collectionKindIcon(collection.kind),
+      children: COLLECTION_KINDS.map(kind => ({
+        label: t(`collection.type_${kind || 'none'}`),
+        icon: collection.kind === kind ? IconOk : undefined,
+        action: () => { void changeCollectionKind(collection, kind); },
+      })),
+    },
     { label: "-", action: null },
     {
       label: t('collection.create_smart_collection'),
@@ -534,6 +548,19 @@ function collectionMenuItems(collection: Collection) {
       action: () => deleteCollection(collection),
     },
   ];
+}
+
+async function changeCollectionKind(collection: Collection, kind: CollectionKind) {
+  if (collection.kind === kind) return;
+  if (await setCollectionKind(collection.id, kind) == null) return;
+  collection.kind = kind;
+  await tauriEmit('collections-changed', { selectedId: selectedId.value });
+  if (kind) {
+    // It is an event now: show it in the Events sidebar.
+    Object.assign(libConfig.event, { selectedId: collection.id, artistId: 0, artistName: '' });
+    libConfig.activePane = 'main';
+    config.main.sidebarIndex = SIDEBAR.EVENT;
+  }
 }
 
 function handleReorderOutsidePointerDown(event: PointerEvent) {
