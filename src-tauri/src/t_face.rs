@@ -59,6 +59,30 @@ pub struct FaceBox {
 pub struct FaceData {
     pub bbox: FaceBox,
     pub embedding: Vec<f32>,
+    /// Small, strongly turned, or uncertain face (see `is_low_quality`).
+    pub low_quality: bool,
+}
+
+/// Faces whose embeddings are unreliable: small in the decoded image, turned
+/// strongly sideways (judged from the 5 landmarks), or detected with low confidence.
+pub(crate) fn is_low_quality(face: &FaceBox) -> bool {
+    if face.width.min(face.height) < t_common::LOW_QUALITY_MIN_FACE_PX
+        || face.confidence < t_common::LOW_QUALITY_MIN_CONFIDENCE
+    {
+        return true;
+    }
+    let Some(lm) = face.landmarks.as_deref().filter(|lm| lm.len() == 5) else {
+        return false;
+    };
+    let (ex, ey) = (lm[1].0 - lm[0].0, lm[1].1 - lm[0].1);
+    let eye_dist = (ex * ex + ey * ey).sqrt();
+    if eye_dist <= f32::EPSILON {
+        return true;
+    }
+    // Nose offset from the eye midpoint, measured along the eye line.
+    let (mx, my) = ((lm[0].0 + lm[1].0) / 2.0, (lm[0].1 + lm[1].1) / 2.0);
+    let yaw = ((lm[2].0 - mx) * ex + (lm[2].1 - my) * ey) / (eye_dist * eye_dist);
+    yaw.abs() > t_common::LOW_QUALITY_MAX_YAW
 }
 
 struct Anchor {
@@ -184,9 +208,9 @@ impl FaceEngine {
 
         if let Some(slice) = array.as_slice_mut() {
             let area = (target_size as usize) * (target_size as usize);
-            let offset_b = 0;
+            let offset_r = 0; // RGB planes, matching InsightFace (blobFromImage swapRB=True)
             let offset_g = area;
-            let offset_r = area * 2;
+            let offset_b = area * 2;
             let target_w = target_size as usize;
 
             for (x, y, pixel) in rgb_img.enumerate_pixels() {
@@ -207,9 +231,9 @@ impl FaceEngine {
                 let g = (pixel[1] as f32 - 127.5) / 128.0;
                 let b = (pixel[2] as f32 - 127.5) / 128.0;
 
-                array[[0, 0, y as usize, x as usize]] = b; // Blue
+                array[[0, 0, y as usize, x as usize]] = r; // Red
                 array[[0, 1, y as usize, x as usize]] = g; // Green
-                array[[0, 2, y as usize, x as usize]] = r; // Red
+                array[[0, 2, y as usize, x as usize]] = b; // Blue
             }
         }
 
@@ -236,10 +260,10 @@ impl FaceEngine {
                 (2, 5, 8), // Stride 32
             ];
 
-            let confidence_threshold = 0.6;
+            let confidence_threshold = t_common::MIN_CONFIDENCE;
 
             for (i, &stride) in strides.iter().enumerate() {
-                let (score_idx, box_idx, _) = indices[i];
+                let (score_idx, box_idx, kps_idx) = indices[i];
 
                 let scores_tensor = &outputs[score_idx];
                 let boxes_tensor = &outputs[box_idx];
@@ -250,6 +274,15 @@ impl FaceEngine {
                 let (_, boxes_data) = boxes_tensor
                     .try_extract_tensor::<f32>()
                     .map_err(|e| format!("Failed stride {} boxes: {}", stride, e))?;
+                // Landmarks are optional: a model without the kps head still yields boxes.
+                let kps_data = if kps_idx < outputs.len() {
+                    outputs[kps_idx]
+                        .try_extract_tensor::<f32>()
+                        .ok()
+                        .map(|(_, data)| data)
+                } else {
+                    None
+                };
 
                 let feature_map_w = target_size / stride;
                 let feature_map_h = target_size / stride;
@@ -291,13 +324,28 @@ impl FaceEngine {
                     let original_x2 = x2 * inv_scale_x;
                     let original_y2 = y2 * inv_scale_y;
 
+                    // 5 landmarks (eyes, nose, mouth corners) as stride-scaled offsets from the anchor
+                    let landmarks = kps_data.and_then(|kps| {
+                        let base = j * 10;
+                        kps.get(base..base + 10).map(|p| {
+                            (0..5)
+                                .map(|k| {
+                                    (
+                                        (anchor.cx + p[k * 2] * stride as f32) * inv_scale_x,
+                                        (anchor.cy + p[k * 2 + 1] * stride as f32) * inv_scale_y,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    });
+
                     all_detections.push(FaceBox {
                         x: original_x1,
                         y: original_y1,
                         width: original_x2 - original_x1,
                         height: original_y2 - original_y1,
                         confidence: score,
-                        landmarks: None,
+                        landmarks,
                     });
                 }
             }
@@ -346,95 +394,69 @@ impl FaceEngine {
         img: &DynamicImage,
         bbox: &FaceBox,
     ) -> Result<Vec<f32>, String> {
-        // Crop face region with some padding
-        let padding = 0.2;
-        let x = (bbox.x - bbox.width * padding).max(0.0) as u32;
-        let y = (bbox.y - bbox.height * padding).max(0.0) as u32;
-        let w = (bbox.width * (1.0 + 2.0 * padding)) as u32;
-        let h = (bbox.height * (1.0 + 2.0 * padding)) as u32;
-
-        let max_x = (x + w).min(img.width());
-        let max_y = (y + h).min(img.height());
-
-        // Optimize: check if we can reuse the crop or if we need to resize
         // MobileFaceNet expects 112x112
         let target_size = 112;
-        let face_crop = img.crop_imm(x, y, max_x - x, max_y - y);
-        let rgb_buf;
-        let rgb_face = if face_crop.width() == target_size && face_crop.height() == target_size {
-            if let Some(buf) = face_crop.as_rgb8() {
-                buf
-            } else {
-                rgb_buf = face_crop.to_rgb8();
-                &rgb_buf
+        let aligned = bbox
+            .landmarks
+            .as_deref()
+            .and_then(|lm| align_face(img, lm, target_size));
+        let rgb_buf = match aligned {
+            Some(face) => face,
+            None => {
+                // Fallback: padded bbox crop when landmarks are unavailable
+                let padding = 0.2;
+                let x = (bbox.x - bbox.width * padding).max(0.0) as u32;
+                let y = (bbox.y - bbox.height * padding).max(0.0) as u32;
+                let w = (bbox.width * (1.0 + 2.0 * padding)) as u32;
+                let h = (bbox.height * (1.0 + 2.0 * padding)) as u32;
+                let max_x = (x + w).min(img.width());
+                let max_y = (y + h).min(img.height());
+                img.crop_imm(x, y, max_x - x, max_y - y)
+                    .resize_exact(
+                        target_size,
+                        target_size,
+                        image::imageops::FilterType::Triangle,
+                    )
+                    .into_rgb8()
             }
-        } else {
-            rgb_buf = face_crop
-                .resize_exact(
-                    target_size,
-                    target_size,
-                    image::imageops::FilterType::Triangle,
-                )
-                .into_rgb8();
-            &rgb_buf
         };
+        // Embed the face and its mirror image and sum them (standard ArcFace
+        // flip augmentation): steadier embeddings, especially for angled faces.
+        let mut summed = self.run_embedding_model(&rgb_buf)?;
+        let flipped = image::imageops::flip_horizontal(&rgb_buf);
+        for (acc, v) in summed.iter_mut().zip(self.run_embedding_model(&flipped)?) {
+            *acc += v;
+        }
 
-        // Normalize: (pixel - 127.5) / 128.0
+        // Normalize embedding to unit vector
+        let norm: f32 = summed.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= f32::EPSILON {
+            return Err("Invalid face embedding norm".to_string());
+        }
+        Ok(summed.iter().map(|x| x / norm).collect())
+    }
+
+    /// Run the embedding model on one 112x112 RGB face crop (raw, unnormalized output).
+    fn run_embedding_model(&mut self, rgb_face: &image::RgbImage) -> Result<Vec<f32>, String> {
+        // Normalize: (pixel - 127.5) / 128.0, planar RGB
         let mut array = Array::zeros((1, 3, 112, 112));
-
-        // Optimize: use slice access
-        if let Some(slice) = array.as_slice_mut() {
-            let area = 112 * 112;
-            let offset_g = area;
-            let offset_b = area * 2;
-            let width = 112;
-
-            for (x, y, pixel) in rgb_face.enumerate_pixels() {
-                let r = (pixel[0] as f32 - 127.5) / 128.0;
-                let g = (pixel[1] as f32 - 127.5) / 128.0;
-                let b = (pixel[2] as f32 - 127.5) / 128.0;
-
-                let idx = (y as usize) * width + (x as usize);
-
-                slice[idx] = r;
-                slice[offset_g + idx] = g;
-                slice[offset_b + idx] = b;
-            }
-        } else {
-            for (fx, fy, pixel) in rgb_face.enumerate_pixels() {
-                let r = (pixel[0] as f32 - 127.5) / 128.0;
-                let g = (pixel[1] as f32 - 127.5) / 128.0;
-                let b = (pixel[2] as f32 - 127.5) / 128.0;
-
-                array[[0, 0, fy as usize, fx as usize]] = r;
-                array[[0, 1, fy as usize, fx as usize]] = g;
-                array[[0, 2, fy as usize, fx as usize]] = b;
+        for (x, y, pixel) in rgb_face.enumerate_pixels() {
+            for c in 0..3 {
+                array[[0, c, y as usize, x as usize]] = (pixel[c] as f32 - 127.5) / 128.0;
             }
         }
 
         let input_value = Value::from_array(array).map_err(|e| e.to_string())?;
-
         let outputs = self
             .embedding_model
             .as_mut()
             .unwrap()
             .run(inputs!["input.1" => input_value])
             .map_err(|e| format!("Embedding inference error: {}", e))?;
-
-        let embedding = &outputs[0];
-        let (_, embedding_data) = embedding
+        let (_, embedding_data) = outputs[0]
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("Failed to extract embedding: {}", e))?;
-
-        // Normalize embedding to unit vector
-        let emb_vec = embedding_data.to_vec();
-        let norm: f32 = emb_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if !norm.is_finite() || norm <= f32::EPSILON {
-            return Err("Invalid face embedding norm".to_string());
-        }
-        let normalized: Vec<f32> = emb_vec.iter().map(|x| x / norm).collect();
-
-        Ok(normalized)
+        Ok(embedding_data.to_vec())
     }
 
     /// Compute cosine similarity between two embeddings
@@ -449,14 +471,6 @@ impl FaceEngine {
 
     /// Process image: detect all faces and get embeddings
     /// Filters out low-quality faces (low confidence, small size, blurry)
-    pub fn process_image(
-        &mut self,
-        image_path: &str,
-    ) -> Result<(Vec<FaceData>, (u32, u32)), String> {
-        let img = image::open(image_path).map_err(|e| format!("Failed to open image: {}", e))?;
-        self.process_dynamic_image(&img)
-    }
-
     pub fn process_image_from_bytes(
         &mut self,
         image_bytes: &[u8],
@@ -501,9 +515,11 @@ impl FaceEngine {
 
             // Get embedding for quality face
             let embedding = self.get_face_embedding(img, &face)?;
+            let low_quality = is_low_quality(&face) || blur_score < t_common::LOW_QUALITY_MIN_BLUR;
             results.push(FaceData {
                 bbox: face,
                 embedding,
+                low_quality,
             });
         }
 
@@ -523,7 +539,18 @@ impl FaceEngine {
             return 0.0;
         }
 
-        let crop = img.crop_imm(x, y, w, h).to_luma8();
+        // Score at a fixed scale: per-pixel sharpness drops as resolution grows, so
+        // large faces from full-size decodes would otherwise look blurry.
+        const BLUR_SCORE_MAX_SIDE: u32 = 112;
+        let mut crop = img.crop_imm(x, y, w, h);
+        if w.max(h) > BLUR_SCORE_MAX_SIDE {
+            crop = crop.resize(
+                BLUR_SCORE_MAX_SIDE,
+                BLUR_SCORE_MAX_SIDE,
+                image::imageops::FilterType::Triangle,
+            );
+        }
+        let crop = crop.to_luma8();
         let (width, height) = crop.dimensions();
 
         // Online variance calculation (Welford's algorithm)
@@ -607,6 +634,124 @@ impl FaceEngine {
 #[derive(Clone)]
 pub struct FaceState(pub std::sync::Arc<Mutex<FaceEngine>>);
 
+/// A rescan detection overlapping a stored face this much is the same face.
+const RESCAN_SAME_FACE_IOU: f32 = 0.3;
+
+/// Intersection over union of two (x, y, width, height) boxes.
+fn box_iou(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
+    let ix = (a.0 + a.2).min(b.0 + b.2) - a.0.max(b.0);
+    let iy = (a.1 + a.3).min(b.1 + b.3) - a.1.max(b.1);
+    if ix <= 0.0 || iy <= 0.0 {
+        return 0.0;
+    }
+    let inter = ix * iy;
+    let union = a.2 * a.3 + b.2 * b.3 - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+/// Canonical ArcFace landmark positions in a 112x112 crop
+/// (left eye, right eye, nose tip, left mouth corner, right mouth corner).
+const ARCFACE_TEMPLATE: [(f32, f32); 5] = [
+    (38.2946, 51.6963),
+    (73.5318, 51.5014),
+    (56.0252, 71.7366),
+    (41.5493, 92.3655),
+    (70.7299, 92.2041),
+];
+
+/// Least-squares similarity transform (rotation + uniform scale + translation)
+/// mapping `src` points onto `dst`, as `[a, b, tx, ty]` where
+/// `x' = a*x - b*y + tx` and `y' = b*x + a*y + ty`.
+fn estimate_similarity(src: &[(f32, f32)], dst: &[(f32, f32)]) -> Option<[f32; 4]> {
+    let n = src.len().min(dst.len());
+    if n < 2 {
+        return None;
+    }
+    let nf = n as f32;
+    let (smx, smy) = src[..n]
+        .iter()
+        .fold((0.0, 0.0), |acc, p| (acc.0 + p.0 / nf, acc.1 + p.1 / nf));
+    let (dmx, dmy) = dst[..n]
+        .iter()
+        .fold((0.0, 0.0), |acc, p| (acc.0 + p.0 / nf, acc.1 + p.1 / nf));
+
+    let (mut num_a, mut num_b, mut den) = (0.0f32, 0.0f32, 0.0f32);
+    for k in 0..n {
+        let (sx, sy) = (src[k].0 - smx, src[k].1 - smy);
+        let (dx, dy) = (dst[k].0 - dmx, dst[k].1 - dmy);
+        num_a += sx * dx + sy * dy;
+        num_b += sx * dy - sy * dx;
+        den += sx * sx + sy * sy;
+    }
+    if den <= f32::EPSILON {
+        return None;
+    }
+    let a = num_a / den;
+    let b = num_b / den;
+    let tx = dmx - (a * smx - b * smy);
+    let ty = dmy - (b * smx + a * smy);
+    Some([a, b, tx, ty])
+}
+
+/// Warp the face into the canonical ArcFace pose using its 5 landmarks,
+/// with bilinear sampling and black outside the source image.
+fn align_face(
+    img: &DynamicImage,
+    landmarks: &[(f32, f32)],
+    size: u32,
+) -> Option<image::RgbImage> {
+    use image::GenericImageView;
+
+    if landmarks.len() != 5 {
+        return None;
+    }
+    let scale = size as f32 / 112.0;
+    let template: Vec<(f32, f32)> = ARCFACE_TEMPLATE
+        .iter()
+        .map(|&(x, y)| (x * scale, y * scale))
+        .collect();
+    let [a, b, tx, ty] = estimate_similarity(landmarks, &template)?;
+    let det = a * a + b * b;
+    if det <= f32::EPSILON || !det.is_finite() {
+        return None;
+    }
+
+    let (w, h) = img.dimensions();
+    let sample = |x: i64, y: i64| -> [f32; 3] {
+        if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
+            return [0.0; 3];
+        }
+        let p = img.get_pixel(x as u32, y as u32);
+        [p[0] as f32, p[1] as f32, p[2] as f32]
+    };
+
+    let mut out = image::RgbImage::new(size, size);
+    for (u, v, pixel) in out.enumerate_pixels_mut() {
+        // Inverse similarity: src = R^-1 * (dst - t)
+        let du = u as f32 - tx;
+        let dv = v as f32 - ty;
+        let sx = (a * du + b * dv) / det;
+        let sy = (-b * du + a * dv) / det;
+
+        let x0 = sx.floor();
+        let y0 = sy.floor();
+        let fx = sx - x0;
+        let fy = sy - y0;
+        let (x0, y0) = (x0 as i64, y0 as i64);
+
+        let p00 = sample(x0, y0);
+        let p10 = sample(x0 + 1, y0);
+        let p01 = sample(x0, y0 + 1);
+        let p11 = sample(x0 + 1, y0 + 1);
+        for c in 0..3 {
+            let top = p00[c] * (1.0 - fx) + p10[c] * fx;
+            let bottom = p01[c] * (1.0 - fx) + p11[c] * fx;
+            pixel[c] = (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Some(out)
+}
+
 pub fn run_face_indexing(
     app_handle: AppHandle,
     face_state: FaceState,
@@ -614,6 +759,7 @@ pub fn run_face_indexing(
     status_token_struct: FaceIndexingStatus,
     progress_token_struct: FaceIndexProgressState,
     cluster_epsilon: Option<f32>,
+    rescan: bool,
 ) -> Result<(), String> {
     let cancel_token = cancel_token_struct.0.clone();
     let status_token = status_token_struct.0.clone();
@@ -679,8 +825,10 @@ pub fn run_face_indexing(
                 (0, 0)
             }
         };
+        // A rescan revisits every image (keeping stored faces), so progress starts at zero.
+        let processed_count = if rescan { 0 } else { processed_count };
 
-        let files = match t_sqlite::Face::get_unprocessed_image_files() {
+        let files = match t_sqlite::Face::get_image_files_for_faces(rescan) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Failed to get unprocessed files: {}", e);
@@ -749,35 +897,45 @@ pub fn run_face_indexing(
 
             current += 1;
 
-            // Optimization: Try to use thumbnail first
-            // We need to know if we used a thumbnail to scale the bbox
-            let thumb = t_sqlite::AThumb::fetch(file_id);
-            // Reading the online-only original would download it; retry once it is local.
-            if !matches!(&thumb, Ok(Some(t)) if t.thumb_data.is_some()) && crate::t_utils::is_cloud_only_path(&file_path) {
+            // Prefer a large, orientation-corrected decode of the local original: small
+            // stored thumbnails leave background faces only a few pixels wide for the
+            // embedding model. Fall back to the stored thumbnail (e.g. cloud-only files).
+            let original_local = !crate::t_utils::is_cloud_only_path(&file_path)
+                && crate::t_utils::content_readable(&file_path);
+            let decoded = if original_local {
+                crate::t_image::decode_upright_for_faces(&file_path, t_common::FACE_DECODE_SIZE)
+            } else {
+                None
+            };
+            let thumb_bytes = match decoded {
+                Some(_) => None,
+                None => t_sqlite::AThumb::fetch(file_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|thumb| thumb.thumb_data),
+            };
+            let Some(image_bytes) = decoded.or(thumb_bytes) else {
+                // Reading the online-only original would download it; retry once it is local.
+                if !original_local {
+                    continue;
+                }
+                eprintln!("Failed to decode image for faces: {}", file_path);
+                if rescan {
+                    continue; // keep the earlier result for this file
+                }
+                if let Err(e) = t_sqlite::Face::mark_scanned_with_conn(&db_conn, file_id, 2) {
+                    eprintln!("Failed to mark unreadable file {} as skipped: {}", file_id, e);
+                }
                 continue;
-            }
+            };
             let mut engine = face_state.0.lock().unwrap();
-            let load_original = |engine: &mut FaceEngine| {
-                if !crate::t_utils::content_readable(&file_path) {
-                    return Err("Skipped: the original is not local".to_string());
-                }
-                engine.process_image(&file_path)
-            };
-            let (process_result, used_thumb) = match thumb {
-                Ok(Some(thumb)) if thumb.thumb_data.is_some() => {
-                    let thumb_bytes = thumb.thumb_data.as_ref().unwrap();
-                    match engine.process_image_from_bytes(thumb_bytes) {
-                        Ok(res) => (Ok(res), true),
-                        Err(_) => (load_original(&mut engine), false),
-                    }
-                }
-                _ => (load_original(&mut engine), false),
-            };
+            let process_result = engine.process_image_from_bytes(&image_bytes);
+            drop(engine);
 
             match process_result {
                 Ok((mut faces, (proc_w, proc_h))) => {
-                    // If we used a thumbnail, scale bbox to original size
-                    if used_thumb {
+                    // Scale bbox from the decoded image to original size
+                    {
                         let scale_x = width as f32 / proc_w as f32;
                         let scale_y = height as f32 / proc_h as f32;
 
@@ -789,8 +947,24 @@ pub fn run_face_indexing(
                         }
                     }
 
+                    // Rescan: keep stored faces (and their names); add only detections
+                    // that don't overlap a stored face.
+                    let mut already_had_faces = false;
+                    if rescan {
+                        let existing = t_sqlite::Face::bboxes_for_file_with_conn(&db_conn, file_id)
+                            .unwrap_or_default();
+                        already_had_faces = !existing.is_empty();
+                        faces.retain(|face| {
+                            let b = &face.bbox;
+                            !existing.iter().any(|&(x, y, w, h)| {
+                                box_iou((b.x, b.y, b.width, b.height), (x, y, w, h))
+                                    >= RESCAN_SAME_FACE_IOU
+                            })
+                        });
+                    }
+
                     let has_faces = !faces.is_empty();
-                    let status = if has_faces { 1 } else { 2 };
+                    let status = if has_faces || already_had_faces { 1 } else { 2 };
 
                     if let Err(e) =
                         t_sqlite::Face::mark_scanned_with_conn(&db_conn, file_id, status)
@@ -814,6 +988,7 @@ pub fn run_face_indexing(
                                 file_id,
                                 &bbox_json,
                                 &face_data.embedding,
+                                face_data.low_quality,
                             ) {
                                 Ok(_) => total_faces += 1,
                                 Err(e) => eprintln!("Failed to store face: {}", e),
@@ -824,6 +999,9 @@ pub fn run_face_indexing(
                 Err(e) => {
                     if !crate::t_utils::content_readable(&file_path) { continue; }
                     eprintln!("Failed to process image {}: {}", file_path, e);
+                    if rescan {
+                        continue; // keep the earlier result for this file
+                    }
                     // Do not retry files the decoder cannot read on every resume.
                     // Status 2 means the image was processed without a face result.
                     if let Err(mark_error) = t_sqlite::Face::mark_scanned_with_conn(&db_conn, file_id, 2) {
@@ -920,4 +1098,182 @@ pub fn run_face_indexing(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn face_with(width: f32, confidence: f32, nose_x: f32) -> FaceBox {
+        // Eyes 40px apart at y=50; nose_x is relative to the eye midpoint (x=50).
+        FaceBox {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: width,
+            confidence,
+            landmarks: Some(vec![(30.0, 50.0), (70.0, 50.0), (50.0 + nose_x, 70.0), (35.0, 90.0), (65.0, 90.0)]),
+        }
+    }
+
+    #[test]
+    fn low_quality_flags_small_turned_and_uncertain_faces() {
+        assert!(!is_low_quality(&face_with(120.0, 0.9, 0.0)));
+        assert!(!is_low_quality(&face_with(120.0, 0.9, 12.0))); // mildly turned
+        assert!(is_low_quality(&face_with(30.0, 0.9, 0.0))); // small
+        assert!(is_low_quality(&face_with(120.0, 0.7, 0.0))); // uncertain
+        assert!(is_low_quality(&face_with(120.0, 0.9, 22.0))); // strongly turned
+        assert!(is_low_quality(&face_with(120.0, 0.9, -22.0)));
+    }
+
+    #[test]
+    fn box_iou_detects_the_same_face() {
+        assert!((box_iou((0.0, 0.0, 10.0, 10.0), (0.0, 0.0, 10.0, 10.0)) - 1.0).abs() < 1e-6);
+        assert!(box_iou((0.0, 0.0, 10.0, 10.0), (1.0, 1.0, 10.0, 10.0)) >= RESCAN_SAME_FACE_IOU);
+        assert_eq!(box_iou((0.0, 0.0, 10.0, 10.0), (20.0, 0.0, 10.0, 10.0)), 0.0);
+    }
+
+    #[test]
+    fn similarity_recovers_known_transform() {
+        // rotate 30deg, scale 1.7, translate (12, -4)
+        let (s, th) = (1.7f32, 30f32.to_radians());
+        let (a, b) = (s * th.cos(), s * th.sin());
+        let src = [(10.0, 20.0), (40.0, 18.0), (25.0, 35.0), (12.0, 50.0), (38.0, 52.0)];
+        let dst: Vec<_> = src
+            .iter()
+            .map(|&(x, y)| (a * x - b * y + 12.0, b * x + a * y - 4.0))
+            .collect();
+        let [ea, eb, etx, ety] = estimate_similarity(&src, &dst).unwrap();
+        assert!((ea - a).abs() < 1e-4 && (eb - b).abs() < 1e-4);
+        assert!((etx - 12.0).abs() < 1e-3 && (ety + 4.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn align_face_maps_landmarks_onto_template() {
+        // Place bright dots at landmark positions of a scaled/shifted face and
+        // check they land on the ArcFace template after alignment.
+        let mut img = image::RgbImage::new(400, 400);
+        let lm: Vec<(f32, f32)> = ARCFACE_TEMPLATE
+            .iter()
+            .map(|&(x, y)| (x * 2.0 + 100.0, y * 2.0 + 60.0))
+            .collect();
+        for &(x, y) in &lm {
+            for dy in -2i32..=2 {
+                for dx in -2i32..=2 {
+                    img.put_pixel((x as i32 + dx) as u32, (y as i32 + dy) as u32, image::Rgb([255, 255, 255]));
+                }
+            }
+        }
+        let out = align_face(&DynamicImage::ImageRgb8(img), &lm, 112).unwrap();
+        for &(x, y) in &ARCFACE_TEMPLATE {
+            assert!(out.get_pixel(x.round() as u32, y.round() as u32)[0] > 200);
+        }
+    }
+
+    /// Runs the bundled models on demo images and writes aligned crops to
+    /// $FACE_ALIGN_OUT for visual inspection (input dir: $FACE_ALIGN_IN, default demo thumbnails).
+    /// `FACE_ALIGN_OUT=/some/dir cargo test --lib aligned_crops -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn aligned_crops_from_real_models() {
+        let models = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/models");
+        let load = |name: &str| {
+            Session::builder()
+                .unwrap()
+                .commit_from_file(models.join(name))
+                .unwrap()
+        };
+        let mut engine = FaceEngine {
+            detection_model: Some(load(t_common::DETECTION_MODEL)),
+            embedding_model: Some(load(t_common::EMBEDDING_MODEL)),
+        };
+        let out_dir = std::path::PathBuf::from(std::env::var("FACE_ALIGN_OUT").unwrap());
+        let demo = std::env::var("FACE_ALIGN_IN").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/public/demos/lap/thumbnails")
+        });
+        let mut found = 0;
+        for entry in std::fs::read_dir(demo).unwrap() {
+            let path = entry.unwrap().path();
+            let img = image::open(&path).unwrap();
+            for (i, face) in engine.detect_faces(&img).unwrap().iter().enumerate() {
+                println!(
+                    "{} face {} at x={:.0} y={:.0} w={:.0} confidence {:.4} blur {:.1} low_quality {}",
+                    path.display(),
+                    i,
+                    face.x,
+                    face.y,
+                    face.width,
+                    face.confidence,
+                    engine.calculate_blur_score(&img, face),
+                    is_low_quality(face)
+                );
+                let lm = face.landmarks.as_ref().expect("detector returned no landmarks");
+                let crop = align_face(&img, lm, 112).unwrap();
+                let name = format!("{}_{}.png", path.file_stem().unwrap().to_string_lossy(), i);
+                crop.save(out_dir.join(name)).unwrap();
+                engine.get_face_embedding(&img, face).unwrap();
+                found += 1;
+            }
+        }
+        println!("aligned {} faces", found);
+        assert!(found > 0);
+    }
+
+    /// Rotated-photo check: stores $FACE_ALIGN_IN/crew.jpg sideways with EXIF
+    /// orientation 6 (like a phone portrait), indexes it, and writes the person-avatar
+    /// crops to $FACE_ALIGN_OUT for inspection.
+    #[test]
+    #[ignore]
+    fn face_crops_match_detected_faces_on_rotated_photos() {
+        use rusqlite::{Connection, params};
+        let input = std::path::PathBuf::from(std::env::var("FACE_ALIGN_IN").unwrap()).join("crew.jpg");
+        let out_dir = std::path::PathBuf::from(std::env::var("FACE_ALIGN_OUT").unwrap());
+        let rotated = out_dir.join("rotated6.jpg");
+        image::open(&input).unwrap().rotate270().save(&rotated).unwrap();
+        let mut metadata = little_exif::metadata::Metadata::new();
+        metadata.set_tag(little_exif::exif_tag::ExifTag::Orientation(vec![6]));
+        metadata.write_to_file(&rotated).unwrap();
+        let path = rotated.to_string_lossy().to_string();
+        assert_eq!(crate::t_image::get_image_orientation(&path), 6);
+
+        let models = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/models");
+        let load = |name: &str| Session::builder().unwrap().commit_from_file(models.join(name)).unwrap();
+        let mut engine = FaceEngine {
+            detection_model: Some(load(t_common::DETECTION_MODEL)),
+            embedding_model: Some(load(t_common::EMBEDDING_MODEL)),
+        };
+        // Same decode as indexing; stored dimensions are upright (swapped for orientation 6).
+        let bytes = crate::t_image::get_image_thumbnail_with_encoding(&path, 6, t_common::FACE_DECODE_SIZE, true)
+            .unwrap()
+            .unwrap();
+        let (faces, (proc_w, proc_h)) = engine.process_image_from_bytes(&bytes).unwrap();
+        let (raw_w, raw_h) = image::image_dimensions(&rotated).unwrap();
+        let (stored_w, stored_h) = (raw_h, raw_w);
+        assert_eq!((proc_w > proc_h), (stored_w > stored_h), "decode must be upright");
+        assert_eq!(faces.len(), 3);
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE afolders(id INTEGER PRIMARY KEY, path TEXT);
+             CREATE TABLE afiles(id INTEGER PRIMARY KEY, folder_id INTEGER, name TEXT, width INTEGER, height INTEGER, e_orientation INTEGER);
+             CREATE TABLE faces(id INTEGER PRIMARY KEY, file_id INTEGER, bbox TEXT, person_id INTEGER);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO afolders VALUES (1, ?1)", params![out_dir.to_string_lossy()]).unwrap();
+        conn.execute(
+            "INSERT INTO afiles VALUES (1, 1, 'rotated6.jpg', ?1, ?2, 6)",
+            params![stored_w, stored_h],
+        )
+        .unwrap();
+        let (sx, sy) = (stored_w as f32 / proc_w as f32, stored_h as f32 / proc_h as f32);
+        for (i, face) in faces.iter().enumerate() {
+            let bbox = serde_json::json!({
+                "x": face.bbox.x * sx, "y": face.bbox.y * sy,
+                "width": face.bbox.width * sx, "height": face.bbox.height * sy,
+            });
+            conn.execute("INSERT INTO faces VALUES (?1, 1, ?2, NULL)", params![i as i64 + 1, bbox.to_string()]).unwrap();
+            let crop = t_sqlite::Person::generate_face_thumbnail(&conn, i as i64 + 1).unwrap().unwrap();
+            std::fs::write(out_dir.join(format!("avatar_{}.jpg", i)), crop).unwrap();
+        }
+    }
 }

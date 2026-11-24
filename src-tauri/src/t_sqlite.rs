@@ -9545,6 +9545,18 @@ impl Person {
             }
         };
 
+        Self::generate_face_thumbnail(conn, face_id)
+    }
+
+    /// Get a single face's crop as Base64 JPEG.
+    pub fn get_face_thumbnail(face_id: i64) -> Result<Option<String>, String> {
+        let conn = open_conn()?;
+        let data = Self::generate_face_thumbnail(&conn, face_id)?;
+        Ok(data.map(|data| general_purpose::STANDARD.encode(data)))
+    }
+
+    /// Crop one face from its photo as a JPEG thumbnail.
+    pub(crate) fn generate_face_thumbnail(conn: &Connection, face_id: i64) -> Result<Option<Vec<u8>>, String> {
         // 2. Get face info and file info
         let query = "
             SELECT f.id, faces.bbox, f.width, f.height, f.e_orientation, f.name, fd.path
@@ -9577,7 +9589,7 @@ impl Person {
             ))
         });
 
-        let (file_id, bbox_json, orig_w_opt, orig_h_opt, orientation_opt, file_name, folder_path) =
+        let (file_id, bbox_json, orig_w_opt, orig_h_opt, _orientation, file_name, folder_path) =
             match row {
                 Ok(r) => r,
                 Err(_) => return Ok(None),
@@ -9588,26 +9600,21 @@ impl Person {
             Err(_) => return Ok(None),
         };
 
-        let orientation = orientation_opt.unwrap_or(1); // Default to Normal
+        // Face boxes are stored in upright (display) coordinates: indexing detects on an
+        // orientation-corrected decode and scales to the stored, already-swapped width/height.
 
-        // 3. Load Image (Original or Thumbnail)
+        // 3. Load an upright image the same way face indexing does, else the stored thumbnail.
         let full_path = std::path::Path::new(&folder_path).join(&file_name);
-
-        // Helper to load and rotate original image
         let load_original = || -> Option<(image::DynamicImage, u32, u32)> {
-            if !t_utils::content_readable(&full_path.to_string_lossy()) { return None; }
-            let mut dyn_img = image::open(&full_path).ok()?;
-            dyn_img = match orientation {
-                3 => dyn_img.rotate180(),
-                6 => dyn_img.rotate90(),
-                8 => dyn_img.rotate270(),
-                _ => dyn_img,
-            };
-            let (w, h) = dyn_img.dimensions();
-            Some((dyn_img, w, h))
+            let path = full_path.to_string_lossy();
+            if !t_utils::content_readable(&path) { return None; }
+            let data = t_image::decode_upright_for_faces(&path, t_common::FACE_DECODE_SIZE)?;
+            let img = image::load_from_memory(&data).ok()?;
+            let (w, h) = img.dimensions();
+            Some((img, w, h))
         };
 
-        // Helper to load thumbnail from cache-backed thumbnail storage
+        // Helper to load thumbnail from cache-backed thumbnail storage (already upright)
         let load_thumbnail = || -> Option<(image::DynamicImage, u32, u32)> {
             let data = AThumb::fetch(file_id).ok()??.thumb_data?;
             let img = image::load_from_memory(&data).ok()?;
@@ -9620,43 +9627,12 @@ impl Person {
             None => return Ok(None),
         };
 
-        // 4. Calculate Dimensions & BBox
-        let (ref_w, ref_h) = if let (Some(ow), Some(oh)) = (orig_w_opt, orig_h_opt) {
-            match orientation {
-                6 | 8 => (oh, ow),
-                _ => (ow, oh),
-            }
-        } else {
-            (img_w, img_h)
+        // 4. Reference size the bbox is expressed in
+        let (ref_w, ref_h) = match (orig_w_opt, orig_h_opt) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+            _ => (img_w, img_h),
         };
-
-        let transformed_bbox = if orig_w_opt.is_some() && orig_h_opt.is_some() {
-            let orig_w = orig_w_opt.unwrap();
-            let orig_h = orig_h_opt.unwrap();
-            match orientation {
-                6 => FaceBBox {
-                    x: orig_h as f32 - bbox.y - bbox.height,
-                    y: bbox.x,
-                    width: bbox.height,
-                    height: bbox.width,
-                },
-                8 => FaceBBox {
-                    x: bbox.y,
-                    y: orig_w as f32 - bbox.x - bbox.width,
-                    width: bbox.height,
-                    height: bbox.width,
-                },
-                3 => FaceBBox {
-                    x: orig_w as f32 - bbox.x - bbox.width,
-                    y: orig_h as f32 - bbox.y - bbox.height,
-                    width: bbox.width,
-                    height: bbox.height,
-                },
-                _ => bbox,
-            }
-        } else {
-            bbox
-        };
+        let transformed_bbox = bbox;
 
         // 5. Crop and Resize
         let scale_x = img_w as f32 / ref_w as f32;
@@ -9765,13 +9741,58 @@ impl Person {
     /// Rename a person
     pub fn rename(person_id: i64, new_name: &str) -> Result<usize, String> {
         let conn = open_conn()?;
+        Self::rename_with_conn(&conn, person_id, new_name)
+    }
+
+    /// Naming a person endorses its faces, so they are confirmed and survive re-clustering.
+    pub(crate) fn rename_with_conn(
+        conn: &Connection,
+        person_id: i64,
+        new_name: &str,
+    ) -> Result<usize, String> {
         let result = conn
             .execute(
                 "UPDATE persons SET name = ?1 WHERE id = ?2",
                 params![new_name, person_id],
             )
             .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE faces SET confirmed = 1 WHERE person_id = ?1",
+            params![person_id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(result)
+    }
+
+    /// Next free number for an auto-generated "Person N" name.
+    pub(crate) fn next_default_number(conn: &Connection) -> Result<i64, String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM persons WHERE name GLOB 'Person [0-9]*'")
+            .map_err(|e| e.to_string())?;
+        let max = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|name| name.ok()?.strip_prefix("Person ")?.trim().parse::<i64>().ok())
+            .max()
+            .unwrap_or(0);
+        Ok(max + 1)
+    }
+
+    /// Delete a person that no longer has any faces.
+    pub(crate) fn delete_if_empty(conn: &Connection, person_id: i64) -> Result<(), String> {
+        conn.execute(
+            "DELETE FROM persons WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM faces WHERE person_id = ?1)",
+            params![person_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM face_rejections WHERE person_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM persons WHERE id = ?1)",
+            params![person_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Delete a person (faces will have person_id set to NULL)
@@ -9780,7 +9801,12 @@ impl Person {
 
         // First, unlink all faces from this person
         conn.execute(
-            "UPDATE faces SET person_id = NULL WHERE person_id = ?1",
+            "UPDATE faces SET person_id = NULL, confirmed = 0 WHERE person_id = ?1",
+            params![person_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM face_rejections WHERE person_id = ?1",
             params![person_id],
         )
         .map_err(|e| e.to_string())?;
@@ -9947,7 +9973,28 @@ impl Person {
                 .map_err(|e| e.to_string())?;
             moved_face_count += moved;
             merged_person_ids.push(*sid);
+            // "Not the source" now means "not the target".
+            tx.execute(
+                "UPDATE OR IGNORE face_rejections SET person_id = ?1 WHERE person_id = ?2",
+                params![target_id, sid],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM face_rejections WHERE person_id = ?1", params![sid])
+                .map_err(|e| e.to_string())?;
         }
+
+        // Merging is a user decision, so the merged person's faces are confirmed.
+        tx.execute(
+            "UPDATE faces SET confirmed = 1 WHERE person_id = ?1",
+            params![target_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM face_rejections WHERE person_id = ?1
+               AND face_id IN (SELECT id FROM faces WHERE person_id = ?1)",
+            params![target_id],
+        )
+        .map_err(|e| e.to_string())?;
 
         // 4. Resolve final name for target
         let explicit_name = new_name.map(str::trim).filter(|s| !s.is_empty());
@@ -10062,6 +10109,20 @@ pub struct Face {
     pub person_id: Option<i64>,
     pub person_name: Option<String>,
     pub created_at: i64,
+    /// True when the user confirmed this face's person (kept across re-clustering).
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+/// Face row used by clustering.
+#[derive(Debug, Clone)]
+pub struct ClusterFace {
+    pub id: i64,
+    pub file_id: i64,
+    pub embedding: Option<Vec<u8>>,
+    pub person_id: Option<i64>,
+    pub confirmed: bool,
+    pub low_quality: bool,
 }
 
 impl Face {
@@ -10071,6 +10132,7 @@ impl Face {
         file_id: i64,
         bbox: &str,
         embedding: &[f32],
+        low_quality: bool,
     ) -> Result<i64, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -10081,8 +10143,8 @@ impl Face {
         let embedding_bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
 
         conn.execute(
-            "INSERT INTO faces (file_id, bbox, embedding, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![file_id, bbox, embedding_bytes, now],
+            "INSERT INTO faces (file_id, bbox, embedding, created_at, low_quality) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![file_id, bbox, embedding_bytes, now, low_quality as i64],
         )
         .map_err(|e| e.to_string())?;
 
@@ -10111,6 +10173,11 @@ impl Face {
         // Use a transaction
         conn.execute("BEGIN TRANSACTION", params![])
             .map_err(|e| e.to_string())?;
+
+        if let Err(e) = conn.execute("DELETE FROM face_rejections", params![]) {
+            let _ = conn.execute("ROLLBACK", params![]);
+            return Err(e.to_string());
+        }
 
         if let Err(e) = conn.execute("DELETE FROM faces", params![]) {
             let _ = conn.execute("ROLLBACK", params![]);
@@ -10143,7 +10210,7 @@ impl Face {
         let conn = open_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT f.id, f.file_id, f.bbox, f.embedding, f.person_id, f.created_at, p.name 
+                "SELECT f.id, f.file_id, f.bbox, NULL, f.person_id, f.created_at, p.name, f.confirmed
                  FROM faces f
                  LEFT JOIN persons p ON f.person_id = p.id
                  WHERE f.file_id = ?1",
@@ -10160,6 +10227,7 @@ impl Face {
                     person_id: row.get(4)?,
                     created_at: row.get(5)?,
                     person_name: row.get(6)?,
+                    confirmed: row.get::<_, i64>(7)? != 0,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -10169,70 +10237,251 @@ impl Face {
         Ok(faces)
     }
 
-    /// Get slim face data for clustering: (face_id, file_id, embedding_bytes)
-    /// Avoids loading full Face structs (bbox JSON, person_id, created_at) to reduce memory
-    pub fn get_all_for_clustering() -> Result<Vec<(i64, i64, Option<Vec<u8>>)>, String> {
-        let conn = open_conn()?;
+    /// Slim face data for clustering (skips bbox JSON and timestamps to reduce memory).
+    pub fn get_all_for_clustering_with_conn(conn: &Connection) -> Result<Vec<ClusterFace>, String> {
         let mut stmt = conn
-            .prepare("SELECT id, file_id, embedding FROM faces")
+            .prepare("SELECT id, file_id, embedding, person_id, confirmed, low_quality FROM faces")
             .map_err(|e| e.to_string())?;
-
         let faces = stmt
             .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let file_id: i64 = row.get(1)?;
-                let embedding: Option<Vec<u8>> = row.get(2)?;
-                Ok((id, file_id, embedding))
+                Ok(ClusterFace {
+                    id: row.get(0)?,
+                    file_id: row.get(1)?,
+                    embedding: row.get(2)?,
+                    person_id: row.get(3)?,
+                    confirmed: row.get::<_, i64>(4)? != 0,
+                    low_quality: row.get::<_, i64>(5)? != 0,
+                })
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-
         Ok(faces)
     }
 
-    /// Reset all face assignments and delete all persons (for re-clustering)
-    pub fn reset_all_assignments() -> Result<(), String> {
-        let conn = open_conn()?;
-
-        // Clear all person_id from faces
-        conn.execute("UPDATE faces SET person_id = NULL", [])
-            .map_err(|e| e.to_string())?;
-
-        // Delete all persons
-        conn.execute("DELETE FROM persons", [])
-            .map_err(|e| e.to_string())?;
-
-        Ok(())
-    }
-
-    /// Assign a face to a person
-    pub fn assign_to_person(face_id: i64, person_id: i64) -> Result<usize, String> {
-        let conn = open_conn()?;
-        let result = conn
-            .execute(
-                "UPDATE faces SET person_id = ?1 WHERE id = ?2",
-                params![person_id, face_id],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(result)
-    }
-
-    /// Get all image file IDs that haven't been processed for faces yet
-    /// Returns: Vec<(id, file_path, width, height)>
-    pub fn get_unprocessed_image_files() -> Result<Vec<(i64, String, i64, i64)>, String> {
-        let conn = open_conn()?;
+    /// All (face_id, person_id) pairs the user rejected.
+    pub fn get_rejections_with_conn(conn: &Connection) -> Result<Vec<(i64, i64)>, String> {
         let mut stmt = conn
-            .prepare(
-                "SELECT a.id, f.path || '/' || a.name as file_path, a.width, a.height
-                 FROM afiles a 
-                 JOIN afolders f ON a.folder_id = f.id
-                 WHERE a.file_type = 1 
-                   AND (a.has_faces IS NULL OR a.has_faces = 0)
-                   AND a.width IS NOT NULL AND a.height IS NOT NULL
-                 ORDER BY a.id",
+            .prepare("SELECT face_id, person_id FROM face_rejections")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+
+    /// Clear automatic assignments before re-clustering. Confirmed faces keep their
+    /// person; persons left without any face are deleted.
+    pub fn reset_unconfirmed_assignments_with_conn(conn: &mut Connection) -> Result<(), String> {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        tx.execute_batch(
+            "UPDATE faces SET person_id = NULL WHERE confirmed = 0 AND person_id IS NOT NULL;
+             UPDATE faces SET confirmed = 0 WHERE person_id IS NULL AND confirmed != 0;
+             DELETE FROM persons WHERE id NOT IN
+                (SELECT DISTINCT person_id FROM faces WHERE person_id IS NOT NULL);
+             DELETE FROM face_rejections WHERE person_id NOT IN (SELECT id FROM persons);",
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Write clustering output: unconfirmed faces matched to existing persons, plus
+    /// new clusters that each become a new "Person N". Returns the number of faces assigned.
+    pub fn apply_auto_assignments_with_conn(
+        conn: &mut Connection,
+        matched: &[(i64, i64)],
+        new_clusters: &[Vec<i64>],
+    ) -> Result<usize, String> {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let mut assigned = 0;
+        {
+            let mut update = tx
+                .prepare("UPDATE faces SET person_id = ?1, confirmed = 0 WHERE id = ?2")
+                .map_err(|e| e.to_string())?;
+            for &(face_id, person_id) in matched {
+                assigned += update.execute(params![person_id, face_id]).map_err(|e| e.to_string())?;
+            }
+
+            let mut next_number = Person::next_default_number(&tx)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            for cluster in new_clusters {
+                tx.execute(
+                    "INSERT INTO persons (name, created_at) VALUES (?1, ?2)",
+                    params![format!("Person {}", next_number), now],
+                )
+                .map_err(|e| e.to_string())?;
+                next_number += 1;
+                let person_id = tx.last_insert_rowid();
+                for &face_id in cluster {
+                    assigned += update.execute(params![person_id, face_id]).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(assigned)
+    }
+
+    /// The user says this face is not its current person: unassign it and remember
+    /// the rejection. Returns the person it was removed from.
+    pub fn reject_from_person_with_conn(
+        conn: &mut Connection,
+        face_id: i64,
+    ) -> Result<Option<i64>, String> {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let old_person: Option<i64> = tx
+            .query_row("SELECT person_id FROM faces WHERE id = ?1", params![face_id], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Face {} not found", face_id))?;
+        let Some(old_person) = old_person else {
+            return Ok(None);
+        };
+        tx.execute(
+            "UPDATE faces SET person_id = NULL, confirmed = 0 WHERE id = ?1",
+            params![face_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO face_rejections (face_id, person_id) VALUES (?1, ?2)",
+            params![face_id, old_person],
+        )
+        .map_err(|e| e.to_string())?;
+        Person::delete_if_empty(&tx, old_person)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(Some(old_person))
+    }
+
+    /// The user says this face is `person_id`. The assignment is confirmed; a face of the
+    /// same person elsewhere in the photo is unassigned (one person appears once per photo),
+    /// and the previous person is recorded as rejected. Returns the previous person.
+    pub fn assign_confirmed_with_conn(
+        conn: &mut Connection,
+        face_id: i64,
+        person_id: i64,
+    ) -> Result<Option<i64>, String> {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let (file_id, old_person): (i64, Option<i64>) = tx
+            .query_row(
+                "SELECT file_id, person_id FROM faces WHERE id = ?1",
+                params![face_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Face {} not found", face_id))?;
+        let person_exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?1)",
+                params![person_id],
+                |row| row.get(0),
             )
             .map_err(|e| e.to_string())?;
+        if !person_exists {
+            return Err(format!("Person {} not found", person_id));
+        }
+
+        tx.execute(
+            "UPDATE faces SET person_id = NULL, confirmed = 0
+             WHERE file_id = ?1 AND person_id = ?2 AND id != ?3",
+            params![file_id, person_id, face_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE faces SET person_id = ?1, confirmed = 1 WHERE id = ?2",
+            params![person_id, face_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM face_rejections WHERE face_id = ?1 AND person_id = ?2",
+            params![face_id, person_id],
+        )
+        .map_err(|e| e.to_string())?;
+        if let Some(old) = old_person.filter(|&old| old != person_id) {
+            tx.execute(
+                "INSERT OR IGNORE INTO face_rejections (face_id, person_id) VALUES (?1, ?2)",
+                params![face_id, old],
+            )
+            .map_err(|e| e.to_string())?;
+            Person::delete_if_empty(&tx, old)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(old_person.filter(|&old| old != person_id))
+    }
+
+    /// Stored face boxes of a file as (x, y, width, height).
+    pub fn bboxes_for_file_with_conn(
+        conn: &Connection,
+        file_id: i64,
+    ) -> Result<Vec<(f32, f32, f32, f32)>, String> {
+        let mut stmt = conn
+            .prepare("SELECT bbox FROM faces WHERE file_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![file_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut boxes = Vec::new();
+        for json in rows {
+            let json = json.map_err(|e| e.to_string())?;
+            if let Ok(b) = serde_json::from_str::<FaceBBox>(&json) {
+                boxes.push((b.x, b.y, b.width, b.height));
+            }
+        }
+        Ok(boxes)
+    }
+
+    /// Face ids of `person_id` in the given files.
+    pub fn ids_for_person_in_files(
+        conn: &Connection,
+        person_id: i64,
+        file_ids: &[i64],
+    ) -> Result<Vec<i64>, String> {
+        let mut stmt = conn
+            .prepare("SELECT id FROM faces WHERE person_id = ?1 AND file_id = ?2")
+            .map_err(|e| e.to_string())?;
+        let mut ids = Vec::new();
+        for &file_id in file_ids {
+            let rows = stmt
+                .query_map(params![person_id, file_id], |row| row.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?;
+            for id in rows {
+                ids.push(id.map_err(|e| e.to_string())?);
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Image files for face detection as (id, file_path, width, height): only unscanned
+    /// ones, or every image (`include_scanned`) when rescanning for faces missed earlier.
+    pub fn get_image_files_for_faces(include_scanned: bool) -> Result<Vec<(i64, String, i64, i64)>, String> {
+        let conn = open_conn()?;
+        let scanned_filter = if include_scanned {
+            ""
+        } else {
+            "AND (a.has_faces IS NULL OR a.has_faces = 0)"
+        };
+        let sql = format!(
+            "SELECT a.id, f.path || '/' || a.name as file_path, a.width, a.height
+             FROM afiles a
+             JOIN afolders f ON a.folder_id = f.id
+             WHERE a.file_type = 1
+               {scanned_filter}
+               AND a.width IS NOT NULL AND a.height IS NOT NULL
+             ORDER BY a.id"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
         let files = stmt
             .query_map([], |row| {
@@ -11234,6 +11483,45 @@ fn create_db_internal() -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_faces_person_id ON faces(person_id)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Migration: user-confirmed face assignments survive re-clustering.
+    if conn
+        .execute(
+            "ALTER TABLE faces ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .is_ok()
+    {
+        // Treat people the user already named as confirmed so their names survive
+        // the next clustering run.
+        let _ = conn.execute(
+            "UPDATE faces SET confirmed = 1
+             WHERE person_id IN (
+                SELECT id FROM persons
+                WHERE name IS NOT NULL AND TRIM(name) != '' AND name NOT GLOB 'Person [0-9]*'
+             )",
+            [],
+        );
+    }
+
+    // Migration: faces too small/turned/uncertain to help form clusters.
+    let _ = conn.execute(
+        "ALTER TABLE faces ADD COLUMN low_quality INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+
+    // Faces the user said are NOT a given person; clustering never assigns them back.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS face_rejections (
+            face_id INTEGER NOT NULL,
+            person_id INTEGER NOT NULL,
+            PRIMARY KEY (face_id, person_id),
+            FOREIGN KEY (face_id) REFERENCES faces(id) ON DELETE CASCADE,
+            FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE CASCADE
+        )",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -12670,12 +12958,122 @@ mod collection_scope_tests {
                 embedding BLOB,
                 person_id INTEGER,
                 created_at INTEGER,
+                confirmed INTEGER NOT NULL DEFAULT 0,
+                low_quality INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE,
                 FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE SET NULL
+             );
+             CREATE TABLE face_rejections(
+                face_id INTEGER NOT NULL,
+                person_id INTEGER NOT NULL,
+                PRIMARY KEY (face_id, person_id)
              );",
         )
         .unwrap();
         conn
+    }
+
+    fn face_state(conn: &Connection) -> Vec<(i64, Option<i64>, bool)> {
+        let mut stmt = conn
+            .prepare("SELECT id, person_id, confirmed FROM faces ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn rejections(conn: &Connection) -> Vec<(i64, i64)> {
+        Face::get_rejections_with_conn(conn).unwrap()
+    }
+
+    fn person_ids(conn: &Connection) -> Vec<i64> {
+        let mut stmt = conn.prepare("SELECT id FROM persons ORDER BY id").unwrap();
+        stmt.query_map([], |row| row.get(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    fn setup_face_edit_db() -> Connection {
+        let conn = setup_person_merge_db();
+        conn.execute_batch(
+            "INSERT INTO persons(id, name, created_at) VALUES
+                (1, 'Alice', 100), (2, 'Person 2', 100), (3, 'Person 3', 100);
+             INSERT INTO faces(id, file_id, bbox, person_id, confirmed, created_at) VALUES
+                (10, 1, '{}', 1, 1, 100),
+                (11, 2, '{}', 1, 0, 100),
+                (20, 2, '{}', 2, 0, 100),
+                (30, 3, '{}', 3, 0, 100);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn reject_unassigns_face_records_rejection_and_drops_empty_person() {
+        let mut conn = setup_face_edit_db();
+        assert_eq!(Face::reject_from_person_with_conn(&mut conn, 11).unwrap(), Some(1));
+        assert_eq!(face_state(&conn)[1], (11, None, false));
+        assert_eq!(rejections(&conn), vec![(11, 1)]);
+        // Removing a person's last face deletes the person (and rejections pointing at it).
+        assert_eq!(Face::reject_from_person_with_conn(&mut conn, 30).unwrap(), Some(3));
+        assert_eq!(face_state(&conn)[3], (30, None, false));
+        assert_eq!(rejections(&conn), vec![(11, 1)]);
+        assert_eq!(person_ids(&conn), vec![1, 2]);
+        // Already unassigned: nothing to reject.
+        assert_eq!(Face::reject_from_person_with_conn(&mut conn, 30).unwrap(), None);
+    }
+
+    #[test]
+    fn assign_confirms_face_and_keeps_one_face_per_person_per_photo() {
+        let mut conn = setup_face_edit_db();
+        // Face 20 shares file 2 with face 11 (Alice); confirming 20 as Alice evicts 11.
+        assert_eq!(Face::assign_confirmed_with_conn(&mut conn, 20, 1).unwrap(), Some(2));
+        let state = face_state(&conn);
+        assert_eq!(state[1], (11, None, false));
+        assert_eq!(state[2], (20, Some(1), true));
+        // Person 2 lost its only face, so it is gone along with its rejection.
+        assert!(rejections(&conn).is_empty());
+        assert_eq!(person_ids(&conn), vec![1, 3]);
+        assert!(Face::assign_confirmed_with_conn(&mut conn, 20, 999).is_err());
+        // Re-assigning to a rejected person clears that rejection.
+        conn.execute("INSERT INTO persons(id, name) VALUES (2, 'Bob')", []).unwrap();
+        Face::assign_confirmed_with_conn(&mut conn, 20, 2).unwrap();
+        assert_eq!(rejections(&conn), vec![(20, 1)]);
+    }
+
+    #[test]
+    fn reset_keeps_confirmed_faces_and_apply_creates_numbered_persons() {
+        let mut conn = setup_face_edit_db();
+        conn.execute("INSERT INTO face_rejections VALUES (30, 3)", []).unwrap();
+        Face::reset_unconfirmed_assignments_with_conn(&mut conn).unwrap();
+        let state = face_state(&conn);
+        assert_eq!(state, vec![(10, Some(1), true), (11, None, false), (20, None, false), (30, None, false)]);
+        assert_eq!(person_ids(&conn), vec![1]);
+        assert!(rejections(&conn).is_empty());
+
+        let assigned = Face::apply_auto_assignments_with_conn(&mut conn, &[(11, 1)], &[vec![20, 30]]).unwrap();
+        assert_eq!(assigned, 3);
+        let new_person: (i64, String) = conn
+            .query_row("SELECT id, name FROM persons WHERE id != 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(new_person.1, "Person 1");
+        assert_eq!(
+            face_state(&conn),
+            vec![(10, Some(1), true), (11, Some(1), false), (20, Some(new_person.0), false), (30, Some(new_person.0), false)]
+        );
+    }
+
+    #[test]
+    fn rename_and_merge_confirm_faces_and_carry_rejections() {
+        let mut conn = setup_face_edit_db();
+        let _guard = with_test_scope(None);
+        Person::rename_with_conn(&conn, 3, "Carol").unwrap();
+        assert_eq!(face_state(&conn)[3], (30, Some(3), true));
+
+        conn.execute("INSERT INTO face_rejections VALUES (10, 2), (11, 2)", []).unwrap();
+        Person::merge_with_conn(&mut conn, &[2], 1, None).unwrap();
+        assert!(face_state(&conn).iter().filter(|f| f.1 == Some(1)).all(|f| f.2));
+        // Faces now in the target cannot also be rejected from it.
+        assert!(rejections(&conn).is_empty());
     }
 
     #[test]

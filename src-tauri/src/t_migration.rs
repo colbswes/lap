@@ -189,6 +189,23 @@ fn get_migrations() -> Vec<Migration> {
             sql: "CREATE INDEX IF NOT EXISTS idx_afolders_excluded_album
                   ON afolders(album_id) WHERE is_excluded_from_search = 1;",
         },
+        Migration {
+            version: 25,
+            description: "Re-detect faces on rotated HEIC photos (they were indexed sideways)",
+            sql: "
+                CREATE TEMP TABLE IF NOT EXISTS sideways_face_files AS
+                    SELECT id FROM afiles
+                    WHERE e_orientation > 1
+                      AND (lower(name) LIKE '%.heic' OR lower(name) LIKE '%.heif' OR lower(name) LIKE '%.hif');
+                DELETE FROM face_rejections WHERE face_id IN
+                    (SELECT id FROM faces WHERE file_id IN (SELECT id FROM sideways_face_files));
+                DELETE FROM faces WHERE file_id IN (SELECT id FROM sideways_face_files);
+                UPDATE afiles SET has_faces = 0 WHERE id IN (SELECT id FROM sideways_face_files);
+                DELETE FROM persons WHERE id NOT IN
+                    (SELECT DISTINCT person_id FROM faces WHERE person_id IS NOT NULL);
+                DROP TABLE sideways_face_files;
+            ",
+        },
     ]
 }
 
@@ -559,6 +576,15 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
                 }
                 tx.pragma_update(None, "user_version", migration.version).map_err(|e| e.to_string())?;
                 tx.commit().map_err(|e| e.to_string())?;
+            } else if migration.version == 25 {
+                // Only libraries that already have face data need the cleanup.
+                if table_has_column(conn, "faces", "file_id")?
+                    && table_has_column(conn, "face_rejections", "face_id")?
+                    && table_has_column(conn, "afiles", "e_orientation")?
+                {
+                    conn.execute_batch(migration.sql)
+                        .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;
+                }
             } else if migration.version == 21 {
                 migrate_tag_tree(conn)?;
             } else if !migration.sql.trim().is_empty() {
@@ -662,11 +688,11 @@ mod album_filter_migration_tests {
         assert!(!has_exclusion_index(&conn));
         check_and_migrate(&conn).unwrap();
         assert!(has_exclusion_index(&conn));
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 24);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 25);
         // Running again changes nothing.
         check_and_migrate(&conn).unwrap();
         assert!(has_exclusion_index(&conn));
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 24);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 25);
     }
 
     #[test]
@@ -728,7 +754,7 @@ mod album_filter_migration_tests {
         // Simulate migration completing before the version was persisted.
         conn.execute_batch("PRAGMA user_version=17;").unwrap();
         check_and_migrate(&conn).unwrap();
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),24);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),25);
     }
 
     #[test]
@@ -743,7 +769,7 @@ mod album_filter_migration_tests {
         // Simulate migration completing before the version was persisted.
         conn.execute_batch("PRAGMA user_version=18;").unwrap();
         check_and_migrate(&conn).unwrap();
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 24);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
     }
 
     #[test]
@@ -758,7 +784,7 @@ mod album_filter_migration_tests {
         conn.execute_batch("UPDATE afiles SET e_title='Existing'; PRAGMA user_version=21;").unwrap();
         check_and_migrate(&conn).unwrap();
         assert_eq!(conn.query_row("SELECT e_title FROM afiles", [], |r| r.get::<_,String>(0)).unwrap(), "Existing");
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_,i32>(0)).unwrap(), 24);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_,i32>(0)).unwrap(), 25);
     }
 }
 

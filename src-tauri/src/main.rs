@@ -438,6 +438,10 @@ async fn main() {
             t_cmds::merge_persons,
             t_cmds::find_person_by_name,
             t_cmds::get_faces_for_file,
+            t_cmds::get_face_thumbnail,
+            t_cmds::assign_face_to_person,
+            t_cmds::remove_face_from_person,
+            t_cmds::remove_person_from_files,
             t_af_area::get_af_areas,
             t_cmds::get_person_thumbnail,
             // dedup

@@ -142,12 +142,26 @@ pub const AI_TOKENIZER: &str = "tokenizer.json";
 // models
 pub const DETECTION_MODEL: &str = "det_500m.onnx"; // RetinaFace
 pub const EMBEDDING_MODEL: &str = "w600k_mbf.onnx"; // MobileFaceNet
+/// Longest side of the decode used for face indexing (detection runs at 640; embeddings crop from this).
+pub const FACE_DECODE_SIZE: u32 = 1600;
 
 // Quality thresholds - Recommended Values
-pub const MIN_CONFIDENCE: f32 = 0.65; // 0.6-0.7 is standard. 0.65 balances precision/recall.
+// Kept faces between this and LOW_QUALITY_MIN_CONFIDENCE are flagged low quality, so they
+// can be named but never bridge clusters. 0.65 missed real tilted/occluded faces at 0.63.
+pub const MIN_CONFIDENCE: f32 = 0.5;
 // pub const MIN_FACE_RATIO: f32 = 0.0; // Disabled. Rely on absolute pixel size instead (better for high-res photos).
 // pub const MIN_FACE_SIZE: f32 = 90.0; // 80-112px is minimum for good recognition. 90.0 is a safe high-quality baseline.
-pub const MIN_BLUR_SCORE: f32 = 200.0; // Standard Laplacian variance threshold. Below 100 is usually blurry.
+// Low-quality faces are kept and shown, but don't help form clusters (they tend to
+// bridge different people); afterwards they join a person only on a clear match.
+pub const LOW_QUALITY_MIN_FACE_PX: f32 = 40.0; // shorter bbox side in decoded pixels
+pub const LOW_QUALITY_MAX_YAW: f32 = 0.45; // nose offset from eye midpoint / eye distance (~42 deg)
+pub const LOW_QUALITY_MIN_CONFIDENCE: f32 = 0.75;
+pub const LOW_QUALITY_MATCH_FACTOR: f32 = 0.85; // attach only within 85% of the cluster threshold
+pub const LOW_QUALITY_MATCH_MARGIN: f32 = 0.05; // and clearly closer than the next-best group
+pub const LOW_QUALITY_MIN_BLUR: f32 = 100.0; // softer than this (at <=112px) is flagged low quality
+// Faces below this are dropped. Was 200, which discarded clear but soft faces (old phone
+// photos scored ~125); only truly unusable smears are dropped now.
+pub const MIN_BLUR_SCORE: f32 = 25.0;
 
 // Clustering Constants
 pub const K_NEIGHBORS: usize = 80; // Prune edges to Top-K (K-NN)

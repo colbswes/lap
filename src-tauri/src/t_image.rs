@@ -636,6 +636,19 @@ pub fn generate_directory_thumbnails(
 }
 
 /// Get a thumbnail from an image file path
+/// Upright (orientation-corrected) JPEG of an image for face detection and face crops,
+/// decoded the same way as regular thumbnails. HEIC goes through libheif, which applies
+/// the file's rotation itself; the generic path would leave it sideways.
+pub(crate) fn decode_upright_for_faces(file_path: &str, max_side: u32) -> Option<Vec<u8>> {
+    let orientation = get_image_orientation(file_path);
+    let decoded = if is_heic_path(file_path) {
+        crate::t_heif::get_heif_thumbnail(file_path, orientation, max_side)
+    } else {
+        get_image_thumbnail_with_encoding(file_path, orientation, max_side, true)
+    };
+    decoded.ok().flatten()
+}
+
 pub fn get_image_thumbnail(
     file_path: &str,
     orientation: i32,

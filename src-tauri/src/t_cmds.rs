@@ -4944,6 +4944,7 @@ pub fn index_faces(
     status_state: State<t_face::FaceIndexingStatus>,
     progress_state: State<t_face::FaceIndexProgressState>,
     cluster_epsilon: Option<f32>,
+    rescan: Option<bool>,
 ) -> Result<(), String> {
     t_face::run_face_indexing(
         app_handle,
@@ -4952,6 +4953,7 @@ pub fn index_faces(
         (*status_state).clone(),
         (*progress_state).clone(),
         cluster_epsilon,
+        rescan.unwrap_or(false),
     )
 }
 
@@ -5056,6 +5058,66 @@ pub fn get_faces_for_file(file_id: i64) -> Result<Vec<t_sqlite::Face>, String> {
 pub fn get_person_thumbnail(person_id: i64) -> Result<Option<String>, String> {
     t_sqlite::Person::get_thumbnail(person_id)
         .map_err(|e| format!("Error while getting person thumbnail: {}", e))
+}
+
+/// Get a single face's crop (Base64 encoded).
+#[tauri::command]
+pub async fn get_face_thumbnail(face_id: i64) -> Result<Option<String>, String> {
+    t_sqlite::Person::get_face_thumbnail(face_id)
+        .map_err(|e| format!("Error while getting face thumbnail: {}", e))
+}
+
+/// Refresh stored thumbnails of persons whose faces changed (skips deleted persons).
+fn refresh_person_thumbnails(person_ids: &[Option<i64>]) {
+    for person_id in person_ids.iter().flatten() {
+        let _ = t_sqlite::Person::update_thumbnail(*person_id);
+    }
+}
+
+/// Confirm a face as a person: an existing `person_id`, or the person called `name`
+/// (created if missing). Returns the person id.
+#[tauri::command]
+pub async fn assign_face_to_person(
+    face_id: i64,
+    person_id: Option<i64>,
+    name: Option<String>,
+) -> Result<i64, String> {
+    let target_id = match (person_id, name.as_deref().map(str::trim).filter(|n| !n.is_empty())) {
+        (Some(id), _) => id,
+        (None, Some(name)) => match Person::find_by_name(name, None)? {
+            Some(person) => person.id,
+            None => Person::create(Some(name))?,
+        },
+        (None, None) => return Err("A person id or name is required".to_string()),
+    };
+    let mut conn = t_sqlite::open_conn()?;
+    let old_person = t_sqlite::Face::assign_confirmed_with_conn(&mut conn, face_id, target_id)
+        .map_err(|e| format!("Error while assigning face: {}", e))?;
+    refresh_person_thumbnails(&[Some(target_id), old_person]);
+    Ok(target_id)
+}
+
+/// Mark a face as not being its current person. Returns that person's id.
+#[tauri::command]
+pub async fn remove_face_from_person(face_id: i64) -> Result<Option<i64>, String> {
+    let mut conn = t_sqlite::open_conn()?;
+    let old_person = t_sqlite::Face::reject_from_person_with_conn(&mut conn, face_id)
+        .map_err(|e| format!("Error while removing face: {}", e))?;
+    refresh_person_thumbnails(&[old_person]);
+    Ok(old_person)
+}
+
+/// Mark `person_id` as not appearing in the given files. Returns the number of faces removed.
+#[tauri::command]
+pub async fn remove_person_from_files(person_id: i64, file_ids: Vec<i64>) -> Result<usize, String> {
+    let mut conn = t_sqlite::open_conn()?;
+    let face_ids = t_sqlite::Face::ids_for_person_in_files(&conn, person_id, &file_ids)?;
+    for &face_id in &face_ids {
+        t_sqlite::Face::reject_from_person_with_conn(&mut conn, face_id)
+            .map_err(|e| format!("Error while removing person from files: {}", e))?;
+    }
+    refresh_person_thumbnails(&[Some(person_id)]);
+    Ok(face_ids.len())
 }
 
 // ----------------------------------------------------------------------------
