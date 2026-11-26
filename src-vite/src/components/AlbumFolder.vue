@@ -66,7 +66,7 @@
         > 
         <template v-else>
           <div class="overflow-hidden whitespace-pre text-ellipsis">
-            {{ child.name }}
+            {{ child.path === rootPath && isApplePhotosPath(child.path) ? $t('apple_photos.all_photos') : child.name }}
           </div>
           <div class="ml-auto flex flex-row items-center text-base-content/30">
             <IconHeartFilled v-if="child.is_favorite" class="mr-1 w-4 h-4 shrink-0 text-primary/70" />
@@ -187,7 +187,7 @@ import { ref, nextTick, computed, inject, provide, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
-import { isMac, shortenFilename, isValidFileName, getFolderPath, getFullPath, normalizePathForCompare, isWithinRootPath } from '@/common/utils';
+import { isMac, shortenFilename, isValidFileName, getFolderPath, getFullPath, normalizePathForCompare, isWithinRootPath, isApplePhotosPath } from '@/common/utils';
 import {
   createFolder, renameFolder, fetchFolder, getAllAlbums, moveFolder, moveFolderOutsideLibrary,
   copyFolder, checkFileExists, revealPath, prepareFolderDelete, deleteFolder, deleteFolderPermanently, recountAlbum, selectFolder as selectFolderInDb,
@@ -410,8 +410,10 @@ async function startDeleteFolder(folder: Folder) {
 const getMenuItemsForFolder = async (folder: any) => {
   const isRoot = folder.path === props.rootPath;
   const canPaste = !props.unavailable && await hasImportableClipboard();
-  const unavailable = props.unavailable || !await isDirectoryAccessible(folder.path);
-  setFolderAccessibility(folder.path, !unavailable);
+  // Apple Photos folders are readable but never writable from Lap.
+  const readOnly = isApplePhotosPath(folder.path);
+  const unavailable = props.unavailable || readOnly || !await isDirectoryAccessible(folder.path);
+  setFolderAccessibility(folder.path, readOnly || !unavailable);
   return [
     {
       label: folder?.is_favorite ? localeMsg.value.menu.meta.unfavorite : localeMsg.value.menu.meta.favorite,

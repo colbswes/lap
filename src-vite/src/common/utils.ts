@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { useUIStore } from '@/stores/uiStore';
 import { config } from '@/common/config';
 import { appendRawDisplayParams, rawDisplayKey } from './rawDisplay';
+import { isApplePhotosPath } from './applePhotos';
+export { APPLE_PHOTOS_ROOT, isApplePhotosPath } from './applePhotos';
 
 /// get the current operating system (mac, win, linux, or '')
 export function getOS() {
@@ -657,6 +659,8 @@ export function isPreviewOnlyDocument(filePath = ''): boolean {
 
 export function shouldUseBackendPreview(filePath = '', fileType = 0): boolean {
   if (!filePath) return false;
+  // Apple Photos renders every image format (including edits) through PhotoKit.
+  if (isApplePhotosPath(filePath)) return Number(fileType) !== 2;
   if (Number(fileType) === 3) return true;
 
   const extension = getFileExtension(filePath).toLowerCase();

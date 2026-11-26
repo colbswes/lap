@@ -256,28 +256,6 @@ export async function setHiddenFilters(id, filters) {
   return null;
 }
 
-export async function checkApplePhotosExportReady() {
-  try {
-    return await invoke('check_apple_photos_export_ready');
-  } catch (error) {
-    console.error('Failed to check Apple Photos export availability:', error);
-  }
-  return null;
-}
-
-export async function runApplePhotosExport(request) {
-  return await invoke('run_apple_photos_export', { request });
-}
-
-export async function cancelApplePhotosExport() {
-  try {
-    return await invoke('cancel_apple_photos_export');
-  } catch (error) {
-    console.error('Failed to cancel Apple Photos export:', error);
-  }
-  return false;
-}
-
 export async function listAppleSharedAlbums(forceRefresh = false) {
   try {
     return await invoke('list_apple_shared_albums', { forceRefresh });
@@ -299,15 +277,6 @@ export async function openApplePhotosApp() {
     console.error('Failed to open Apple Photos:', error);
   }
   return false;
-}
-
-export async function setSyncDeleteToApplePhotos(enabled) {
-  try {
-    return await invoke('set_sync_delete_to_apple_photos', { enabled: Boolean(enabled) });
-  } catch (error) {
-    console.error('Failed to update Apple Photos delete sync setting:', error);
-  }
-  return null;
 }
 
 // get library state
@@ -2309,6 +2278,37 @@ export async function listenFaceIndexProgress(callback) {
 // listen face index finished
 export async function listenFaceIndexFinished(callback) {
   return await listen('face_index_finished', callback);
+}
+
+// "Scan videos": scene search, concert tagging and named-people matching for videos
+export async function indexVideos() {
+  return invoke('index_videos');
+}
+
+export async function cancelVideoScan() {
+  try {
+    await invoke('cancel_video_scan');
+  } catch (error) {
+    console.error('Failed to cancel video scan:', error);
+  }
+}
+
+// returns [isRunning, progress | null, { total, scanned, concerts }]
+export async function getVideoScanStatus() {
+  try {
+    return await invoke('get_video_scan_status');
+  } catch (error) {
+    console.error('Failed to get video scan status:', error);
+    return null;
+  }
+}
+
+export async function listenVideoScanProgress(callback) {
+  return await listen('video_scan_progress', callback);
+}
+
+export async function listenVideoScanFinished(callback) {
+  return await listen('video_scan_finished', callback);
 }
 
 // listen cluster progress (for clustering phase)

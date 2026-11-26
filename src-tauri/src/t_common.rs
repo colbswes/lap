@@ -151,6 +151,21 @@ pub const PET_LOW_QUALITY_MIN_CONFIDENCE: f32 = 0.5;
 /// Longest side of the decode used for face indexing (detection runs at 640; embeddings crop from this).
 pub const FACE_DECODE_SIZE: u32 = 1600;
 
+// Video scan ("Scan videos"): frames sampled across each standalone video.
+pub const VIDEO_SCAN_INTERVAL_SECS: u64 = 2; // one frame every 2s...
+pub const VIDEO_SCAN_MAX_FRAMES: u64 = 40; // ...spread evenly over longer clips
+pub const VIDEO_SCAN_FRAME_SIZE: u32 = 1280; // longest side of a sampled frame
+/// Mean concert probability across a video's frames at/above which it counts as live music.
+pub const VIDEO_CONCERT_THRESHOLD: f32 = 0.5;
+/// In concert clips, faces shorter than this fraction of the frame (performers, crowd)
+/// are ignored; close-ups of friends still count.
+pub const VIDEO_CONCERT_MIN_FACE_FRACTION: f32 = 0.15;
+/// Best video face for a named person at/above this mean top-3 similarity is assigned to
+/// them right away (checked by hand on a real library: matches from 0.40 to 0.80 were all
+/// correct); between this and the suggestion cutoff (0.35) it is only offered under
+/// Review suggestions.
+pub const VIDEO_FACE_ASSIGN_SIMILARITY: f32 = 0.40;
+
 // Quality thresholds - Recommended Values
 // Kept faces between this and LOW_QUALITY_MIN_CONFIDENCE are flagged low quality, so they
 // can be named but never bridge clusters. 0.65 missed real tilted/occluded faces at 0.63.

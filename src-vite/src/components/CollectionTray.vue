@@ -372,6 +372,8 @@ onBeforeUnmount(() => {
   unlistenLibrarySwitched = null;
 });
 
+watch(() => config.settings.showEvents, () => { void loadCollections(); });
+
 async function loadCollections(preferredId?: number) {
   const request = ++collectionListRequest;
   const libraryId = libConfig._libraryId;
@@ -385,9 +387,9 @@ async function loadCollections(preferredId?: number) {
     || libraryId !== libConfig._libraryId
   ) return;
   const countMap = libConfig.collection.counts || {};
-  // Concerts and festivals live in the Events sidebar, not the collection tray.
+  // Keep event collections in the tray when the Events sidebar is hidden.
   collections.value = Array.isArray(result)
-    ? result.filter((item: any) => !item.kind).map((item: any) => ({
+    ? result.filter((item: any) => !config.settings.showEvents || !item.kind).map((item: any) => ({
       id: Number(item.id),
       name: String(item.name || ''),
       sortOrder: Number(item.sortOrder || 0),
@@ -555,7 +557,7 @@ async function changeCollectionKind(collection: Collection, kind: CollectionKind
   if (await setCollectionKind(collection.id, kind) == null) return;
   collection.kind = kind;
   await tauriEmit('collections-changed', { selectedId: selectedId.value });
-  if (kind) {
+  if (kind && config.settings.showEvents) {
     // It is an event now: show it in the Events sidebar.
     Object.assign(libConfig.event, { selectedId: collection.id, artistId: 0, artistName: '' });
     libConfig.activePane = 'main';

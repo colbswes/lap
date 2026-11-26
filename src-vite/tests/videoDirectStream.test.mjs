@@ -34,12 +34,12 @@ function setup(filePath) {
     videoWidth: () => 1920,
     videoHeight: () => 1080,
   };
-  const create = new Function('filePath', 'props', 'getAssetSrc', 'loadPlayer', 'resetCompatibilityProcessing', 'loadPrepared', 'handleSuccessfulLoad', 'loadAttemptCleanups', 'setTimeout', 'clearTimeout', 'DIRECT_PLAYBACK_TIMEOUT_MS', `
+  const create = new Function('filePath', 'props', 'getAssetSrc', 'loadPlayer', 'resetCompatibilityProcessing', 'loadPrepared', 'handleSuccessfulLoad', 'loadAttemptCleanups', 'setTimeout', 'clearTimeout', 'DIRECT_PLAYBACK_TIMEOUT_MS', 'isApplePhotosPath', 'APPLE_PHOTOS_PLAYBACK_TIMEOUT_MS', `
     let currentLoadId = 1, currentLoadingId = 1, nextUpIndex = 0;
     ${code}
     return { load: loadDirect };
   `);
-  const controls = create(filePath, { fileVersion: 3 }, media.getAssetSrc, player, () => {}, mode => calls.push(['prepare', mode]), () => calls.push('success'), [], fn => { timers.push(fn); return timers.length; }, () => {}, 8000);
+  const controls = create(filePath, { fileVersion: 3 }, media.getAssetSrc, player, () => {}, mode => calls.push(['prepare', mode]), () => calls.push('success'), [], fn => { timers.push(fn); return timers.length; }, () => {}, 8000, () => false, 300000);
   return { ...controls, calls, listeners, timers };
 }
 
@@ -115,6 +115,7 @@ function videoLoadFixture(cloudOnly = false) {
     prepareVideo: async path => { calls.push(['prepare', path]); return { url: media.getAssetSrc(path) }; },
     cancelVideoPrepare: async (...args) => calls.push(['cancel', ...args]),
     PLAYBACK_DEADLINE_MS: 10000, LOADING_OVERLAY_DELAY_MS: 500, DIRECT_PLAYBACK_TIMEOUT_MS: 5000,
+    isApplePhotosPath: () => false, APPLE_PHOTOS_PLAYBACK_TIMEOUT_MS: 300000,
     setTimeout: (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; },
     clearTimeout: id => timers.delete(id),
   };

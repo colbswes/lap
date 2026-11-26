@@ -87,6 +87,12 @@
             <div class="flex items-center gap-2 text-base-content/30">
               <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.general.section_interface') }}</span>
             </div>
+            <label class="flex items-center justify-between gap-4 p-1 rounded-box hover:bg-base-100/10 transition-colors duration-200 cursor-pointer">
+              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.general.show_events') }}</div>
+              </div>
+              <input type="checkbox" class="toggle toggle-primary toggle-sm shrink-0" v-model="config.settings.showEvents" />
+            </label>
             <div class="flex items-center justify-between p-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
                 <div>{{ $t('settings.general.show_tool_tip') }}</div>
@@ -450,6 +456,39 @@
               </select>
             </div>
           </div>
+
+          <!-- video scan (separate from the photo scan) -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.video_scan.title') }}</span>
+            </div>
+            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.video_scan.scan') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.video_scan.hint') }}</div>
+                <div v-if="videoScanStats" class="text-xs text-base-content/50">
+                  {{ $t('settings.video_scan.status', videoScanStats) }}
+                </div>
+              </div>
+              <button
+                class="btn btn-sm min-w-20 shrink-0"
+                :class="videoScanRunning ? 'btn-ghost' : 'btn-primary'"
+                @click="toggleVideoScan"
+              >
+                {{ videoScanRunning ? $t('settings.video_scan.stop') : $t('settings.video_scan.start') }}
+              </button>
+            </div>
+            <div v-if="videoScanRunning" class="px-1 pt-1 space-y-1">
+              <div class="text-xs text-base-content/30">
+                {{ $t('settings.video_scan.progress', { current: videoScanProgress.current, total: videoScanProgress.total }) }}
+              </div>
+              <progress
+                class="progress progress-primary h-1.5 w-full"
+                :value="videoScanProgress.current"
+                :max="Math.max(1, videoScanProgress.total)"
+              ></progress>
+            </div>
+          </div>
         </div>
 
         <!-- Advanced Tab -->
@@ -465,18 +504,6 @@
                 <option value="trash">{{ $t('msgbox.move_to_trash.title') }}</option>
                 <option value="permanent">{{ $t('msgbox.permanent_delete.title') }}</option>
               </select>
-            </label>
-            <label v-if="isMac" class="flex items-start justify-between gap-4 px-1 pt-1 rounded-box hover:bg-base-100/10 transition-colors duration-200 cursor-pointer">
-              <span class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
-                <span>{{ $t('apple_photos.sync_delete_label') }}</span>
-                <span class="text-xs text-base-content/30">{{ $t('apple_photos.sync_delete_hint') }}</span>
-              </span>
-              <input
-                v-model="syncDeleteToApplePhotos"
-                type="checkbox"
-                class="toggle toggle-primary toggle-sm shrink-0 mt-0.5"
-                @change="handleSyncDeleteToApplePhotosChange"
-              />
             </label>
           </section>
 
@@ -817,7 +844,6 @@ import { normalizeThumbnailSize } from '@/common/thumbnailProfiles';
 import { THUMBNAIL_BADGE, MAP_MARKER_SIZES, SETTINGS_TAB, SETTINGS_BASE_WIDTH, SETTINGS_BASE_HEIGHT } from '@/common/constants';
 import {
   getAppConfig,
-  setSyncDeleteToApplePhotos,
   cleanUnusedThumbnailCache,
   getThumbnailCacheLocation,
   getThumbnailCacheMigrationCount,
@@ -833,6 +859,11 @@ import {
   downloadMultilingualImageSearchModel,
   cancelMultilingualImageSearchModelDownload,
   listenImageSearchModelDownloadProgress,
+  indexVideos,
+  cancelVideoScan,
+  getVideoScanStatus,
+  listenVideoScanProgress,
+  listenVideoScanFinished,
 } from '@/common/api';
 import { formatFileSize, isLinux, isMac, SCALE_VALUES } from '@/common/utils';
 import { useAppearance } from '@/composables/useAppearance';
@@ -875,14 +906,6 @@ let unlistenCloseRequested: (() => void) | null = null;
 
 const cleanupKey = 'settings.advanced.thumbnail_cache.cleanup';
 const cleanupLibraryCount = ref(0);
-const syncDeleteToApplePhotos = ref(true);
-
-async function handleSyncDeleteToApplePhotosChange() {
-  const saved = await setSyncDeleteToApplePhotos(syncDeleteToApplePhotos.value);
-  if (typeof saved === 'boolean') {
-    syncDeleteToApplePhotos.value = saved;
-  }
-}
 const cleanupOpen = ref(false);
 const cleanupRunning = ref(false);
 const cleanupTotal = ref(0);
@@ -973,6 +996,35 @@ const isMultilingualModelAvailable = ref(false);
 const tiandituTokenInput = ref(String(config.settings.tiandituToken || ''));
 const tiandituTokenStatus = ref<'idle' | 'saved' | 'empty'>('idle');
 let unlistenImageSearchModelDownloadProgress: (() => void) | null = null;
+
+// "Scan videos": runs in the backend, so progress keeps going if this window closes.
+const videoScanRunning = ref(false);
+const videoScanProgress = ref({ current: 0, total: 0 });
+const videoScanStats = ref<{ total: number; scanned: number; concerts: number } | null>(null);
+let unlistenVideoScan: Array<() => void> = [];
+
+async function refreshVideoScanStatus() {
+  const status = await getVideoScanStatus() as any;
+  if (!status) return;
+  const [running, progress, stats] = status;
+  videoScanRunning.value = Boolean(running);
+  if (progress) videoScanProgress.value = { current: progress.current, total: progress.total };
+  videoScanStats.value = stats;
+}
+
+async function toggleVideoScan() {
+  if (videoScanRunning.value) {
+    await cancelVideoScan();
+    return;
+  }
+  try {
+    videoScanProgress.value = { current: 0, total: 0 };
+    await indexVideos();
+    videoScanRunning.value = true;
+  } catch (error) {
+    toast.error(String(error));
+  }
+}
 
 const onRestoreDone = () => {
   showRestoreDialog.value = false;
@@ -1597,6 +1649,23 @@ onMounted(async () => {
     multilingualModelTotalBytes.value = Math.max(0, Number(event?.payload?.totalBytes ?? 0));
   });
   await syncImageSearchModelStatus();
+  unlistenVideoScan = [
+    await listenVideoScanProgress((event: any) => {
+      videoScanRunning.value = true;
+      videoScanProgress.value = { current: event.payload.current, total: event.payload.total };
+    }),
+    await listenVideoScanFinished(async (event: any) => {
+      videoScanRunning.value = false;
+      const payload = event.payload || {};
+      if (payload.error) {
+        toast.error(String(payload.error));
+      } else if (!payload.cancelled) {
+        toast.success(t('settings.video_scan.finished', { faces: payload.faces_matched ?? 0, concerts: payload.concerts ?? 0 }));
+      }
+      await refreshVideoScanStatus();
+    }),
+  ];
+  await refreshVideoScanStatus();
   applyWindowScale(Number(config.settings.scale || 1));
   dbStorageDir.value = (await getDbStorageDir()) || '';
   hasCustomDbStorage.value = await isUsingCustomDbStorage();
@@ -1612,9 +1681,6 @@ onMounted(async () => {
   
   const initialAppConfig = await getAppConfig();
   cleanupLibraryCount.value = initialAppConfig?.libraries?.length ?? 0;
-  if (typeof initialAppConfig?.sync_delete_to_apple_photos === 'boolean') {
-    syncDeleteToApplePhotos.value = initialAppConfig.sync_delete_to_apple_photos;
-  }
 
   // Show window after mount
   await appWindow.show();
@@ -1634,6 +1700,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  unlistenVideoScan.forEach((unlisten) => unlisten());
+  unlistenVideoScan = [];
   if (unlistenCloseRequested) {
     unlistenCloseRequested();
     unlistenCloseRequested = null;
@@ -1677,6 +1745,9 @@ watch(() => config.settings.fileDeleteBehavior, (behavior) => {
 });
 watch(() => config.settings.showToolTip, (newValue) => {
   emit('settings-showToolTip-changed', newValue);
+});
+watch(() => config.settings.showEvents, (enabled) => {
+  void emit('settings-showEvents-changed', enabled);
 });
 watch(() => config.settings.showStatusBar, (newValue) => {
   emit('settings-showStatusBar-changed', newValue);

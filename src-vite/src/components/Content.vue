@@ -854,7 +854,7 @@ import { isWin, isMac, isLinux, separator,
          getCachedThumbnailDataUrl,
          clearCachedThumbnailDataUrl,
          extractFileName, getFolderPath, getFolderName, getSelectOptions,
-         getCountryName, getMediaItemSize, shortenFilename, getSlideShowInterval, getFullPath, normalizePathForCompare, isWithinRootPath, shouldUseBackendPreview, isPreviewOnlyDocument } from '@/common/utils';
+         getCountryName, getMediaItemSize, shortenFilename, getSlideShowInterval, getFullPath, normalizePathForCompare, isWithinRootPath, shouldUseBackendPreview, isPreviewOnlyDocument, isApplePhotosPath } from '@/common/utils';
 
 import DropDownSelect from '@/components/DropDownSelect.vue';
 import ProgressBar from '@/components/ProgressBar.vue';
@@ -8932,7 +8932,7 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
             // folder is selected, show files in the folder
             const folderPath = libConfig.album.folderPath || "";
             const folderId = Number(libConfig.album.folderId || 0);
-            const folderAccessible = album.is_accessible !== false && !!folderPath && await isDirectoryAccessible(folderPath);
+            const folderAccessible = album.is_accessible !== false && !!folderPath && (isApplePhotosPath(folderPath) || await isDirectoryAccessible(folderPath));
             if (requestId !== currentContentRequestId) return;
             setFolderAccessibility(folderPath, folderAccessible);
             if (!folderAccessible) {

@@ -225,6 +225,7 @@ export const useConfigStore = defineStore('configStore', {
         clusterThresholdIndex: 2, // Default: Medium (0.65, see faceClusterThresholds)
       },
       importXmpSidecars: true,
+      showEvents: false,
     },
   }),
 
@@ -473,6 +474,10 @@ export const useConfigStore = defineStore('configStore', {
             settings.fileDeleteBehavior = settings.deletePermanently === true ? 'permanent' : 'trash';
           }
           delete settings.deletePermanently;
+          // Preserve an Events view that was open before the visibility setting existed.
+          if (typeof settings.showEvents !== 'boolean') {
+            settings.showEvents = state.main?.sidebarIndex === SIDEBAR.EVENT;
+          }
         }
         // Group-by 4 (rating) and 10 (culling) were removed; fall back to no grouping.
         if (state?.search && [4, 10].includes(Number(state.search.groupBy))) {

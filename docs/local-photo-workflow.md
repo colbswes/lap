@@ -1,6 +1,6 @@
-# Local Photo Workflow (Album Visibility & Apple Photos Import)
+# Local Photo Workflow (Album Visibility & Apple Photos)
 
-This fork adds two features to Lap: hiding sidebar items so you can keep some photos out of everyday browsing while keeping everything in one catalog, and importing from Apple Photos on macOS.
+This fork adds two features to Lap: hiding sidebar items so you can keep some photos out of everyday browsing while keeping everything in one catalog, and reading your Apple Photos library on macOS.
 
 ## 1. Hide / Show Folders, Collections, Smart Collections, and Tags
 
@@ -9,53 +9,22 @@ This fork adds two features to Lap: hiding sidebar items so you can keep some ph
 - Hidden items are excluded from Library counts, Smart collections, Search, Calendar, Tags, People, Locations, Cameras, Collections, and Map — and persist per library across restarts.
 - You can also switch between **Tags**, **Collections**, and **Smart collections** from their menus (**Create smart collection**, **Save as collection**, **Add tag to photos…**, **Duplicate**).
 
-## 2. Guided & CLI Apple Photos Import
+## 2. Apple Photos (macOS)
 
-### In-app on macOS
+Choose **Connect Apple Photos** from the Library menu, the Folders `...` menu, or the Welcome screen. After macOS grants Photos access, Lap adds an **Apple Photos** folder that reads the System Photo Library through PhotoKit. Nothing is copied: thumbnails go into Lap's thumbnail cache, and full-size photos and videos load from Photos, which downloads iCloud originals on demand. Live Photo motion clips are the only cached media (up to 512 MB). PhotoKit only exposes the System Photo Library, so a Lap library connects to one Photos library at most.
 
-Open **Import from Apple Photos…** from the Welcome screen, the Library dropdown menu (top-left), or the Folders panel `...` menu:
+Lap picks up photos added, edited or deleted in Photos within about 15 seconds while it is open, and catches up when it starts. Faces, tags, collections, events, search and the rest of Lap's analysis work on these items like any other.
 
-- Choose a destination folder (defaults to `~/Pictures/Apple Photos Export`).
-- Choose edited photo handling (`Edited if available, else original` by default, `Both`, or `Originals only`), Live Photo preservation, optional iCloud `--download-missing`, and optional sample filters (`Limit`, `From date`, `Album`, or custom `.photoslibrary`).
-- Supports **Dry run** previews, live progress streaming, cancellation, a completion report, and automatic adding + scanning in Lap.
-- **Exclude iCloud Shared Albums** is enabled by default so personal library exports stay clean; your Apple Shared Albums still appear in the collapsible **Apple Shared Albums** section at the bottom of the Folders sidebar, where clicking any shared album lets you browse its cached Apple Photos previews (0 extra disk space), open Apple Photos, or import just that album on demand.
-- **Automatic Apple Photos deletion (macOS)**: enabled by default (**Settings → Advanced → Also delete exported photos from Apple Photos**). When you delete a photo in Lap that originated from an Apple Photos export folder (`.apple-photos-export.db`), Lap automatically looks up its Apple Photos UUID and moves it to Apple Photos' **Recently Deleted** album via PhotoKit (macOS asks to confirm). Deleting photos from other folders never touches Apple Photos.
+- **Favorites and locations** set in Lap are written to Photos, and changes made in Photos flow back on the next sync.
+- **Edits** from Lap's image editor are saved as a Photos edit, which you can revert in Photos. Saving a copy adds a new item to Photos.
+- **Copy to the Apple Photos folder** adds a local photo or video (with its Live Photo motion, if paired) to Photos.
+- **Delete** in Lap moves items to Photos' Recently Deleted after macOS asks you to confirm.
+- **Rename, move and XMP fields** (title, caption, keywords) don't apply: Photos has no file names or folders, and PhotoKit offers no API for those fields.
+- **Disconnect Apple Photos** (same menus, or the folder's `...` menu) removes the folder and Lap's catalog data for those items. Your photos stay in Apple Photos.
 
-### From the terminal
+### Shared Albums
 
-Use `scripts/apple_photos_export.py` directly if you want to script or run the same incremental export from the command line.
-
-It automatically uses `osxphotos` if installed, or falls back to `uvx osxphotos`.
-
-### Test with a small sample first (recommended)
-
-```bash
-python3 scripts/apple_photos_export.py \
-  --dest ~/Pictures/Apple Photos Export \
-  --limit 50 \
-  --dry-run
-```
-
-Remove `--dry-run` to export the sample:
-
-```bash
-python3 scripts/apple_photos_export.py \
-  --dest ~/Pictures/Apple Photos Export \
-  --limit 50
-```
-
-### Run full or incremental exports
-
-```bash
-python3 scripts/apple_photos_export.py \
-  --dest ~/Pictures/Apple Photos Export
-```
-
-- **Edited vs. originals**: defaults to `--versions edited-prefer` (exports the edited version if edited, otherwise the original). Pass `--versions both` to keep both (`_edited` suffix), or `--versions originals` for originals only.
-- **Live Photos**: image + `.mov` companions are exported into the same `YYYY/YYYY-MM` folder with matching stems so Lap pairs them automatically.
-- **No duplicates, no clobbering Lap**: `--update` and `<dest>/.apple-photos-export.db` export only new or updated items on repeat runs. `--cleanup` is never used, and `.xmp` sidecars are disabled by default so tags, ratings, and edits made in Lap are never overwritten.
-- **iCloud-optimized libraries**: pass `--download-missing` if originals are stored in iCloud.
-- **Optional first-run metadata**: pass `--xmp-sidecar --album-keyword` on an initial export if you want Apple Photos keywords/album names exported to `.xmp` sidecars (omit on subsequent runs after editing metadata in Lap).
+iCloud Shared Albums appear in the collapsible **Apple Shared Albums** section at the bottom of the Folders sidebar. Lap reads them through PhotoKit, shows previews, and loads a larger preview (from iCloud if needed) when you open an item.
 
 ## 3. Running This Fork Locally
 

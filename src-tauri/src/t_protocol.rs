@@ -241,6 +241,25 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
                         return;
                     }
                 };
+                if crate::t_photos_source::is_photos_path(&file_path) {
+                    // Apple Photos renders the current version upright; downloads from iCloud when needed.
+                    let response = if cached_only {
+                        text_response(http::StatusCode::NOT_FOUND, "preview not cached")
+                    } else {
+                        // The editor needs the same full-resolution pixels edit_image applies changes to.
+                        let size = if full_size || for_editing { 16384 } else { 3072 };
+                        let rendered = tauri::async_runtime::spawn_blocking(move || {
+                            let source = crate::t_photos_source::lookup(&file_path).ok_or("Item not found in Apple Photos")?;
+                            crate::t_photos_source::preview_bytes(&source, size)
+                        }).await;
+                        match rendered {
+                            Ok(Ok(Some(data))) => image_response(data),
+                            _ => text_response(http::StatusCode::NOT_FOUND, "Apple Photos preview unavailable"),
+                        }
+                    };
+                    responder.respond(response);
+                    return;
+                }
                 if cached_only {
                     let paired_cache = options.prefer_pair.then(|| companion.as_ref()
                         .and_then(|file| file.file_path.as_deref())

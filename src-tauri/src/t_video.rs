@@ -610,6 +610,40 @@ pub async fn get_video_thumbnail(
     }
 }
 
+/// One JPEG frame `secs` seconds into a local video, scaled to fit `size`.
+pub async fn get_video_frame_at(file_path: &str, secs: u64, size: u32) -> Result<Option<Vec<u8>>, String> {
+    crate::t_utils::require_local_content(std::path::Path::new(file_path))
+        .map_err(|error| error.to_string())?;
+    let threads = thumbnail_ffmpeg_threads().to_string();
+    let filter = format!("scale=w={size}:h={size}:force_original_aspect_ratio=decrease");
+    let strategy = if secs == 0 { ThumbnailStrategy::FirstFrame } else { ThumbnailStrategy::FastSeek(secs) };
+    match run_thumbnail_command(file_path, &threads, &filter, "0:v:0", strategy, 20).await {
+        Ok(Some(frame)) => Ok(Some(frame)),
+        // Seeking past the last keyframe of some files yields nothing; fall back to decoding.
+        _ if secs > 0 => run_thumbnail_command(file_path, &threads, &filter, "0:v:0", ThumbnailStrategy::SlowSeek(secs), 30).await,
+        other => other,
+    }
+}
+
+pub fn get_video_frame_at_sync(file_path: &str, secs: u64, size: u32) -> Result<Option<Vec<u8>>, String> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| "No runtime handle")?;
+    tokio::task::block_in_place(|| handle.block_on(get_video_frame_at(file_path, secs, size)))
+}
+
+/// Seconds to sample from a video of `duration` seconds: every `interval` seconds, or
+/// `max_frames` spread evenly when that would be more.
+pub fn sample_timestamps(duration: u64, interval: u64, max_frames: u64) -> Vec<u64> {
+    let interval = interval.max(1);
+    if duration <= interval {
+        return vec![0];
+    }
+    let count = (duration / interval).clamp(1, max_frames.max(1));
+    let step = duration as f64 / count as f64;
+    let mut out: Vec<u64> = (0..count).map(|i| (step * (i as f64 + 0.5)) as u64).collect();
+    out.dedup();
+    out
+}
+
 pub fn get_video_thumbnail_sync(
     file_path: &str,
     sz: u32,
@@ -1425,6 +1459,15 @@ fn hash_id(value: &str) -> u64 {
 
 #[cfg(test)]
 mod capture_date_tests {
+    #[test]
+    fn sample_timestamps_spread_across_the_clip() {
+        assert_eq!(sample_timestamps(1, 2, 40), vec![0]);
+        assert_eq!(sample_timestamps(10, 2, 40), vec![1, 3, 5, 7, 9]);
+        let long = sample_timestamps(600, 2, 40);
+        assert_eq!(long.len(), 40);
+        assert!(long[0] < 15 && *long.last().unwrap() > 585);
+    }
+
     use super::*;
 
     #[test]

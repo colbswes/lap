@@ -384,11 +384,17 @@ fn build_libraw() {
         println!("cargo:rustc-link-lib=framework=AppKit");
 
         println!("cargo:rerun-if-changed=src/photos_kit.mm");
+        println!("cargo:rerun-if-changed=src/photos_library.mm");
         cc::Build::new()
             .file("src/photos_kit.mm")
+            .file("src/photos_library.mm")
             .flag("-fobjc-arc")
             .compile("lap_photos_kit");
         println!("cargo:rustc-link-lib=framework=Photos");
+        println!("cargo:rustc-link-lib=framework=CoreLocation");
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=ImageIO");
+        println!("cargo:rustc-link-lib=framework=UniformTypeIdentifiers");
         println!("cargo:rustc-link-lib=framework=Foundation");
 
         println!("cargo:rerun-if-changed=src/vision_animals.mm");

@@ -6,6 +6,7 @@
  */
 use crate::t_config::{self, AppConfig, Library, LibraryInfo, LibraryState};
 use crate::t_face;
+use crate::t_video_scan;
 use crate::t_image;
 use crate::t_montage;
 use crate::metadata::apple_sidecar::{
@@ -500,32 +501,6 @@ pub fn set_hidden_filters(
 }
 
 #[tauri::command]
-pub fn check_apple_photos_export_ready() -> crate::t_apple_photos::ApplePhotosToolStatus {
-    crate::t_apple_photos::check_tool_status()
-}
-
-#[tauri::command]
-pub async fn run_apple_photos_export(
-    app_handle: tauri::AppHandle,
-    state: State<'_, std::sync::Arc<crate::t_apple_photos::ApplePhotosExportState>>,
-    request: crate::t_apple_photos::ApplePhotosExportRequest,
-) -> Result<crate::t_apple_photos::ApplePhotosExportResult, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::t_apple_photos::run_export_blocking(&app_handle, &state, request)
-    })
-    .await
-    .map_err(|e| format!("Apple Photos export task failed: {e}"))?
-}
-
-#[tauri::command]
-pub fn cancel_apple_photos_export(
-    state: State<'_, std::sync::Arc<crate::t_apple_photos::ApplePhotosExportState>>,
-) -> Result<bool, String> {
-    state.cancel()
-}
-
-#[tauri::command]
 pub async fn list_apple_shared_albums(
     state: State<'_, std::sync::Arc<crate::t_apple_photos::ApplePhotosExportState>>,
     force_refresh: Option<bool>,
@@ -533,7 +508,7 @@ pub async fn list_apple_shared_albums(
     let state = state.inner().clone();
     let force = force_refresh.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
-        crate::t_apple_photos::list_shared_albums(&state, force)
+        crate::t_photos_source::shared_albums(&state, force)
     })
     .await
     .map_err(|e| format!("Shared albums task failed: {e}"))?
@@ -544,20 +519,22 @@ pub async fn get_apple_shared_album_photos(
     album_uuid: String,
 ) -> Result<Vec<crate::t_apple_photos::AppleSharedPhoto>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::t_apple_photos::get_shared_album_photos(&album_uuid)
+        crate::t_photos_source::shared_album_photos(&album_uuid)
     })
     .await
     .map_err(|e| format!("Shared album photos task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn open_apple_photos_app() -> Result<(), String> {
-    crate::t_apple_photos::open_apple_photos_app()
+pub async fn get_apple_shared_photo_preview(id: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::t_photos_source::shared_photo_preview(&id))
+        .await
+        .map_err(|e| format!("Shared album preview task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn set_sync_delete_to_apple_photos(enabled: bool) -> Result<bool, String> {
-    t_config::set_sync_delete_to_apple_photos(enabled)
+pub fn open_apple_photos_app() -> Result<(), String> {
+    crate::t_apple_photos::open_apple_photos_app()
 }
 
 /// get library state
@@ -939,6 +916,8 @@ pub fn move_folder(
     new_folder_path: &str,
     conflict_policy: &str,
 ) -> Result<String, String> {
+    crate::t_photos_source::deny_write(folder_path)?;
+    crate::t_photos_source::deny_write(new_folder_path)?;
     let old_album_id = AFolder::fetch(folder_path)?.map(|folder| folder.album_id);
     let moved_thumb_keys = if old_album_id.is_some_and(|album_id| album_id != new_album_id) {
         AThumb::get_thumb_keys_in_subtree(folder_path)?
@@ -1997,6 +1976,7 @@ pub async fn batch_rename_files(
 /// rename a file
 #[tauri::command]
 pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Result<Option<String>, String> {
+    crate::t_photos_source::deny_write(file_path)?;
     let sidecar_rename_plan = build_apple_sidecar_rename_plan(file_id, file_path, new_name)?;
     if !preflight_rename_plan(file_path, new_name, &sidecar_rename_plan) {
         return Ok(None);
@@ -2071,6 +2051,8 @@ pub fn move_file(
     batch_id: Option<u64>,
     group_raw_pairs: bool,
 ) -> Result<String, String> {
+    crate::t_photos_source::deny_write(file_path)?;
+    crate::t_photos_source::deny_write(new_folder_path)?;
     crate::metadata::files::with_transfer_cache(batch_id, |xmp_cache| {
         move_file_with_cache(file_id, file_path, new_folder_id, new_folder_path, conflict_policy, group_raw_pairs, xmp_cache)
     })
@@ -2276,9 +2258,29 @@ pub fn copy_file(
     batch_id: Option<u64>,
     group_raw_pairs: bool,
 ) -> Result<String, String> {
+    if crate::t_photos_source::is_photos_path(new_folder_path) {
+        // Copying into the Apple Photos folder adds the item to Apple Photos.
+        let companion = live_photo_companion_path(file_path);
+        return crate::t_photos_source::add_to_photos(file_path, companion.as_deref());
+    }
     crate::metadata::files::with_transfer_cache(batch_id, |xmp_cache| {
         copy_file_with_cache(file_path, new_folder_path, conflict_policy, group_raw_pairs, xmp_cache)
     })
+}
+
+/// The motion file paired with a Live Photo still, if Lap has one cataloged.
+fn live_photo_companion_path(file_path: &str) -> Option<String> {
+    let path = Path::new(file_path);
+    let conn = crate::t_sqlite::open_conn().ok()?;
+    let companion: i64 = conn
+        .query_row(
+            "SELECT a.live_photo_video_id FROM afiles a JOIN afolders f ON f.id = a.folder_id
+             WHERE f.path = ?1 AND a.name = ?2 AND a.live_photo_video_id IS NOT NULL",
+            rusqlite::params![path.parent()?.to_string_lossy(), path.file_name()?.to_string_lossy()],
+            |row| row.get(0),
+        )
+        .ok()?;
+    AFile::get_file_info(companion).ok().flatten()?.file_path
 }
 
 fn copy_file_with_cache(
@@ -3389,12 +3391,23 @@ fn delete_file_group(
     permanently: bool,
     group_raw_pairs: bool,
 ) -> Result<BatchDeleteResult, String> {
+    if crate::t_photos_source::is_photos_path(file_path) {
+        return delete_photos_items(&[(file_id, file_path.to_string())]);
+    }
     let delete = if permanently { t_utils::delete_file_permanently } else { t_utils::trash_path };
     let result = delete_file_group_with(file_id, file_path, permanently, group_raw_pairs, delete)?;
-    if !result.deleted_file_ids.is_empty() {
-        crate::t_apple_photos::sync_deleted_paths_to_apple_photos(vec![file_path.to_string()]);
-    }
     Ok(result)
+}
+
+/// Deletes Apple Photos items in Photos itself (to Recently Deleted, after the
+/// system confirmation), then drops the catalog rows of assets that are gone.
+fn delete_photos_items(files: &[(i64, String)]) -> Result<BatchDeleteResult, String> {
+    let paths: Vec<String> = files.iter().map(|(_, path)| path.clone()).collect();
+    let deleted_file_ids = crate::t_photos_source::delete_from_photos(&paths)?;
+    AFile::batch_delete(&deleted_file_ids)
+        .map_err(|e| format!("Error while deleting removed files from DB: {}", e))?;
+    let kept: Vec<i64> = files.iter().map(|(id, _)| *id).filter(|id| !deleted_file_ids.contains(id)).collect();
+    Ok(BatchDeleteResult { failed_count: kept.len(), deleted_file_ids, trash_failed_file_ids: kept })
 }
 
 pub(crate) fn delete_file_group_with(
@@ -3404,6 +3417,7 @@ pub(crate) fn delete_file_group_with(
     group_raw_pairs: bool,
     delete: impl Fn(&str) -> Result<(), String>,
 ) -> Result<BatchDeleteResult, String> {
+    crate::t_photos_source::deny_write(file_path)?;
     let component_files = AFile::grouped_component_files(file_id, group_raw_pairs)?;
     for component in &component_files {
         if let Some(path) = component.file_path.as_deref()
@@ -3857,6 +3871,35 @@ fn delete_resolved_files(
     files: Vec<BatchDeleteFile>,
     permanently: bool,
     group_raw_pairs: bool,
+    resolved_components: Option<HashMap<i64, Vec<(i64, String)>>>,
+    cleanup_sidecars: bool,
+) -> Result<BatchDeleteResult, String> {
+    // Apple Photos items are deleted through Photos with one confirmation for the batch.
+    let (photos, files): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|file| crate::t_photos_source::is_photos_path(&file.file_path));
+    let photos_result = if photos.is_empty() {
+        None
+    } else {
+        Some(delete_photos_items(&photos.iter().map(|f| (f.file_id, f.file_path.clone())).collect::<Vec<_>>())?)
+    };
+    let mut result = if files.is_empty() {
+        BatchDeleteResult { deleted_file_ids: Vec::new(), failed_count: 0, trash_failed_file_ids: Vec::new() }
+    } else {
+        delete_local_files(files, permanently, group_raw_pairs, resolved_components, cleanup_sidecars)?
+    };
+    if let Some(photos) = photos_result {
+        result.deleted_file_ids.extend(photos.deleted_file_ids);
+        result.failed_count += photos.failed_count;
+        result.trash_failed_file_ids.extend(photos.trash_failed_file_ids);
+    }
+    Ok(result)
+}
+
+fn delete_local_files(
+    files: Vec<BatchDeleteFile>,
+    permanently: bool,
+    group_raw_pairs: bool,
     mut resolved_components: Option<HashMap<i64, Vec<(i64, String)>>>,
     cleanup_sidecars: bool,
 ) -> Result<BatchDeleteResult, String> {
@@ -3964,9 +4007,6 @@ fn delete_resolved_files(
             permanently,
         );
     }
-    if !deleted_paths.is_empty() {
-        crate::t_apple_photos::sync_deleted_paths_to_apple_photos(deleted_paths);
-    }
     Ok(BatchDeleteResult {
         failed_count,
         deleted_file_ids,
@@ -4020,10 +4060,15 @@ pub fn set_file_location(
     latitude: Option<f64>,
     longitude: Option<f64>,
 ) -> Result<crate::t_sqlite::FileLocation, String> {
-    with_current_library(&library_id, || {
+    let location = with_current_library(&library_id, || {
         let mut conn = crate::t_sqlite::open_conn()?;
         AFile::set_location(&mut conn, &file_ids, latitude, longitude)
-    })
+    })?;
+    crate::t_photos_source::push_change(file_ids, crate::t_photos_source::AssetChange {
+        location: Some(latitude.zip(longitude)),
+        ..Default::default()
+    });
+    Ok(location)
 }
 
 /// Search the bundled place list by name for the location editor.
@@ -4197,7 +4242,8 @@ pub async fn get_file_thumbs(
                         continue;
                     }
                 }
-                if t_utils::content_readable(path) {
+                // Apple Photos items have no file on disk; PhotoKit renders their thumbnails.
+                if t_utils::content_readable(path) || crate::t_photos_source::is_photos_path(path) {
                     AThumb::schedule_background_generation_for_library(
                         app_handle.clone(),
                         request.file_id,
@@ -4497,6 +4543,11 @@ pub async fn refresh_selected_file_info(
 /// add or refresh a file in db and return the indexed file info
 #[tauri::command]
 pub fn add_file_to_db(folder_id: i64, file_path: &str) -> Result<Option<AFile>, String> {
+    // Apple Photos items are cataloged by the sync that created them.
+    if crate::t_photos_source::is_photos_path(file_path) {
+        let source = crate::t_photos_source::lookup(file_path).ok_or("Item not found in Apple Photos")?;
+        return AFile::get_file_info(source.file_id);
+    }
     let file_type = t_utils::get_file_type(file_path)
         .ok_or_else(|| format!("Unsupported file type: {}", file_path))?;
     let now = chrono::Utc::now().timestamp_millis();
@@ -4611,8 +4662,13 @@ fn update_file_metadata_column(
 /// set a file's favorite status (true or false)
 #[tauri::command]
 pub fn set_file_favorite(file_id: i64, is_favorite: bool) -> Result<usize, String> {
-    update_file_metadata_column(file_id, "is_favorite", &is_favorite)
-        .map_err(|e| format!("Error while setting file favorite: {}", e))
+    let updated = update_file_metadata_column(file_id, "is_favorite", &is_favorite)
+        .map_err(|e| format!("Error while setting file favorite: {}", e))?;
+    crate::t_photos_source::push_change(vec![file_id], crate::t_photos_source::AssetChange {
+        favorite: Some(is_favorite),
+        ..Default::default()
+    });
+    Ok(updated)
 }
 
 #[derive(Debug, Deserialize)]
@@ -4626,13 +4682,18 @@ pub struct BatchFileMetadataUpdate {
 
 #[tauri::command]
 pub fn batch_update_file_metadata(params: BatchFileMetadataUpdate) -> Result<usize, String> {
-    AFile::batch_update_metadata(
+    let updated = AFile::batch_update_metadata(
         &params.file_ids,
         params.is_favorite,
         params.rotate_delta,
         params.comment.as_deref(),
     )
-    .map_err(|e| format!("Error while updating file metadata: {}", e))
+    .map_err(|e| format!("Error while updating file metadata: {}", e))?;
+    crate::t_photos_source::push_change(params.file_ids, crate::t_photos_source::AssetChange {
+        favorite: params.is_favorite,
+        ..Default::default()
+    });
+    Ok(updated)
 }
 
 // xmp
@@ -5007,6 +5068,27 @@ pub fn index_faces(
         cluster_epsilon,
         rescan.unwrap_or(false),
     )
+}
+
+/// "Scan videos": sample frames from every unscanned standalone video for scene search,
+/// concert tagging and named-person face matching (separate from the photo face scan).
+#[tauri::command]
+pub fn index_videos(app_handle: tauri::AppHandle, state: State<t_video_scan::VideoScanState>) -> Result<(), String> {
+    t_video_scan::start(app_handle, (*state).clone())
+}
+
+#[tauri::command]
+pub fn cancel_video_scan(state: State<t_video_scan::VideoScanState>) {
+    t_video_scan::cancel(&state);
+}
+
+/// (is_running, progress while running, library video stats)
+#[tauri::command]
+pub fn get_video_scan_status(
+    state: State<t_video_scan::VideoScanState>,
+) -> Result<(bool, Option<t_video_scan::VideoScanProgress>, t_video_scan::VideoScanStats), String> {
+    let (running, progress) = t_video_scan::status(&state);
+    Ok((running, progress, t_video_scan::stats()?))
 }
 
 /// get face indexing stats

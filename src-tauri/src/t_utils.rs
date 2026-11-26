@@ -436,6 +436,9 @@ impl FileNode {
 
     /// Read folders from a path and build a FileNode
     pub fn build_nodes(path: &str, is_recursive: bool, sort: i64) -> Result<Self, String> {
+        if crate::t_photos_source::is_photos_path(path) {
+            return Self::build_catalog_nodes(path, is_recursive, sort);
+        }
         let root_path = Path::new(&path);
 
         // Check if the path exists and is a directory
@@ -518,6 +521,11 @@ impl FileNode {
             Self::hydrate_subfolder_states(&mut nodes);
         }
 
+        Self::sort_nodes(&mut nodes, sort);
+        Ok(nodes)
+    }
+
+    fn sort_nodes(nodes: &mut [Self], sort: i64) {
         match sort {
             1 => nodes.sort_by(|a, b| {
                 natural_sort_key(&b.name.to_lowercase())
@@ -540,7 +548,48 @@ impl FileNode {
                     .cmp(&natural_sort_key(&b.name.to_lowercase()))
             }),
         }
-        Ok(nodes)
+    }
+
+    /// Apple Photos-backed albums have no directories on disk; their folder
+    /// tree comes from the catalog.
+    fn build_catalog_nodes(path: &str, is_recursive: bool, sort: i64) -> Result<Self, String> {
+        let folders: Vec<String> = AFolder::get_all()?
+            .into_iter()
+            .map(|folder| folder.path)
+            .filter(|folder| folder == path || folder.starts_with(&format!("{path}/")))
+            .collect();
+        if folders.is_empty() {
+            return Err(format!("Path does not exist: {}", path));
+        }
+        fn children(parent: &str, folders: &[String], is_recursive: bool, sort: i64) -> Vec<FileNode> {
+            let prefix = format!("{parent}/");
+            let mut names: Vec<&str> = folders
+                .iter()
+                .filter_map(|folder| folder.strip_prefix(&prefix))
+                .filter_map(|rest| rest.split('/').next())
+                .filter(|name| !name.is_empty())
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            let mut nodes: Vec<FileNode> = names
+                .into_iter()
+                .map(|name| {
+                    let child = format!("{prefix}{name}");
+                    let grandchildren = children(&child, folders, is_recursive, sort);
+                    let mut node = FileNode::new(&child, true, false, None, None);
+                    node.has_subfolders = !grandchildren.is_empty();
+                    node.children = is_recursive.then_some(grandchildren);
+                    node
+                })
+                .collect();
+            FileNode::sort_nodes(&mut nodes, sort);
+            nodes
+        }
+        let mut root = FileNode::new(path, true, false, None, None);
+        let nodes = children(path, &folders, is_recursive, sort);
+        root.has_subfolders = !nodes.is_empty();
+        root.children = Some(nodes);
+        Ok(root)
     }
 
     /// Resolve direct-child state from the cache in one database query.  A
@@ -3999,6 +4048,9 @@ struct ThumbnailReadyPayload {
 }
 
 pub fn file_accessible(path: &str) -> bool {
+    if crate::t_photos_source::is_photos_path(path) {
+        return crate::t_photos_source::lookup(path).is_some();
+    }
     // Opening a cloud-only file downloads it; its metadata is enough here.
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && (is_cloud_only(&m) || std::fs::File::open(path).is_ok()))
 }
@@ -4013,7 +4065,8 @@ pub fn refresh_album_accessibility(album: &mut Album) {
 }
 
 pub fn refresh_album_accessibility_if_current(album: &mut Album, generation: u64) {
-    album.is_accessible = directory_accessible(&album.path);
+    album.is_accessible = directory_accessible(&album.path)
+        || crate::t_photos_source::is_photos_path(&album.path);
     if let Some(album_id) = album.id {
         let mut inaccessible = INACCESSIBLE_ALBUM_IDS.lock().unwrap();
         if inaccessible.generation != generation { return; }
@@ -4042,7 +4095,8 @@ pub fn refresh_all_album_accessibility(albums: &mut [Album]) {
 pub fn refresh_all_album_accessibility_if_current(albums: &mut [Album], generation: u64) {
     let mut inaccessible = HashSet::new();
     for album in albums {
-        album.is_accessible = directory_accessible(&album.path);
+        album.is_accessible = directory_accessible(&album.path)
+            || crate::t_photos_source::is_photos_path(&album.path);
         if !album.is_accessible {
             if let Some(album_id) = album.id {
                 inaccessible.insert(album_id);

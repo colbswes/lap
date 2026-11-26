@@ -943,6 +943,17 @@ pub struct EditParams {
 
 /// edit an image and save to dest file
 pub async fn edit_image(params: EditParams) -> bool {
+    if crate::t_photos_source::is_photos_path(&params.source_file_path)
+        || crate::t_photos_source::is_photos_path(&params.dest_file_path)
+    {
+        return match edit_apple_photos_image(&params).await {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("Apple Photos edit failed: {error}");
+                false
+            }
+        };
+    }
     if let Ok(img) = get_edited_image(&params).await {
         let path = Path::new(&params.dest_file_path);
         let format = match params.output_format.as_str() {
@@ -1005,6 +1016,55 @@ pub async fn edit_image(params: EditParams) -> bool {
         return true;
     }
     false
+}
+
+/// Edits involving Apple Photos: overwriting saves a revertible Photos edit,
+/// saving a copy into the Photos folder adds a new Photos item, and saving a
+/// copy elsewhere writes an ordinary file.
+async fn edit_apple_photos_image(params: &EditParams) -> Result<(), String> {
+    let img = get_edited_image(params).await?;
+    let quality = params.quality.unwrap_or(90);
+    let encode_jpeg = |img: &DynamicImage| -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality)
+            .encode_image(&img.to_rgb8())
+            .map_err(|e| e.to_string())?;
+        Ok(bytes)
+    };
+    let source = params.source_file_path.clone();
+    let dest = params.dest_file_path.clone();
+    if crate::t_photos_source::is_photos_path(&dest) {
+        let jpeg = encode_jpeg(&img)?;
+        return tauri::async_runtime::spawn_blocking(move || {
+            if dest == source {
+                return crate::t_photos_source::save_edit(&source, &jpeg);
+            }
+            // A new Photos item named like the requested copy.
+            let name = Path::new(&dest).with_extension("jpg");
+            let name = name.file_name().ok_or("Invalid file name")?;
+            let dir = std::env::temp_dir().join(format!("lap-photos-copy-{}", uuid::Uuid::new_v4().simple()));
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let temp = dir.join(name);
+            let result = fs::write(&temp, &jpeg)
+                .map_err(|e| e.to_string())
+                .and_then(|_| crate::t_photos_source::add_to_photos(&temp.to_string_lossy(), None).map(|_| ()));
+            let _ = fs::remove_dir_all(&dir);
+            result
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    // Saving a copy outside Photos: there is no original file to copy metadata from.
+    let format = match params.output_format.as_str() {
+        "png" => image::ImageFormat::Png,
+        "webp" => image::ImageFormat::WebP,
+        _ => image::ImageFormat::Jpeg,
+    };
+    if format == image::ImageFormat::Jpeg {
+        fs::write(&dest, encode_jpeg(&img)?).map_err(|e| e.to_string())
+    } else {
+        img.save_with_format(&dest, format).map_err(|e| e.to_string())
+    }
 }
 
 fn prepare_metadata_backup_path(
@@ -1321,6 +1381,12 @@ fn should_generate_preview_for_file(file_path: &str, file_type: i64) -> bool {
 }
 
 pub(crate) async fn get_editable_preview_bytes(file_path: &str) -> Result<Option<Vec<u8>>, String> {
+    if crate::t_photos_source::is_photos_path(file_path) {
+        let path = file_path.to_string();
+        return tauri::async_runtime::spawn_blocking(move || crate::t_photos_source::full_image_bytes(&path).map(Some))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     if is_preview_only_document(file_path) {
         return Ok(None);
     }
@@ -1513,6 +1579,16 @@ pub(crate) async fn load_oriented_image(
     file_path: &str,
     orientation: i32,
 ) -> Result<DynamicImage, String> {
+    if crate::t_photos_source::is_photos_path(file_path) {
+        // Photos renders the current version upright, so orientation is already applied.
+        let path = file_path.to_string();
+        return tauri::async_runtime::spawn_blocking(move || {
+            let data = crate::t_photos_source::full_image_bytes(&path)?;
+            image::load_from_memory(&data).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
     t_utils::require_local_content(Path::new(file_path)).map_err(|e| e.to_string())?;
     let file_type = t_utils::get_file_type(file_path).unwrap_or(0);
     if crate::t_affinity::is_affinity_path(file_path) {

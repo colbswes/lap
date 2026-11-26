@@ -294,8 +294,17 @@ async fn serve_request(
         return reject(stream, "403 Forbidden", keep_alive).await;
     };
     let opened = tokio::task::spawn_blocking(move || {
-        let path = path.as_ref();
-        if !path.is_absolute() || !is_allowed(path) {
+        let requested = path.as_ref().to_string_lossy().into_owned();
+        // Apple Photos items resolve to the file Photos keeps (or a cached Live Photo clip).
+        let resolved = if crate::t_photos_source::is_photos_path(&requested) {
+            let source = crate::t_photos_source::lookup(&requested).ok_or("404 Not Found")?;
+            Some(crate::t_photos_source::media_path(&source).ok().flatten().ok_or("404 Not Found")?)
+        } else {
+            None
+        };
+        let trusted = resolved.is_some();
+        let path = resolved.as_deref().unwrap_or(path.as_ref());
+        if !path.is_absolute() || (!trusted && !is_allowed(path)) {
             return Err("403 Forbidden");
         }
         let metadata = std::fs::metadata(path).map_err(|_| "404 Not Found")?;

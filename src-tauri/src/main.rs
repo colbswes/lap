@@ -18,6 +18,7 @@ mod t_ai;
 mod t_artists;
 mod t_ai_png;
 mod t_apple_photos;
+mod t_photos_source;
 mod t_batch_rename;
 mod t_cluster;
 mod t_cmds;
@@ -53,6 +54,7 @@ mod t_cache_storage;
 mod t_startup;
 mod t_utils;
 mod t_video;
+mod t_video_scan;
 
 /// The main function is the entry point for the Tauri application.
 #[tokio::main]
@@ -116,6 +118,7 @@ async fn main() {
                 phase: "indexing".to_string(),
             }),
         )))
+        .manage(t_video_scan::VideoScanState::default())
         .manage(t_dedup::DedupState::default())
         .manage(t_similar::SimilarState::default())
         .manage(std::sync::Arc::new(t_apple_photos::ApplePhotosExportState::default()))
@@ -241,13 +244,14 @@ async fn main() {
             t_cmds::get_library_info,
             t_cmds::save_library_state,
             t_cmds::set_hidden_filters,
-            t_cmds::check_apple_photos_export_ready,
-            t_cmds::run_apple_photos_export,
-            t_cmds::cancel_apple_photos_export,
+            t_photos_source::photos_source_status,
+            t_photos_source::photos_source_connect,
+            t_photos_source::photos_source_sync,
+            t_photos_source::photos_source_revision,
             t_cmds::list_apple_shared_albums,
             t_cmds::get_apple_shared_album_photos,
             t_cmds::open_apple_photos_app,
-            t_cmds::set_sync_delete_to_apple_photos,
+            t_cmds::get_apple_shared_photo_preview,
             t_cmds::get_library_state,
             t_cmds::get_current_library_state,
             // album
@@ -439,6 +443,9 @@ async fn main() {
             t_cmds::search_similar_images,
             // person (face recognition)
             t_cmds::index_faces,
+            t_cmds::index_videos,
+            t_cmds::cancel_video_scan,
+            t_cmds::get_video_scan_status,
             t_cmds::cancel_face_index,
             t_cmds::reset_faces,
             t_cmds::is_face_indexing,

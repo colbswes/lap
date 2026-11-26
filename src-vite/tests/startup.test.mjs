@@ -90,6 +90,46 @@ test('language configuration changes only after messages load; latest choice win
   assert.equal(f.i18n.global.getLocaleMessage('de').title, 'de');
 });
 
+test('Events defaults off and preserves only an explicit choice or the previously open Events view', async () => {
+  const f = await fixture();
+  const storeModule = new vm.SourceTextModule(storeSource, { context: f.context });
+  const sidebar = { ALBUM: 1, EVENT: 9 };
+  await storeModule.link(specifier => {
+    if (specifier === 'pinia') return f.synthetic({ defineStore: (_name, options) => options });
+    if (specifier === '@/common/i18n') return f.module;
+    if (specifier === '@/common/fileInfoFields') return f.synthetic({ defaultFileInfoFields });
+    return f.synthetic({ SIDEBAR: sidebar, MAP_MARKER_SIZES: [10, 20] });
+  });
+  await storeModule.evaluate();
+  const options = storeModule.namespace.useConfigStore;
+  const { deserialize } = options.persist.serializer;
+  assert.equal(options.state().settings.showEvents, false);
+  for (const [sidebarIndex, settings, expected] of [
+    [sidebar.ALBUM, {}, false],
+    [sidebar.EVENT, {}, true],
+    [sidebar.EVENT, { showEvents: false }, false],
+    [sidebar.ALBUM, { showEvents: true }, true],
+  ]) {
+    const stored = JSON.stringify({ main: { sidebarIndex }, settings });
+    assert.equal(deserialize(stored).settings.showEvents, expected);
+  }
+});
+
+test('turning off Events hides its sidebar button and leaves the Events view', async () => {
+  const home = await readFile(new URL('../src/views/Home.vue', import.meta.url), 'utf8');
+  assert.match(home, /index: SIDEBAR\.EVENT,[^\n]+hidden: !config\.settings\.showEvents/);
+  const start = home.indexOf('watch([() => config.settings.showEvents');
+  const end = home.indexOf('watch(() => config.settings.face.enabled', start);
+  assert.ok(start >= 0 && end > start);
+  const sidebar = { ALBUM: 1, EVENT: 9 };
+  const config = ref({ settings: { showEvents: true }, main: { sidebarIndex: sidebar.EVENT } }).value;
+  new Function('watch', 'config', 'SIDEBAR', home.slice(start, end))(watch, config, sidebar);
+  assert.equal(config.main.sidebarIndex, sidebar.EVENT);
+  config.settings.showEvents = false;
+  await nextTick();
+  assert.equal(config.main.sidebarIndex, sidebar.ALBUM);
+});
+
 test('first-content readiness waits for a paint and emits only once', async () => {
   const content = await readFile(new URL('../src/components/Content.vue', import.meta.url), 'utf8');
   const start = content.indexOf('const emit = defineEmits<{ startupReady: [] }>();');

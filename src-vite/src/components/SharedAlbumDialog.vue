@@ -15,14 +15,6 @@
           <IconExternal class="w-3.5 h-3.5" />
           {{ $t('apple_photos.shared_album_open_photos') }}
         </button>
-        <button
-          type="button"
-          class="btn btn-xs btn-primary text-[11px]"
-          @click="handleImportAlbum"
-        >
-          <IconDownload class="w-3.5 h-3.5" />
-          {{ $t('apple_photos.shared_album_import') }}
-        </button>
       </div>
     </template>
 
@@ -124,7 +116,7 @@
           >
             <img
               v-if="photo.previewPath"
-              :src="convertFileSrc(photo.previewPath)"
+              :src="photo.previewPath"
               :alt="photo.filename"
               loading="lazy"
               decoding="async"
@@ -155,11 +147,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import { useUIStore } from '@/stores/uiStore';
 import { getAppleSharedAlbumPhotos, openApplePhotosApp } from '@/common/api';
-import { IconCloud, IconDownload, IconExternal, IconLeft, IconRight } from '@/common/icons';
+import { IconCloud, IconExternal, IconLeft, IconRight } from '@/common/icons';
 import ModalDialog from '@/components/ModalDialog.vue';
 
 export interface SharedAlbumSummary {
@@ -176,7 +168,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void;
-  (e: 'import-album', album: SharedAlbumSummary): void;
 }>();
 
 const uiStore = useUIStore();
@@ -191,11 +182,21 @@ const selectedPhoto = computed(() =>
     : null
 );
 
+// Previews arrive as data URLs from Photos; the large one is fetched (from iCloud if needed) on selection.
+const largePreviews = ref<Record<string, string>>({});
+watch(selectedPhoto, async item => {
+  if (!item || item.isMovie || largePreviews.value[item.uuid]) return;
+  try {
+    const url = await invoke<string | null>('get_apple_shared_photo_preview', { id: item.uuid });
+    if (url) largePreviews.value = { ...largePreviews.value, [item.uuid]: url };
+  } catch (error) {
+    console.error('Failed to load the Shared Album preview:', error);
+  }
+});
 const selectedPhotoUrl = computed(() => {
   const item = selectedPhoto.value;
   if (!item) return '';
-  const path = (!item.isMovie && item.originalPath) ? item.originalPath : item.previewPath;
-  return path ? convertFileSrc(path) : '';
+  return largePreviews.value[item.uuid] || item.previewPath || '';
 });
 
 function formattedDate(iso: string | null | undefined): string {
@@ -228,10 +229,6 @@ function handleKeyDown(event: KeyboardEvent) {
 
 async function handleOpenInPhotos() {
   await openApplePhotosApp();
-}
-
-function handleImportAlbum() {
-  emit('import-album', props.album);
 }
 
 function handleClose() {

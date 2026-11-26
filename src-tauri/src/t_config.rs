@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -74,21 +73,6 @@ static HIDDEN_FILTERS: RwLock<HiddenFilters> = RwLock::new(HiddenFilters {
     person_ids: Vec::new(),
     smart_albums: Vec::new(),
 });
-static SYNC_DELETE_TO_APPLE_PHOTOS: AtomicBool = AtomicBool::new(true);
-
-pub fn sync_delete_to_apple_photos() -> bool {
-    SYNC_DELETE_TO_APPLE_PHOTOS.load(AtomicOrdering::SeqCst)
-}
-
-pub fn set_sync_delete_to_apple_photos(enabled: bool) -> Result<bool, String> {
-    update_app_config(|config| {
-        config.sync_delete_to_apple_photos = enabled;
-        Ok(())
-    })?;
-    SYNC_DELETE_TO_APPLE_PHOTOS.store(enabled, AtomicOrdering::SeqCst);
-    Ok(enabled)
-}
-
 pub fn current_library_id() -> Result<String, String> {
     if let Some(id) = CURRENT_LIBRARY_ID.read().map_err(|e| e.to_string())?.clone() {
         return Ok(id);
@@ -132,7 +116,6 @@ pub fn hidden_filters() -> HiddenFilters {
 }
 
 fn sync_hidden_filters_from_config(config: &AppConfig) {
-    SYNC_DELETE_TO_APPLE_PHOTOS.store(config.sync_delete_to_apple_photos, AtomicOrdering::SeqCst);
     let filters = config
         .libraries
         .iter()
@@ -575,14 +558,8 @@ pub struct AppConfig {
     pub db_storage_dir: Option<String>,
     #[serde(default)]
     pub thumbnail_cache_dir: Option<String>,
-    #[serde(default = "default_sync_delete_to_apple_photos")]
-    pub sync_delete_to_apple_photos: bool,
     pub current_library_id: String,
     pub libraries: Vec<Library>,
-}
-
-fn default_sync_delete_to_apple_photos() -> bool {
-    true
 }
 
 fn default_last_selected_item_index() -> i64 {
@@ -597,7 +574,6 @@ impl Default for AppConfig {
             last_selected_item_index: default_last_selected_item_index(),
             db_storage_dir: None,
             thumbnail_cache_dir: None,
-            sync_delete_to_apple_photos: default_sync_delete_to_apple_photos(),
             current_library_id: "default".to_string(),
             libraries: vec![Library {
                 id: "default".to_string(),
@@ -923,7 +899,6 @@ fn recover_app_config_from_library_dbs() -> Result<AppConfig, String> {
         last_selected_item_index: default_last_selected_item_index(),
         db_storage_dir: None,
         thumbnail_cache_dir: None,
-        sync_delete_to_apple_photos: default_sync_delete_to_apple_photos(),
         current_library_id,
         libraries,
     })

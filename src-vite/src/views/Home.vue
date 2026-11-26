@@ -178,19 +178,10 @@
       @cancel="showManageLibraries = false"
     />
 
-    <!-- Apple Photos Import Dialog (macOS) -->
-    <ApplePhotosImportDialog
-      v-if="showApplePhotosImportDialog"
-      :initialPreset="applePhotosImportPreset"
-      @imported="void checkLibraryEmpty()"
-      @close="closeApplePhotosImportDialog"
-    />
-
     <!-- Apple Shared Album Preview Dialog (macOS) -->
     <SharedAlbumDialog
       v-if="activeSharedAlbum"
       :album="activeSharedAlbum"
-      @import-album="handleImportFromSharedAlbum"
       @close="activeSharedAlbum = null"
     />
   </div>
@@ -230,7 +221,8 @@ import TButton from '@/components/TButton.vue';
 import Content from '@/components/Content.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import CollectionTray from '@/components/CollectionTray.vue';
-const ApplePhotosImportDialog = defineAsyncComponent(() => import('@/components/ApplePhotosImportDialog.vue'));
+import { applePhotosConnection, connectApplePhotos, refreshApplePhotosConnection, syncApplePhotos } from '@/common/applePhotosConnection';
+import { useToast } from '@/common/toast';
 const SharedAlbumDialog = defineAsyncComponent(() => import('@/components/SharedAlbumDialog.vue'));
 const ManageLibraries = defineAsyncComponent(() => import('@/components/ManageLibraries.vue'));
 import { isTextEditable } from '@/common/textSelectAll';
@@ -287,7 +279,7 @@ const checkLibraryEmpty = async () => {
 };
 
 /// i18n
-const { locale, messages } = useI18n();
+const { t, locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 
 const uiStore = useUIStore();
@@ -368,29 +360,27 @@ const currentLibrary = computed(() =>
 
 // Manage Libraries dialog state
 const showManageLibraries = ref(false);
-const showApplePhotosImportDialog = ref(false);
-const applePhotosImportPreset = ref<any>(null);
 const activeSharedAlbum = ref<any>(null);
 const pendingSmartAlbumDraft = ref<any>(null);
 
-function closeApplePhotosImportDialog() {
-  showApplePhotosImportDialog.value = false;
-  applePhotosImportPreset.value = null;
+async function requestConnectApplePhotos() {
+  if (!isMac || applePhotosConnection.albumId) return;
+  const toast = useToast();
+  toast.info(t('apple_photos.connecting'));
+  try {
+    const report = await connectApplePhotos(t('apple_photos.album_name'));
+    await checkLibraryEmpty();
+    toast.success(t('apple_photos.connected', { count: report?.added ?? 0 }));
+  } catch (error) {
+    console.error('Failed to connect Apple Photos:', error);
+    toast.error(String(error));
+  }
 }
 
-function handleImportFromSharedAlbum(album: any) {
-  const safeFolder = String(album?.title || 'Shared-Album')
-    .replace(/[\/:*?"<>|]/g, '-')
-    .trim() || 'Shared-Album';
-  activeSharedAlbum.value = null;
-  applePhotosImportPreset.value = {
-    album: album?.title || '',
-    dest: `~/Pictures/Lap-Shared/${safeFolder}`,
-    excludeShared: false,
-    downloadMissing: true,
-  };
-  showApplePhotosImportDialog.value = true;
-}
+// Photos reports changes through a cheap revision counter; sync only when it moves.
+const syncApplePhotosOnFocus = () => { void syncApplePhotos(); };
+let applePhotosSyncTimer: ReturnType<typeof setInterval> | null = null;
+
 const showDesktopTitleBar = isWin || isLinux;
 
 /// Splitter for resizing the left pane
@@ -404,7 +394,7 @@ let unlistenOpenAbout: (() => void) | null = null;
 let unlistenAlbumsRefreshed: (() => void) | null = null;
 let unlistenAddAlbumRequested: (() => void) | null = null;
 let unlistenEditAlbumRequested: (() => void) | null = null;
-let unlistenImportApplePhotos: (() => void) | null = null;
+let unlistenConnectApplePhotos: (() => void) | null = null;
 let unlistenOpenSharedAlbum: (() => void) | null = null;
 let unlistenCreateSmartAlbumDraft: (() => void) | null = null;
 // Native Edit menu "Select All" routes to the photo selection via the backend event.
@@ -431,7 +421,7 @@ const buttons = computed(() =>  [
   { index: SIDEBAR.SEARCH, icon: IconSearch, component: ImageSearch, text: localeMsg.value.sidebar.search },
   { index: SIDEBAR.CALENDAR, icon: IconCalendarDay, component: Calendar, text: localeMsg.value.sidebar.calendar },
   { index: SIDEBAR.TAG, icon: IconTag, component: Tag, text: localeMsg.value.sidebar.tag },
-  { index: SIDEBAR.EVENT, icon: IconFestival, component: EventList, text: localeMsg.value.sidebar.events, order: 6.5 },
+  { index: SIDEBAR.EVENT, icon: IconFestival, component: EventList, text: localeMsg.value.sidebar.events, order: 6.5, hidden: !config.settings.showEvents },
   { index: SIDEBAR.PERSON, icon: IconPerson, component: Person, text: localeMsg.value.sidebar.people, hidden: !config.settings.face.enabled },
   { index: SIDEBAR.LOCATION, icon: IconLocation, component: Location, text: localeMsg.value.sidebar.location },
   { index: SIDEBAR.CAMERA, icon: IconCamera, component: Camera, text: localeMsg.value.sidebar.camera },
@@ -451,6 +441,12 @@ const visibleButtons = computed(() =>
     .filter(item => !item.hidden)
     .sort((a, b) => ((a as any).order ?? a.index) - ((b as any).order ?? b.index))
 );
+
+watch([() => config.settings.showEvents, () => config.main.sidebarIndex], ([enabled, index]) => {
+  if (!enabled && index === SIDEBAR.EVENT) {
+    config.main.sidebarIndex = SIDEBAR.ALBUM;
+  }
+}, { immediate: true });
 
 watch(() => config.settings.face.enabled, (enabled) => {
   if (!enabled && config.main.sidebarIndex === SIDEBAR.PERSON) {
@@ -504,12 +500,10 @@ const libraryMenuItems = computed(() => {
     action: () => {}
   });
   if (isMac) {
-    items.push({
-      label: localeMsg.value.apple_photos?.menu_label || 'Import from Apple Photos…',
-      action: () => {
-        showApplePhotosImportDialog.value = true;
-      }
-    });
+    // Disconnecting removes the connected folder; AlbumList owns that flow.
+    items.push(applePhotosConnection.albumId
+      ? { label: t('apple_photos.disconnect'), action: () => { void emit('disconnect-apple-photos-requested'); } }
+      : { label: t('apple_photos.connect'), action: () => { void requestConnectApplePhotos(); } });
   }
   items.push({
     label: localeMsg.value.menu.library.manage,
@@ -573,12 +567,14 @@ onMounted(async () => {
     (panelRef.value as any)?.openAlbumEdit?.(albumId);
   });
 
-  unlistenImportApplePhotos = await listen('import-apple-photos-requested', (event: any) => {
-    if (isMac) {
-      applePhotosImportPreset.value = event?.payload || null;
-      showApplePhotosImportDialog.value = true;
-    }
+  unlistenConnectApplePhotos = await listen('connect-apple-photos-requested', () => {
+    void requestConnectApplePhotos();
   });
+  if (isMac) {
+    void refreshApplePhotosConnection().then(id => { if (id) void syncApplePhotos(); });
+    window.addEventListener('focus', syncApplePhotosOnFocus);
+    applePhotosSyncTimer = setInterval(syncApplePhotosOnFocus, 15_000);
+  }
 
   unlistenOpenSharedAlbum = await listen('open-apple-shared-album', (event: any) => {
     if (isMac && event?.payload?.uuid) {
@@ -635,8 +631,10 @@ onBeforeUnmount(() => {
   unlistenAddAlbumRequested = null;
   unlistenEditAlbumRequested?.();
   unlistenEditAlbumRequested = null;
-  unlistenImportApplePhotos?.();
-  unlistenImportApplePhotos = null;
+  window.removeEventListener('focus', syncApplePhotosOnFocus);
+  if (applePhotosSyncTimer) clearInterval(applePhotosSyncTimer);
+  unlistenConnectApplePhotos?.();
+  unlistenConnectApplePhotos = null;
   unlistenOpenSharedAlbum?.();
   unlistenOpenSharedAlbum = null;
   unlistenCreateSmartAlbumDraft?.();
@@ -716,6 +714,7 @@ const doSwitchLibrary = async (libraryId: string) => {
     await libConfig.reload();
     appConfig.value = await getAppConfig();
     libraryVersion.value++;
+    if (isMac) void refreshApplePhotosConnection();
     // Settle the corruption/empty state before notifying, so `library-switched` listeners see a
     // resolved databaseCorrupted (matches onManageLibrariesOk's ordering).
     await checkLibraryEmpty();
@@ -742,6 +741,7 @@ const onManageLibrariesOk = async () => {
       // The backend has already switched; reload in-place.
       await libConfig.reload();
       libraryVersion.value++;
+      if (isMac) void refreshApplePhotosConnection();
       await checkLibraryEmpty();
       await emit('library-switched');
     } finally {

@@ -24,12 +24,11 @@
               {{ $t('menu.album.add') }}
             </button>
             <button
-              v-if="isMac"
+              v-if="isMac && !applePhotosConnection.albumId"
               class="btn btn-ghost btn-sm rounded-box border border-base-content/15"
-              @click="requestApplePhotosImport"
+              @click="requestApplePhotosConnection"
             >
-              <IconDownload class="w-4 h-4" />
-              {{ $t('apple_photos.menu_label') }}
+              {{ $t('apple_photos.connect') }}
             </button>
           </div>
         </div>
@@ -53,7 +52,8 @@ import { ref, onMounted } from 'vue';
 import { emit as tauriEmit } from '@tauri-apps/api/event';
 import { getPackageInfo } from '@/common/api';
 import { isMac } from '@/common/utils';
-import { IconAdd, IconCollection, IconDownload, IconFolderCog, IconFolders } from '@/common/icons';
+import { applePhotosConnection } from '@/common/applePhotosConnection';
+import { IconAdd, IconCollection, IconFolderCog, IconFolders } from '@/common/icons';
 import iconLogo from '@/assets/images/icon.png';
 const appName = ref('');
 
@@ -70,7 +70,7 @@ const requestAddAlbum = () => {
   tauriEmit('add-album-requested');
 };
 
-const requestApplePhotosImport = () => {
-  tauriEmit('import-apple-photos-requested');
+const requestApplePhotosConnection = () => {
+  tauriEmit('connect-apple-photos-requested');
 };
 </script>

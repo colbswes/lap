@@ -552,7 +552,7 @@ import { useRouter } from 'vue-router';
 import { useUIStore } from '@/stores/uiStore';
 import { useI18n } from 'vue-i18n';
 import { config } from '@/common/config';
-import { isWin, isLinux, SCALE_VALUES, getFolderPath, getFileExtension, shortenFilename, getFullPath, combineFileName, getSelectOptions, getAssetSrc, getPreviewUrl, getThumbUrl, shouldUseBackendPreview } from '@/common/utils';
+import { isWin, isLinux, SCALE_VALUES, getFolderPath, getFileExtension, shortenFilename, getFullPath, combineFileName, getSelectOptions, getAssetSrc, getPreviewUrl, getThumbUrl, shouldUseBackendPreview, isApplePhotosPath } from '@/common/utils';
 import { editImage, checkFileExists, getFileInfo, isCloudOnlyFile } from '@/common/api';
 import { getMaxInscribedRect, clampCenterInRotatedRect, maxResizeT } from '@/common/geometry';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -676,6 +676,7 @@ const isPortraitForRotation = (width: number, height: number, rotation: number) 
   return normalized % 180 !== 0 ? width > height : height > width;
 };
 const usesBackendPreview = computed(() =>
+  isApplePhotosPath(fileInfo.value?.file_path || '') ||
   shouldUseBackendPreview(
     fileInfo.value?.name || fileInfo.value?.file_path || '',
     Number(fileInfo.value?.file_type || 0)
@@ -1128,6 +1129,8 @@ const combinedFormatOptions = computed(() => {
 });
 
 const canOverwriteOriginal = computed(() => {
+  // Apple Photos keeps the original and stores Lap's result as a revertible edit.
+  if (isApplePhotosPath(fileInfo.value?.file_path || '')) return true;
   const ext = getFileExtension(fileInfo.value?.name || fileInfo.value?.file_path || '').toLowerCase();
   return ['jpg', 'jpeg', 'jfif', 'png', 'webp'].includes(ext);
 });

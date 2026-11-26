@@ -385,7 +385,10 @@ import {
   setThumbnailDataUrlInflight,
   openFolderDialog,
   isWithinRootPath,
+  isApplePhotosPath,
 } from '@/common/utils';
+import { ask } from '@tauri-apps/plugin-dialog';
+import { applePhotosConnection, refreshApplePhotosConnection, syncApplePhotos } from '@/common/applePhotosConnection';
 import { getAlbumQueueIndex, getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
 import { getAllAlbums, getAlbumVisibleCounts, getAllAlbumFolders, reorderAlbums, addAlbum, editAlbum, removeAlbum, getDragPayload, isDirectoryAccessible,
          fetchFolder, expandFinalFolder, getFileThumbById,
@@ -478,11 +481,9 @@ const albumPanelMenuItems = computed(() => {
     ] : []),
     ...(isMac ? [
       { label: "-", action: null },
-      {
-        label: t('apple_photos.menu_label'),
-        icon: IconDownload,
-        action: () => { void tauriEmit('import-apple-photos-requested'); },
-      },
+      applePhotosConnection.albumId
+        ? { label: t('apple_photos.disconnect'), icon: IconRemove, action: () => { void tauriEmit('disconnect-apple-photos-requested'); } }
+        : { label: t('apple_photos.connect'), icon: IconDownload, action: () => { void tauriEmit('connect-apple-photos-requested'); } },
     ] : []),
   ];
 });
@@ -1029,7 +1030,41 @@ const handleImportComplete = async () => {
 };
 
 // Get menu items for a specific album (function for lazy evaluation)
+/// Disconnecting removes the Apple Photos folder from this library. Photos keeps every item.
+const disconnectApplePhotos = async () => {
+  const albumId = applePhotosConnection.albumId || await refreshApplePhotosConnection();
+  const album = albums.value.find(item => Number(item.id) === Number(albumId));
+  if (!album) return;
+  const confirmed = await ask(t('apple_photos.disconnect_confirm'), { title: t('apple_photos.disconnect'), kind: 'warning' });
+  if (!confirmed) return;
+  selection.albumId.value = album.id;
+  await clickRemoveAlbum();
+  await refreshApplePhotosConnection();
+};
+
+/// Runs a sync now instead of waiting for the next focus or change notification.
+const syncApplePhotosNow = async () => {
+  const report: any = await syncApplePhotos(0, true);
+  if (report) useToast().success(t('apple_photos.synced', report));
+};
+
 const getMoreMenuItems = async (album: any) => {
+  const readsApplePhotos = isApplePhotosPath(album.path);
+  if (readsApplePhotos) {
+    // Apple Photos owns this folder: no disk scan or import, and removing it means disconnecting.
+    const hidden = isAlbumHidden(Number(album.id));
+    return [
+      { label: t('apple_photos.sync_now'), icon: IconUpdate, action: () => { void syncApplePhotosNow(); } },
+      { label: localeMsg.value.menu.album.edit, icon: IconEdit, action: () => openAlbumEdit(album.id) },
+      {
+        label: hidden ? t('menu.album.show') : t('menu.album.hide'),
+        icon: hidden ? IconUnhide : IconHide,
+        action: () => { void toggleAlbumHidden(album); }
+      },
+      { label: "-", action: () => {} },
+      { label: t('apple_photos.disconnect'), icon: IconRemove, action: () => { void disconnectApplePhotos(); } },
+    ];
+  }
   const isAccessible = await refreshAlbumAccess(album);
   const hidden = isAlbumHidden(Number(album.id));
   return [
@@ -1233,6 +1268,9 @@ onMounted( async () => {
     refreshFolderSearchFolders();
   }));
 
+  if (isMainPane.value) {
+    await registerAlbumListener(() => listen('disconnect-apple-photos-requested', () => { void disconnectApplePhotos(); }));
+  }
   await registerAlbumListener(() => listen('albums-refreshed', async (event: any) => {
     if (event.payload?.libraryId && event.payload.libraryId !== libConfig._libraryId) return;
     const refreshedAlbums = Array.isArray(event.payload?.albums) ? event.payload.albums : [];

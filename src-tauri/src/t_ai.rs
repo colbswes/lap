@@ -169,6 +169,17 @@ fn restore_interrupted_multilingual_model(model_dir: &Path) {
 }
 
 impl AiEngine {
+    /// Engine with the bundled default models, for tests that run real inference.
+    #[cfg(test)]
+    pub(crate) fn load_bundled_for_test() -> Self {
+        let models = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/models");
+        let mut engine = Self::new();
+        engine.vision_model = Some(Self::load_session(&models.join(t_common::AI_VISION_MODEL), "vision").unwrap());
+        engine.text_model = Some(Self::load_session(&models.join(t_common::AI_TEXT_MODEL), "text").unwrap());
+        engine.tokenizer = Some(Tokenizer::from_file(models.join(t_common::AI_TOKENIZER)).unwrap());
+        engine
+    }
+
     pub fn new() -> Self {
         Self {
             text_model: None,

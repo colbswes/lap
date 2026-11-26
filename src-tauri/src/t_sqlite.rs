@@ -1191,6 +1191,9 @@ impl AFolder {
         seen_folders: &[FolderSubfolderState],
     ) -> Result<usize, String> {
         let album = Album::get_album_by_id(album_id)?;
+        if crate::t_photos_source::is_photos_path(&album.path) {
+            return Ok(0);
+        }
         let seen_paths = seen_folders
             .iter()
             .map(|folder| folder.path.as_str())
@@ -2410,6 +2413,114 @@ const GROUP_BY_CAMERA: i64 = 6;
 const GROUP_BY_LENS: i64 = 7;
 const GROUP_BY_DATE_YEAR: i64 = 8;
 const GROUP_BY_FILE_TYPE: i64 = 9;
+
+/// What a search phrase says beyond its visual content: "videos" narrows to video,
+/// "concert"/"festival" pulls in those events (and scanned live-music clips), and an
+/// artist's name pulls in files tagged with that artist.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct SearchIntent {
+    pub videos_only: bool,
+    pub event_kinds: Vec<&'static str>,
+    pub live_music: bool,
+    pub artist_ids: Vec<i64>,
+    /// The phrase with media words removed, when any were present.
+    pub semantic_text: Option<String>,
+}
+
+impl SearchIntent {
+    const VIDEO_WORDS: &'static [&'static str] =
+        &["video", "videos", "clip", "clips", "footage", "recording", "recordings"];
+
+    pub(crate) fn parse_words(text: &str, artists: &[(i64, String)]) -> Self {
+        let lower = text.to_lowercase();
+        let words: Vec<&str> = lower
+            .split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .filter(|w| !w.is_empty())
+            .collect();
+        let has = |set: &[&str]| words.iter().any(|w| set.contains(w));
+
+        let mut intent = Self::default();
+        if has(Self::VIDEO_WORDS) {
+            intent.videos_only = true;
+            let rest: Vec<&str> = words.iter().copied().filter(|w| !Self::VIDEO_WORDS.contains(w)).collect();
+            intent.semantic_text = Some(rest.join(" "));
+        }
+        if has(&["concert", "concerts", "gig", "gigs"]) || lower.contains("live music") {
+            intent.event_kinds.push("concert");
+            intent.live_music = true;
+        }
+        if has(&["festival", "festivals"]) {
+            intent.event_kinds.push("festival");
+            intent.live_music = true;
+        }
+        // Whole-word (or whole-phrase) artist names only, so "Air" doesn't match "airport".
+        let padded = format!(" {} ", words.join(" "));
+        for (id, name) in artists {
+            let name_words: Vec<String> = name
+                .to_lowercase()
+                .split(|c: char| !c.is_alphanumeric() && c != '\'')
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect();
+            let phrase = name_words.join(" ");
+            if phrase.len() >= 3 && padded.contains(&format!(" {phrase} ")) {
+                intent.artist_ids.push(*id);
+            }
+        }
+        intent
+    }
+
+    pub(crate) fn parse(conn: &Connection, text: &str) -> Result<Self, String> {
+        if text.trim().is_empty() {
+            return Ok(Self::default());
+        }
+        let mut stmt = conn.prepare("SELECT id, name FROM aartists").map_err(|e| e.to_string())?;
+        let artists = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(Self::parse_words(text, &artists))
+    }
+
+    /// Files the library already knows match, newest first. `filters` starts with " AND".
+    pub(crate) fn matching_file_ids(&self, conn: &Connection, filters: &str) -> Result<Vec<i64>, String> {
+        let mut any = Vec::new();
+        if !self.event_kinds.is_empty() {
+            let kinds = self.event_kinds.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(",");
+            any.push(format!(
+                "EXISTS (SELECT 1 FROM acollections_files cf JOIN acollections c ON c.id = cf.collection_id
+                         WHERE cf.file_id = a.id AND c.kind IN ({kinds}))"
+            ));
+        }
+        if self.live_music {
+            any.push(format!(
+                "EXISTS (SELECT 1 FROM video_scans vs WHERE vs.file_id = a.id AND vs.concert_score >= {})",
+                t_common::VIDEO_CONCERT_THRESHOLD
+            ));
+        }
+        if !self.artist_ids.is_empty() {
+            let ids = self.artist_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+            any.push(format!("EXISTS (SELECT 1 FROM afile_artists fa WHERE fa.file_id = a.id AND fa.artist_id IN ({ids}))"));
+        }
+        if any.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT a.id FROM afiles a LEFT JOIN afolders b ON a.folder_id = b.id
+             WHERE ({}){filters}
+             ORDER BY a.taken_date DESC, a.id DESC",
+            any.join(" OR ")
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(ids)
+    }
+}
 
 /// Define the AI image search parameters struct
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -4773,6 +4884,10 @@ impl AFile {
     ) -> Result<MetadataRefresh, String> {
         let old = Self::get_file_info(file_id)?.ok_or("File not found")?;
         let path = old.file_path.as_deref().ok_or("File path missing")?;
+        if crate::t_photos_source::is_photos_path(path) {
+            // Apple Photos owns this item's metadata; there is no file to re-read.
+            return Ok(MetadataRefresh { file: old, size_delta: 0, skipped: false, warning: None });
+        }
         if !old.album_accessible {
             return Ok(MetadataRefresh {
                 file: old,
@@ -5758,6 +5873,11 @@ impl AFile {
 
     /// delete unseen files in an album (database only)
     pub fn delete_unseen_in_album(album_id: i64, current_scan_time: i64) -> Result<usize, String> {
+        // A folder walk never sees Apple Photos-backed rows; removing them would
+        // cascade away faces, tags and collections.
+        if Album::get_album_by_id(album_id).is_ok_and(|album| crate::t_photos_source::is_photos_path(&album.path)) {
+            return Ok(0);
+        }
         let mut conn = open_conn()?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let query = format!("DELETE FROM afiles AS a
@@ -7720,6 +7840,10 @@ impl AFile {
             let mut engine = state.0.lock().unwrap();
             Ok(Some(engine.encode_text(&params.search_text)?))
         } else if let Some(file_id) = params.file_id.filter(|&id| id > 0) {
+            // A scanned video is represented by the mean of its frames.
+            if let Some(mean) = Self::video_mean_embedding(file_id)? {
+                return Ok(Some(mean));
+            }
             match Self::get_embedding_by_id(file_id) {
                 Ok(emb) => Ok(Some(emb)),
                 Err(_) => {
@@ -7858,71 +7982,105 @@ impl AFile {
         Ok(embedding)
     }
 
-    /// search similar images
+    /// Mean scene embedding of a video scanned by "Scan videos", if any.
+    fn video_mean_embedding(file_id: i64) -> Result<Option<Vec<f32>>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT embed FROM video_frames WHERE file_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let blobs = stmt
+            .query_map([file_id], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let mut sum: Vec<f32> = Vec::new();
+        for blob in &blobs {
+            let v: Vec<f32> = blob.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            if sum.is_empty() {
+                sum = v;
+            } else if v.len() == sum.len() {
+                sum.iter_mut().zip(v).for_each(|(a, b)| *a += b);
+            }
+        }
+        Ok((!sum.is_empty()).then_some(sum))
+    }
+
+    /// search similar images (and scanned videos, by their best-matching frame)
     pub fn search_similar_images(
         state: &State<t_ai::AiState>,
-        params: ImageSearchParams,
+        mut params: ImageSearchParams,
     ) -> Result<Vec<Self>, String> {
-        // 1. Determine Target Embedding
-        let embedding_opt = Self::get_query_embedding(state, &params)?;
-        let embedding =
-            embedding_opt.ok_or_else(|| "No file_id or search_text provided".to_string())?;
-
-        // 2. Perform Vector Search
         let conn = open_conn()?;
-
-        let mut query = "SELECT a.id, a.embeds
-            FROM afiles a
-            LEFT JOIN afolders b ON a.folder_id = b.id
-            WHERE a.embeds IS NOT NULL"
-            .to_string();
-
-        query.push_str(" AND ");
-        query.push_str(&Self::search_exclusion_condition("b"));
-        query.push_str(" AND ");
-        query.push_str(&Self::hidden_filters_condition(Some(&conn), "a", "b"));
-
-        query.push_str(&Self::album_filter_sql("a"));
-
-        if let Some(ft_condition) = Self::build_browser_file_type_condition(params.file_type) {
-            query.push_str(" AND ");
-            query.push_str(&ft_condition);
+        if params.search_text.trim().is_empty() && params.file_id.filter(|&id| id > 0).is_none() {
+            return Err("No file_id or search_text provided".to_string());
         }
 
-        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        // Words like "videos", "concert" or an artist's name also match what the library
+        // already knows (media type, events, scanned live-music clips, artist tags).
+        let intent = if params.file_id.is_none() {
+            SearchIntent::parse(&conn, &params.search_text)?
+        } else {
+            SearchIntent::default()
+        };
+        if intent.videos_only && params.file_type == 0 {
+            params.file_type = 2;
+        }
+        if let Some(text) = &intent.semantic_text {
+            params.search_text = text.clone();
+        }
 
-        let rows = stmt
-            .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let embeds_blob: Vec<u8> = row.get(1)?;
-                Ok((id, embeds_blob))
-            })
-            .map_err(|e| e.to_string())?;
+        let mut filters = String::new();
+        filters.push_str(" AND ");
+        filters.push_str(&Self::search_exclusion_condition("b"));
+        filters.push_str(" AND ");
+        filters.push_str(&Self::hidden_filters_condition(Some(&conn), "a", "b"));
+        filters.push_str(&Self::album_filter_sql("a"));
+        if let Some(ft_condition) = Self::build_browser_file_type_condition(params.file_type) {
+            filters.push_str(" AND ");
+            filters.push_str(&ft_condition);
+        }
 
+        let mut result_ids: Vec<i64> = intent.matching_file_ids(&conn, &filters)?;
+
+        // 1. Determine Target Embedding (none when the query was only filter words)
+        let embedding_opt = if params.search_text.trim().is_empty() && params.file_id.is_none() {
+            None
+        } else {
+            Self::get_query_embedding(state, &params)?
+        };
+
+        // 2. Perform Vector Search over photo embeddings and video frames
         let mut scores: Vec<(i64, f32)> = Vec::new();
-
-        let threshold = params.threshold.clamp(0.0, 1.0);
-        let query_norm = embedding
-            .iter()
-            .map(|value| value * value)
-            .sum::<f32>()
-            .sqrt();
-
-        // Calculate similarity
-        for row in rows {
-            let (id, embeds_blob) = row.map_err(|e| e.to_string())?;
-            let score = Self::cosine_similarity_blob(&embedding, query_norm, &embeds_blob);
-
-            if score > threshold {
-                scores.push((id, score));
+        if let Some(embedding) = embedding_opt {
+            let threshold = params.threshold.clamp(0.0, 1.0);
+            let query_norm = embedding.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let mut best: HashMap<i64, f32> = HashMap::new();
+            for sql in [
+                format!("SELECT a.id, a.embeds FROM afiles a LEFT JOIN afolders b ON a.folder_id = b.id WHERE a.embeds IS NOT NULL{filters}"),
+                format!("SELECT v.file_id, v.embed FROM video_frames v JOIN afiles a ON a.id = v.file_id LEFT JOIN afolders b ON a.folder_id = b.id WHERE 1 = 1{filters}"),
+            ] {
+                let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)))
+                    .map_err(|e| e.to_string())?;
+                for row in rows {
+                    let (id, blob) = row.map_err(|e| e.to_string())?;
+                    let score = Self::cosine_similarity_blob(&embedding, query_norm, &blob);
+                    if score > threshold {
+                        let entry = best.entry(id).or_insert(score);
+                        *entry = entry.max(score);
+                    }
+                }
             }
+            scores = best.into_iter().collect();
         }
 
         // Sort by score descending
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Fetch full file info in batches, then restore similarity order.
-        let result_ids = scores.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        // Known matches first, then visual matches; fetch in batches and restore order.
+        let mut seen: std::collections::HashSet<i64> = result_ids.iter().copied().collect();
+        result_ids.extend(scores.iter().map(|(id, _)| *id).filter(|id| seen.insert(*id)));
         let files = Self::get_files_by_ids(&result_ids)?;
         let mut files_by_id = files
             .into_iter()
@@ -8091,6 +8249,9 @@ impl AThumb {
     }
 
     fn get_source_mtime(file_path: &str) -> Option<i64> {
+        if crate::t_photos_source::is_photos_path(file_path) {
+            return crate::t_photos_source::source_mtime(file_path);
+        }
         fs::metadata(file_path)
             .ok()
             .and_then(|m| m.modified().ok())
@@ -8427,6 +8588,9 @@ impl AThumb {
         seek_percent: Option<u8>,
         force_jpeg: bool,
     ) -> Result<Option<Self>, String> {
+        if crate::t_photos_source::is_photos_path(file_path) {
+            return Self::new_from_apple_photos(file_id, file_path, orientation, thumbnail_size, library_id);
+        }
         if !t_utils::content_readable(file_path) {
             return Self::fetch_for_library(file_id, library_id);
         }
@@ -8532,6 +8696,39 @@ impl AThumb {
             )
         });
 
+        Ok(Some(Self {
+            id: None,
+            file_id,
+            error_code,
+            thumb_data,
+            thumb_key,
+            thumb_mtime,
+            thumb_size: Some(thumbnail_size as i64),
+            updated_at: Some(Self::now_ts()),
+            thumb_data_base64: None,
+        }))
+    }
+
+    /// Thumbnail pixels for an Apple Photos-backed row. Photos keeps small local
+    /// versions even for iCloud-optimized originals, so this never downloads.
+    fn new_from_apple_photos(
+        file_id: i64,
+        file_path: &str,
+        orientation: i32,
+        thumbnail_size: u32,
+        library_id: &str,
+    ) -> Result<Option<Self>, String> {
+        let Some(source) = crate::t_photos_source::lookup(file_path) else {
+            return Self::fetch_for_library(file_id, library_id);
+        };
+        let (thumb_data, error_code) = match crate::t_photos_source::thumbnail_bytes(&source, thumbnail_size) {
+            Ok(Some(data)) => (Some(data), 0),
+            Ok(None) | Err(_) => (None, 1),
+        };
+        let thumb_mtime = Some(source.modified);
+        let thumb_key = thumb_data.is_some().then(|| {
+            Self::build_thumb_key(library_id, file_id, thumbnail_size, thumb_mtime, orientation, None)
+        });
         Ok(Some(Self {
             id: None,
             file_id,
@@ -8744,7 +8941,7 @@ impl AThumb {
         let Some(path) = file.file_path.as_deref() else {
             return Ok(false);
         };
-        if !file.album_accessible || !t_utils::content_readable(path) {
+        if !file.album_accessible || !(t_utils::content_readable(path) || crate::t_photos_source::is_photos_path(path)) {
             return Ok(false);
         }
         let id = file.id.ok_or("File id missing")?;
@@ -8989,7 +9186,7 @@ impl AThumb {
             return Ok(Some(thumbnail));
         }
         if force_regenerate {
-            return Ok(if t_utils::content_readable(file_path) { None } else { Some(thumbnail) });
+            return Ok(if t_utils::content_readable(file_path) || crate::t_photos_source::is_photos_path(file_path) { None } else { Some(thumbnail) });
         }
         Ok((thumbnail.error_code != 0
             || thumbnail.thumb_data.as_ref().is_some_and(|data| !data.is_empty()))
@@ -9142,7 +9339,7 @@ impl AThumb {
         force_jpeg: bool,
     ) -> Result<Option<Self>, String> {
         let accessible = Self::get_file_album_id(file_id)?.is_none_or(t_utils::album_accessible);
-        if !accessible || !t_utils::content_readable(file_path) {
+        if !accessible || !(t_utils::content_readable(file_path) || crate::t_photos_source::is_photos_path(file_path)) {
             return Self::fetch(file_id);
         }
         if !force
@@ -9993,7 +10190,7 @@ impl Person {
     pub(crate) fn generate_face_thumbnail(conn: &Connection, face_id: i64) -> Result<Option<Vec<u8>>, String> {
         // 2. Get face info and file info
         let query = "
-            SELECT f.id, faces.bbox, f.width, f.height, IFNULL(f.rotate, 0), f.name, fd.path, IFNULL(f.file_type, 1)
+            SELECT f.id, faces.bbox, f.width, f.height, IFNULL(f.rotate, 0), f.name, fd.path, IFNULL(f.file_type, 1), faces.video_ts
             FROM faces 
             JOIN afiles f ON faces.file_id = f.id
             JOIN afolders fd ON f.folder_id = fd.id
@@ -10010,6 +10207,7 @@ impl Person {
                 String,
                 String,
                 i64,
+                Option<u64>,
             ),
             _,
         > = conn.query_row(query, params![face_id], |row| {
@@ -10022,10 +10220,11 @@ impl Person {
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
             ))
         });
 
-        let (file_id, bbox_json, orig_w_opt, orig_h_opt, rotate, file_name, folder_path, file_type) =
+        let (file_id, bbox_json, orig_w_opt, orig_h_opt, rotate, file_name, folder_path, file_type, video_ts) =
             match row {
                 Ok(r) => r,
                 Err(_) => return Ok(None),
@@ -10045,7 +10244,12 @@ impl Person {
         let load_original = || -> Option<(image::DynamicImage, u32, u32)> {
             let path = full_path.to_string_lossy();
             if !t_utils::content_readable(&path) { return None; }
-            let data = if file_type == 2 {
+            let data = if let Some(ts) = video_ts {
+                // Found by the video scan: crop from the frame the face was detected in.
+                crate::t_video::get_video_frame_at_sync(&path, ts, t_common::VIDEO_SCAN_FRAME_SIZE)
+                    .ok()
+                    .flatten()?
+            } else if file_type == 2 {
                 crate::t_video::get_video_thumbnail_sync(&path, t_common::FACE_DECODE_SIZE, None, None)
                     .ok()
                     .flatten()?
@@ -10065,7 +10269,10 @@ impl Person {
             Some((img, w, h))
         };
 
-        let loaded = if file_type == 2 {
+        let loaded = if video_ts.is_some() {
+            // The cover thumbnail is a different frame, so the box would not line up on it.
+            load_original()
+        } else if file_type == 2 {
             load_thumbnail().or_else(load_original)
         } else {
             load_original().or_else(load_thumbnail)
@@ -11149,6 +11356,8 @@ impl Face {
         }
 
         let _ = conn.execute("DELETE FROM face_dismissals", params![]);
+        // Video faces go with the rest, so the next video scan finds them again.
+        let _ = conn.execute("DELETE FROM video_scans", params![]);
 
         if let Err(e) = conn.execute("DELETE FROM faces", params![]) {
             let _ = conn.execute("ROLLBACK", params![]);
@@ -11213,7 +11422,7 @@ impl Face {
     /// Slim face data for clustering (skips bbox JSON and timestamps to reduce memory).
     pub fn get_all_for_clustering_with_conn(conn: &Connection, kind: PersonKind) -> Result<Vec<ClusterFace>, String> {
         let mut stmt = conn
-            .prepare("SELECT id, file_id, embedding, person_id, confirmed, low_quality FROM faces WHERE kind = ?1")
+            .prepare("SELECT id, file_id, embedding, person_id, confirmed, low_quality FROM faces WHERE kind = ?1 AND video_ts IS NULL")
             .map_err(|e| e.to_string())?;
         let faces = stmt
             .query_map(params![kind.face_kind()], |row| {
@@ -11253,7 +11462,7 @@ impl Face {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
         tx.execute(
-            "UPDATE faces SET person_id = NULL WHERE kind = ?1 AND confirmed = 0 AND person_id IS NOT NULL",
+            "UPDATE faces SET person_id = NULL WHERE kind = ?1 AND confirmed = 0 AND person_id IS NOT NULL AND video_ts IS NULL",
             params![kind.face_kind()],
         )
         .map_err(|e| e.to_string())?;
@@ -12323,6 +12532,38 @@ pub(crate) fn open_conn() -> Result<PooledConn, String> {
 }
 
 /// create all tables if not exists
+/// Tables and columns used by "Scan videos" (see t_video_scan).
+pub(crate) fn ensure_video_scan_schema(conn: &Connection) -> Result<(), String> {
+    // Faces found by the video scan: second of the frame they were taken from. Clustering
+    // skips these; they are only ever matched to people the user has already named.
+    let _ = conn.execute("ALTER TABLE faces ADD COLUMN video_ts INTEGER", []);
+
+    // Video scan: one scene embedding per sampled frame, and per-video results.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS video_frames (
+            file_id INTEGER NOT NULL,
+            ts INTEGER NOT NULL,
+            embed BLOB NOT NULL,
+            PRIMARY KEY (file_id, ts),
+            FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+        )",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS video_scans (
+            file_id INTEGER PRIMARY KEY,
+            scanned_at INTEGER NOT NULL,
+            frame_count INTEGER NOT NULL,
+            concert_score REAL,
+            FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+        )",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn create_db() -> Result<(), String> {
     let _lease = t_storage::DbConnectionLease::acquire()?;
     let path = t_storage::get_current_db_path()?;
@@ -12783,6 +13024,7 @@ fn create_db_internal() -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE persons ADD COLUMN kind TEXT NOT NULL DEFAULT 'person'", []);
     conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_kind ON faces(kind)", [])
         .map_err(|e| e.to_string())?;
+    ensure_video_scan_schema(&conn)?;
 
     // Faces the user said are NOT a given person; clustering never assigns them back.
     conn.execute(
@@ -14108,6 +14350,25 @@ mod multi_tag_filter_tests {
 
 #[cfg(test)]
 mod hidden_album_tests {
+    #[test]
+    fn search_intent_reads_media_event_and_artist_words() {
+        let artists = vec![(1, "Fred again..".to_string()), (2, "Air".to_string()), (3, "MJ".to_string())];
+        let i = SearchIntent::parse_words("Concert videos", &artists);
+        assert!(i.videos_only && i.live_music);
+        assert_eq!(i.event_kinds, vec!["concert"]);
+        assert_eq!(i.semantic_text.as_deref(), Some("concert"));
+
+        let i = SearchIntent::parse_words("fred again at the festival", &artists);
+        assert!(!i.videos_only && i.semantic_text.is_none());
+        assert_eq!(i.event_kinds, vec!["festival"]);
+        assert_eq!(i.artist_ids, vec![1]);
+
+        // Whole words only, and very short names are ignored.
+        let i = SearchIntent::parse_words("airport mj", &artists);
+        assert_eq!(i, SearchIntent::default());
+        assert_eq!(SearchIntent::parse_words("Air live music", &artists).artist_ids, vec![2]);
+    }
+
     use super::*;
 
     struct HiddenFiltersGuard;
@@ -14433,6 +14694,7 @@ mod hidden_album_tests {
                 low_quality INTEGER NOT NULL DEFAULT 0,
                 kind TEXT NOT NULL DEFAULT 'face',
                 species TEXT,
+                video_ts INTEGER,
                 FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE,
                 FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE SET NULL
              );

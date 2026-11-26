@@ -63,6 +63,10 @@ export const useFileMenuItems = (
         ? (options.selectionStorageUnavailable?.value ?? options.selectionHasUnavailable?.value)
         : requiresOriginalAction(action) && options.selectionHasUnavailable?.value;
     }
+    // Apple Photos items (APPLE_PHOTOS_ROOT in applePhotos.ts) have no file: edits and deletes
+    // go to Photos, while file operations such as rename, move or reveal don't apply.
+    if (requiresOriginalAction(action) && String(target?.file_path || '').startsWith('/.lap-apple-photos/')
+      && !['edit', 'trash', 'refresh-file-info'].includes(action)) return true;
     return action === 'copy'
       ? isOriginalStorageUnavailable(target)
       : requiresOriginalAction(action) && isOriginalUnavailable(target);

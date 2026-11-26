@@ -81,7 +81,7 @@
 </template>
 
 <script setup lang="ts">
-import { GESTURE_LOCK_THRESHOLD, HORIZONTAL_NAV_THRESHOLD, PLAYBACK_DEADLINE_MS, DIRECT_PLAYBACK_TIMEOUT_MS, LOADING_OVERLAY_DELAY_MS } from '@/common/constants';
+import { GESTURE_LOCK_THRESHOLD, HORIZONTAL_NAV_THRESHOLD, PLAYBACK_DEADLINE_MS, DIRECT_PLAYBACK_TIMEOUT_MS, APPLE_PHOTOS_PLAYBACK_TIMEOUT_MS, LOADING_OVERLAY_DELAY_MS } from '@/common/constants';
 import { ref, watch, onMounted, onBeforeUnmount, computed, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
@@ -89,7 +89,7 @@ import { config } from '@/common/config';
 import { IconVideoSlash, IconVideoPlay, IconVideoReplay, IconVideoPause } from '@/common/icons';
 import videojs from 'video.js/core';
 import 'video.js/dist/video-js.min.css';
-import { getThumbUrl, getAssetSrc, isLinux, isMac, isWin } from '@/common/utils';
+import { getThumbUrl, getAssetSrc, isApplePhotosPath, isLinux, isMac, isWin } from '@/common/utils';
 import { isCloudOnlyFile, openFileWithApp } from '@/common/api';
 import zhCN from 'video.js/dist/lang/zh-CN.json';
 import {
@@ -592,7 +592,7 @@ const loadVideo = async (filePath: string, currentLoadId: number) => {
     resetLoadingUi();
     hasError.value = true;
     errorMessage.value = getFallbackErrorMessage();
-  }, PLAYBACK_DEADLINE_MS);
+  }, isApplePhotosPath(filePath) ? APPLE_PHOTOS_PLAYBACK_TIMEOUT_MS : PLAYBACK_DEADLINE_MS);
 
   loadAttemptCleanups[nextUpIndex]?.();
   if (currentLoadId !== currentLoadingId) return;
@@ -751,6 +751,14 @@ const loadVideo = async (filePath: string, currentLoadId: number) => {
       directAttemptSettled = true;
       cleanupDirectAttempt();
       if (currentLoadId !== currentLoadingId) return;
+      if (isApplePhotosPath(filePath)) {
+        // Photos serves the file in place; there is no original for Lap to transcode.
+        clearPlaybackDeadlineTimer();
+        resetLoadingUi();
+        hasError.value = true;
+        errorMessage.value = getFallbackErrorMessage();
+        return;
+      }
       try { loadPlayer.reset(); } catch { /* A stalled source may already have reset. */ }
       console.warn('[Video] Direct playback failed, preparing a compatible source...');
       loadPrepared('compatible');
@@ -782,7 +790,7 @@ const loadVideo = async (filePath: string, currentLoadId: number) => {
     loadPlayer.one('error', onError);
     loadAttemptCleanups[nextUpIndex]?.();
     loadAttemptCleanups[nextUpIndex] = cleanupDirectAttempt;
-    directLoadTimer = setTimeout(fallbackToPrepared, DIRECT_PLAYBACK_TIMEOUT_MS);
+    directLoadTimer = setTimeout(fallbackToPrepared, isApplePhotosPath(filePath) ? APPLE_PHOTOS_PLAYBACK_TIMEOUT_MS : DIRECT_PLAYBACK_TIMEOUT_MS);
     try {
       loadPlayer.src(source);
       if (!directAttemptSettled) loadPlayer.load();

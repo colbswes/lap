@@ -108,6 +108,18 @@ pub struct Detection {
 }
 
 impl FaceEngine {
+    /// Engine with the bundled face models (no pet model), for tests that run real inference.
+    #[cfg(test)]
+    pub(crate) fn load_bundled_for_test() -> Self {
+        let models = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/models");
+        let load = |name: &str| Session::builder().unwrap().commit_from_file(models.join(name)).unwrap();
+        Self {
+            detection_model: Some(load(t_common::DETECTION_MODEL)),
+            embedding_model: Some(load(t_common::EMBEDDING_MODEL)),
+            pet_model: None,
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             detection_model: None,
@@ -682,7 +694,7 @@ impl FaceEngine {
         Ok(summed.iter().map(|v| v / norm).collect())
     }
 
-    #[cfg(test)]
+    /// Faces only (no pet detection), with boxes in decoded-image pixels.
     pub fn process_image_from_bytes(
         &mut self,
         image_bytes: &[u8],

@@ -107,6 +107,8 @@ export const HORIZONTAL_NAV_THRESHOLD = 100;
 export const MOUSE_DRAG_NAV_THRESHOLD = 120;
 export const PLAYBACK_DEADLINE_MS = 30_000;
 export const DIRECT_PLAYBACK_TIMEOUT_MS = 8000;
+// Apple Photos may download a video from iCloud before the first byte arrives.
+export const APPLE_PHOTOS_PLAYBACK_TIMEOUT_MS = 300_000;
 export const LOADING_OVERLAY_DELAY_MS = 500;
 export const OVERLAY_CLICK_MOVE_TOLERANCE = 4;
 export const MAX_EXTERNAL_APPS = 5;

@@ -157,6 +157,9 @@ if (isMainWindow) {
   listen('settings-showToolTip-changed', (event) => {
     config.setShowToolTip(event.payload)
   })
+  listen('settings-showEvents-changed', ({ payload }) => {
+    if (typeof payload === 'boolean') config.settings.showEvents = payload
+  })
   listen('settings-showStatusBar-changed', (event) => {
     config.setShowStatusBar(event.payload)
   })
